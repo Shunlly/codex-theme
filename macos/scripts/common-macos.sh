@@ -91,7 +91,15 @@ seed_bundled_presets() {
   done
 }
 
-discover_codex_app() {
+runtime_discovery_error() {
+  if [ "${RUNTIME_DISCOVERY_FATAL:-false}" = "true" ]; then
+    fail "$*"
+  fi
+  printf 'Codex Dream Skin Studio: %s\n' "$*" >&2
+  return 1
+}
+
+try_discover_codex_app() {
   local candidate=""
   local identifier=""
   local executable_name=""
@@ -117,12 +125,29 @@ discover_codex_app() {
     fi
   fi
 
-  [ -n "${CODEX_BUNDLE:-}" ] || fail "Could not find the official Codex app bundle (com.openai.codex)."
-  executable_name="$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$CODEX_BUNDLE/Contents/Info.plist")"
+  if [ -z "${CODEX_BUNDLE:-}" ]; then
+    runtime_discovery_error "Could not find the official Codex app bundle (com.openai.codex)."
+    return 1
+  fi
+  if ! executable_name="$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$CODEX_BUNDLE/Contents/Info.plist" 2>/dev/null)"; then
+    runtime_discovery_error "Could not read the official Codex app executable name."
+    return 1
+  fi
   CODEX_EXE="$CODEX_BUNDLE/Contents/MacOS/$executable_name"
-  CODEX_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$CODEX_BUNDLE/Contents/Info.plist")"
-  [ -x "$CODEX_EXE" ] || fail "Codex executable is missing: $CODEX_EXE"
+  if ! CODEX_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$CODEX_BUNDLE/Contents/Info.plist" 2>/dev/null)"; then
+    runtime_discovery_error "Could not read the official Codex app version."
+    return 1
+  fi
+  if [ ! -x "$CODEX_EXE" ]; then
+    runtime_discovery_error "Codex executable is missing: $CODEX_EXE"
+    return 1
+  fi
   export CODEX_BUNDLE CODEX_EXE CODEX_VERSION
+}
+
+discover_codex_app() {
+  local RUNTIME_DISCOVERY_FATAL="true"
+  try_discover_codex_app
 }
 
 codesign_team_id() {
@@ -130,37 +155,72 @@ codesign_team_id() {
     | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}'
 }
 
-require_macos_runtime() {
-  [ "$(/usr/bin/uname -s)" = "Darwin" ] || fail "This launcher requires macOS."
-  [ -n "${CODEX_BUNDLE:-}" ] || fail "Discover the Codex app before validating its runtime."
+try_require_macos_runtime() {
+  if [ "$(/usr/bin/uname -s)" != "Darwin" ]; then
+    runtime_discovery_error "This launcher requires macOS."
+    return 1
+  fi
+  if [ -z "${CODEX_BUNDLE:-}" ]; then
+    runtime_discovery_error "Discover the Codex app before validating its runtime."
+    return 1
+  fi
 
   RUNTIME_NODE="$CODEX_BUNDLE/Contents/Resources/cua_node/bin/node"
-  [ -x "$RUNTIME_NODE" ] || fail "The signed Node.js runtime bundled with Codex was not found: $RUNTIME_NODE"
-  /usr/bin/codesign --verify --deep --strict "$CODEX_BUNDLE" >/dev/null 2>&1 \
-    || fail "The Codex app signature is not valid. Restore or reinstall the official app before continuing."
-  /usr/bin/codesign --verify --strict "$RUNTIME_NODE" >/dev/null 2>&1 \
-    || fail "The Node.js runtime bundled with Codex failed code-signature validation."
+  if [ ! -x "$RUNTIME_NODE" ]; then
+    runtime_discovery_error "The signed Node.js runtime bundled with Codex was not found: $RUNTIME_NODE"
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --deep --strict "$CODEX_BUNDLE" >/dev/null 2>&1; then
+    runtime_discovery_error "The Codex app signature is not valid. Restore or reinstall the official app before continuing."
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --strict "$RUNTIME_NODE" >/dev/null 2>&1; then
+    runtime_discovery_error "The Node.js runtime bundled with Codex failed code-signature validation."
+    return 1
+  fi
 
   CODEX_TEAM_ID="$(codesign_team_id "$CODEX_BUNDLE")"
   NODE_TEAM_ID="$(codesign_team_id "$RUNTIME_NODE")"
-  [ "$CODEX_TEAM_ID" = "$EXPECTED_CODEX_TEAM_ID" ] \
-    || fail "Unexpected Codex signing team: ${CODEX_TEAM_ID:-missing}."
-  [ "$NODE_TEAM_ID" = "$CODEX_TEAM_ID" ] \
-    || fail "The bundled Node.js signer does not match the Codex app signer."
+  if [ "$CODEX_TEAM_ID" != "$EXPECTED_CODEX_TEAM_ID" ]; then
+    runtime_discovery_error "Unexpected Codex signing team: ${CODEX_TEAM_ID:-missing}."
+    return 1
+  fi
+  if [ "$NODE_TEAM_ID" != "$CODEX_TEAM_ID" ]; then
+    runtime_discovery_error "The bundled Node.js signer does not match the Codex app signer."
+    return 1
+  fi
 
   local machine_arch
   local node_major
   machine_arch="$(/usr/bin/uname -m)"
-  /usr/bin/file "$RUNTIME_NODE" | /usr/bin/grep -q "$machine_arch" \
-    || fail "The Codex Node.js runtime does not match this Mac architecture ($machine_arch)."
-  NODE_VERSION="$($RUNTIME_NODE --version)"
+  if ! /usr/bin/file "$RUNTIME_NODE" | /usr/bin/grep -q "$machine_arch"; then
+    runtime_discovery_error "The Codex Node.js runtime does not match this Mac architecture ($machine_arch)."
+    return 1
+  fi
+  if ! NODE_VERSION="$($RUNTIME_NODE --version 2>/dev/null)"; then
+    runtime_discovery_error "Could not execute the Codex bundled Node.js runtime."
+    return 1
+  fi
   node_major="${NODE_VERSION#v}"
   node_major="${node_major%%.*}"
-  case "$node_major" in ''|*[!0-9]*) fail "Could not parse bundled Node.js version: $NODE_VERSION" ;; esac
-  [ "$node_major" -ge 20 ] || fail "Codex bundled Node.js $NODE_VERSION is too old; version 20 or newer is required."
+  case "$node_major" in
+    ''|*[!0-9]*)
+      runtime_discovery_error "Could not parse bundled Node.js version: $NODE_VERSION"
+      return 1
+      ;;
+  esac
+  if [ "$node_major" -lt 20 ]; then
+    runtime_discovery_error "Codex bundled Node.js $NODE_VERSION is too old; version 20 or newer is required."
+    return 1
+  fi
 
   NODE="$RUNTIME_NODE"
   export NODE RUNTIME_NODE NODE_VERSION CODEX_TEAM_ID NODE_TEAM_ID
+}
+
+require_macos_runtime() {
+  local RUNTIME_DISCOVERY_FATAL="true"
+  try_require_macos_runtime
 }
 
 codex_main_pids() {
@@ -329,11 +389,15 @@ wait_for_cdp() {
 
 state_field() {
   local key="$1"
-  "$NODE" -e '
-    const fs = require("node:fs");
-    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))[process.argv[2]];
-    if (value !== undefined && value !== null) process.stdout.write(String(value));
-  ' "$STATE_PATH" "$key"
+  if [ -n "${NODE:-}" ] && [ -x "$NODE" ]; then
+    "$NODE" -e '
+      const fs = require("node:fs");
+      const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))[process.argv[2]];
+      if (value !== undefined && value !== null) process.stdout.write(String(value));
+    ' "$STATE_PATH" "$key"
+  else
+    /usr/bin/plutil -extract "$key" raw -o - "$STATE_PATH"
+  fi
 }
 
 restore_runtime_context_from_state() {

@@ -22,14 +22,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-discover_codex_app
-require_macos_runtime
+CODEX_AVAILABLE="false"
+NODE_AVAILABLE="false"
+if try_discover_codex_app; then
+  CODEX_AVAILABLE="true"
+  if try_require_macos_runtime; then
+    NODE_AVAILABLE="true"
+  else
+    unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
+  fi
+elif [ "$RESTART_CODEX" = "true" ]; then
+  fail "The official Codex app is required to complete the requested restart."
+fi
+NATIVE_CONFIG_RESTORE=""
+if [ "$RESTORE_BASE_THEME" = "true" ] && [ "$NODE_AVAILABLE" != "true" ]; then
+  NATIVE_CONFIG_RESTORE="$INSTALL_ROOT/bin/dream-skin-config-restore"
+  [ -x "$NATIVE_CONFIG_RESTORE" ] \
+    || fail "Native config restore helper is missing: $NATIVE_CONFIG_RESTORE"
+fi
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
   PORT="$(state_field port)" || fail "Could not read the saved CDP port; state was preserved."
 fi
 
 CODEX_RUNNING="false"
-codex_is_running && CODEX_RUNNING="true"
+if [ "$CODEX_AVAILABLE" = "true" ]; then
+  codex_is_running && CODEX_RUNNING="true"
+fi
 if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ] \
   && [ "$CODEX_RUNNING" = "true" ] \
   && [ "$RESTART_CODEX" = "true" ] \
@@ -38,7 +56,9 @@ if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ] \
 fi
 ensure_state_root
 DEBUG_READY="false"
-verified_cdp_endpoint "$PORT" && DEBUG_READY="true"
+if [ "$CODEX_AVAILABLE" = "true" ]; then
+  verified_cdp_endpoint "$PORT" && DEBUG_READY="true"
+fi
 
 # Close before touching the watcher, state, backup, or config. Studio calls
 # pass only their explicit force authorization; legacy CLI behavior stays the
@@ -61,6 +81,8 @@ fi
 release_codex_launchd_job || true
 
 if [ "$DEBUG_READY" = "true" ]; then
+  [ "$NODE_AVAILABLE" = "true" ] \
+    || fail "The validated Codex Node.js runtime is unavailable; pass --restart-codex for a full restore."
   "$NODE" "$INJECTOR" --remove --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null \
     || fail "The live skin could not be removed and verified; restore stopped safely."
 elif [ "$CODEX_RUNNING" = "true" ] && [ "$RESTART_CODEX" = "false" ]; then
@@ -74,7 +96,11 @@ if [ "$RESTORE_BASE_THEME" = "true" ]; then
     stop_codex "$FORCE_STOP_AUTHORIZED"
     CODEX_RUNNING="false"
   fi
-  "$NODE" "$SCRIPT_DIR/theme-config.mjs" restore "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+  if [ "$NODE_AVAILABLE" = "true" ]; then
+    "$NODE" "$SCRIPT_DIR/theme-config.mjs" restore "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+  else
+    "$NATIVE_CONFIG_RESTORE" "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+  fi
 fi
 
 if [ "$RESTART_CODEX" = "true" ]; then

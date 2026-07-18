@@ -380,6 +380,8 @@ NODE=/usr/bin/true
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
 discover_codex_app() { :; }
 require_macos_runtime() { :; }
+try_discover_codex_app() { :; }
+try_require_macos_runtime() { :; }
 ensure_state_root() { printf 'ensure\n' >> "__MARKER__"; }
 state_field() { printf '9341\n'; }
 codex_is_running() { return 0; }

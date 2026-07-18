@@ -47,6 +47,14 @@ fi
 "$NODE" "$ROOT/tests/injector-bootstrap.test.mjs"
 "$NODE" "$ROOT/tests/renderer-inject.test.mjs"
 "$NODE" "$ROOT/tests/theme-stage.test.mjs"
+NODE="$NODE" "$ROOT/tests/studio-adapter.test.sh"
+
+/usr/bin/swift build --package-path "$ROOT/studio" --product dream-skin-config-restore >/dev/null
+NATIVE_CONFIG_RESTORE="$(/usr/bin/swift build --package-path "$ROOT/studio" --show-bin-path)/dream-skin-config-restore"
+[ -x "$NATIVE_CONFIG_RESTORE" ] || {
+  printf 'Native config restore helper was not built: %s\n' "$NATIVE_CONFIG_RESTORE" >&2
+  exit 1
+}
 
 # Every bundled preset must be a valid, injectable theme pack with a preset-* id.
 for preset in "$ROOT"/presets/preset-*/; do
@@ -784,6 +792,75 @@ CRLF_BACKUP="$TMP/config-crlf-backup.json"
 "$NODE" "$ROOT/scripts/theme-config.mjs" install "$CRLF_CONFIG" "$CRLF_BACKUP" >/dev/null
 "$NODE" "$ROOT/scripts/theme-config.mjs" restore "$CRLF_CONFIG" "$CRLF_BACKUP" >/dev/null
 /usr/bin/cmp -s "$CRLF_CONFIG" "$TMP/original-crlf.toml"
+
+# Complete config restore must use the installed native helper when the
+# official Codex Node runtime is unavailable.
+NATIVE_HOME="$TMP/native-restore-home"
+NATIVE_ENGINE="$NATIVE_HOME/.codex/codex-dream-skin-studio"
+NATIVE_STATE="$NATIVE_HOME/Library/Application Support/CodexDreamSkinStudio"
+/bin/mkdir -p "$NATIVE_ENGINE/bin" "$NATIVE_ENGINE/scripts" "$NATIVE_STATE" "$NATIVE_HOME/.codex"
+/bin/cp "$NATIVE_CONFIG_RESTORE" "$NATIVE_ENGINE/bin/dream-skin-config-restore"
+/bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$NATIVE_ENGINE/scripts/"
+/usr/bin/printf '%s\n' \
+  'model = "gpt-5"' \
+  '' \
+  '[desktop]' \
+  'appearanceTheme = "dream-skin"' \
+  'keepMe = "中文保留"' > "$NATIVE_HOME/.codex/config.toml"
+"$NODE" -e '
+  const fs = require("node:fs");
+  fs.writeFileSync(process.argv[1], `${JSON.stringify({
+    schemaVersion: 1,
+    platform: "darwin",
+    configPath: process.argv[2],
+    values: {
+      appearanceTheme: `appearanceTheme = "system"`,
+      appearanceDarkCodeThemeId: null,
+    },
+  })}\n`);
+' "$NATIVE_STATE/theme-backup.json" "$NATIVE_HOME/.codex/config.toml"
+/usr/bin/sed "s|__HOME__|$NATIVE_HOME|g; s|__ENGINE__|$NATIVE_ENGINE|g" \
+  > "$NATIVE_ENGINE/scripts/common-macos.sh" <<'STUB'
+INSTALL_ROOT="__ENGINE__"
+STATE_ROOT="__HOME__/Library/Application Support/CodexDreamSkinStudio"
+STATE_PATH="$STATE_ROOT/state.json"
+THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
+THEME_DIR="$STATE_ROOT/theme"
+CONFIG_PATH="__HOME__/.codex/config.toml"
+INJECTOR="$INSTALL_ROOT/scripts/injector.mjs"
+fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
+try_discover_codex_app() { return 0; }
+try_require_macos_runtime() { [ -z "${NODE+x}" ] && return 1; return 99; }
+ensure_state_root() { :; }
+state_field() { return 1; }
+codex_is_running() { return 1; }
+verified_cdp_endpoint() { return 1; }
+stop_recorded_injector() { return 0; }
+release_codex_launchd_job() { return 0; }
+launch_codex_normally() { :; }
+STUB
+/usr/bin/env -u NODE HOME="$NATIVE_HOME" \
+  "$NATIVE_ENGINE/scripts/restore-dream-skin-macos.sh" --restore-base-theme >/dev/null
+/usr/bin/grep -F -q 'appearanceTheme = "system"' "$NATIVE_HOME/.codex/config.toml"
+/usr/bin/grep -F -q 'keepMe = "中文保留"' "$NATIVE_HOME/.codex/config.toml"
+[ ! -e "$NATIVE_STATE/theme-backup.json" ]
+
+STATE_FALLBACK_HOME="$TMP/state-fallback-home"
+STATE_FALLBACK_ROOT="$STATE_FALLBACK_HOME/Library/Application Support/CodexDreamSkinStudio"
+/bin/mkdir -p "$STATE_FALLBACK_ROOT"
+/usr/bin/printf '%s\n' '{"port":9341,"injectorPid":0}' > "$STATE_FALLBACK_ROOT/state.json"
+/usr/bin/env -u NODE HOME="$STATE_FALLBACK_HOME" /bin/bash -c '
+  . "$1/scripts/common-macos.sh"
+  CODEX_BUNDLE="$2"
+  if try_require_macos_runtime 2>"$3"; then exit 1; fi
+  /usr/bin/grep -F -q "signed Node.js runtime bundled with Codex was not found" "$3"
+' _ "$ROOT" "$TMP/missing-codex.app" "$TMP/try-runtime.error"
+/usr/bin/env -u NODE HOME="$STATE_FALLBACK_HOME" /bin/bash -c '
+  . "$1/scripts/common-macos.sh"
+  type try_discover_codex_app >/dev/null
+  type try_require_macos_runtime >/dev/null
+  [ "$(state_field port)" = "9341" ]
+' _ "$ROOT"
 
 /usr/bin/env -u HOME /bin/bash -c '. "$1/scripts/common-macos.sh"; [ -n "$HOME" ] && [ "$SKIN_VERSION" = "1.2.0" ]' _ "$ROOT"
 "$ROOT/scripts/doctor-macos.sh" >/dev/null
