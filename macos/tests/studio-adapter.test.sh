@@ -6,6 +6,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 NODE="${NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 [ -x "$NODE" ] || { printf 'Codex bundled Node.js was not found: %s\n' "$NODE" >&2; exit 1; }
 
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  if (!/mdfind '\''kMDItemCFBundleIdentifier == "com\.openai\.codex"'\''/.test(source)) {
+    throw new Error("Studio status is missing the official Codex Spotlight fallback.");
+  }
+' "$ROOT/scripts/status-dream-skin-macos.sh"
+
 TMP="$(/usr/bin/mktemp -d /tmp/codex-dream-skin-studio-adapter.XXXXXX)"
 TEST_HOME="$TMP/home"
 /bin/mkdir -p "$TEST_HOME"

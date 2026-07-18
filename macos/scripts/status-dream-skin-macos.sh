@@ -132,6 +132,15 @@ official_codex_bundle_exists() {
     OFFICIAL_CODEX_EXE="$candidate/Contents/MacOS/$executable_name"
     [ -x "$OFFICIAL_CODEX_EXE" ] && return 0
   done
+  candidate="$(/usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' | /usr/bin/head -n 1)"
+  if [ -n "$candidate" ] && [ -f "$candidate/Contents/Info.plist" ]; then
+    identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$candidate/Contents/Info.plist" 2>/dev/null || true)"
+    if [ "$identifier" = "com.openai.codex" ]; then
+      executable_name="$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$candidate/Contents/Info.plist" 2>/dev/null || true)"
+      OFFICIAL_CODEX_EXE="$candidate/Contents/MacOS/$executable_name"
+      [ -x "$OFFICIAL_CODEX_EXE" ] && return 0
+    fi
+  fi
   return 1
 }
 
