@@ -40,3 +40,9 @@ error code: INVALID_REQUEST | OPERATION_BUSY | CODEX_NOT_INSTALLED | CODEX_FIRST
 Errors set `ok` to `false` and provide `error.code`, a short `error.message`, and allowed `error.recoveryActions`. Successful responses set `error` to `null`.
 
 `deleteUserThemes` is a non-envelope request option. It defaults to `false`, is valid only for `uninstall`, and returns `INVALID_REQUEST` for every other operation. Its platform spellings are `--delete-user-themes` on macOS and `-DeleteUserThemes` on Windows. Theme deletion is the final uninstall action, after restore, CDP closure, and engine cleanup eligibility have all succeeded.
+
+`restartAuthorized` and `forceAuthorized` are non-envelope request booleans and default to `false`. `restartAuthorized` permits normal quit only. Its platform spellings are `--restart-authorized` on macOS and `-RestartAuthorized` on Windows. `forceAuthorized` is valid only when `restartAuthorized` is `true` and permits verified force stop only after the normal 15-second timeout. Its platform spellings are `--force-authorized` on macOS and `-ForceAuthorized` on Windows.
+
+## Transport
+
+stdout is exactly one compact UTF-8 JSON object without BOM and no other output. Raw command output goes only to `studio-operation.log`. stderr emits only progress lines in the form `DREAM_SKIN_PROGRESS <value>`, where `<value>` is one of the fixed values: `checking`, `preparing`, `installing`, `launching`, `connecting`, `applying`, `verifying`, `pausing`, `restoring`, and `uninstalling`.
