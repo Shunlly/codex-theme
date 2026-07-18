@@ -81,7 +81,7 @@ struct ContentView: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(model.primaryOperation == nil)
+        .disabled(!model.menuState.primaryEnabled)
         .accessibilityLabel(primaryTitle)
         .help(primaryTitle)
     }
@@ -92,7 +92,7 @@ struct ContentView: View {
                 Button(action: controller.requestPauseResumeAction) {
                     Label(pauseResumeTitle, systemImage: pauseResumeOperation == .pause ? "pause.fill" : "play.fill")
                 }
-                .disabled(model.pauseResumeOperation == nil)
+                .disabled(!model.menuState.pauseResumeEnabled)
                 .accessibilityLabel(pauseResumeTitle)
                 .help(pauseResumeTitle)
                 Text("Pause may keep the managed session ready to resume.")
@@ -106,7 +106,7 @@ struct ContentView: View {
                 Button(role: .destructive, action: { controller.request(.restore) }) {
                     Label("Complete Restore", systemImage: "arrow.counterclockwise")
                 }
-                .disabled(!model.canRequest(.restore))
+                .disabled(!model.menuState.restoreEnabled)
                 .accessibilityLabel("Complete Restore")
                 .help("Complete Restore")
                 Text("Complete Restore closes it and returns Codex to the standard appearance.")
@@ -130,7 +130,7 @@ struct ContentView: View {
             Button(role: .destructive, action: { controller.request(.uninstall) }) {
                 Label("Remove Dream Skin", systemImage: "trash")
             }
-            .disabled(!model.canRequest(.uninstall))
+            .disabled(!model.menuState.isEnabled(.uninstall))
             .accessibilityLabel("Remove Dream Skin")
             .help("Remove Dream Skin")
 
