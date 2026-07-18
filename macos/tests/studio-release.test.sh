@@ -37,19 +37,61 @@ NODE="${NODE:-$(command -v node || true)}"
     offset = next;
   }
 ' "$BUILD"
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  for (const required of [
+    "O_NOFOLLOW",
+    "fs.open(filePath, FILE_OPEN_FLAGS)",
+    "handle.readFile()",
+    "sameStableStat",
+    "fs.opendir(directory)",
+    "directoryHandle.read()",
+    "finally",
+    "handle.close()",
+    "directoryHandle.close()",
+  ]) {
+    if (!source.includes(required)) throw new Error(`scanner is missing stable-handle step: ${required}`);
+  }
+' "$SCANNER"
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  const guard = source.match(/verify_tracked_regular_file\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+  if (!/case "\$index_mode" in 100644\|100755\) ;; \*\) release_input_error ;; esac/.test(guard)) {
+    throw new Error("tracked input guard does not restrict index modes to regular blobs");
+  }
+  if (!source.includes("ls-tree -r -z \"$INDEX_TREE\" -- macos/studio")) {
+    throw new Error("index mode guard does not cover every archived package entry");
+  }
+  for (const required of ["git -C \"$REPO_ROOT\" write-tree", "git -C \"$REPO_ROOT\" archive", "SNAPSHOT_PACKAGE="]) {
+    if (!source.includes(required)) throw new Error(`builder is missing index snapshot step: ${required}`);
+  }
+  const afterGuard = source.slice(source.indexOf("verify_swift_build_inputs\n") + 1);
+  if (afterGuard.includes(`--package-path "$PACKAGE"`)) {
+    throw new Error("post-guard Swift command still references the live package");
+  }
+  const snapshotReferences = source.match(/--package-path "\$SNAPSHOT_PACKAGE"/g) || [];
+  if (snapshotReferences.length !== 2) {
+    throw new Error("swift build and show-bin-path must both use the snapshot package");
+  }
+' "$BUILD"
 
 TMP="$(/usr/bin/mktemp -d /tmp/codex-dream-skin-release-test.XXXXXX)"
 MOUNT_POINT=""
 UNTRACKED_SWIFT=""
 UNTRACKED_SWIFT_SYMLINK=""
+MODE_SWIFT=""
 UNREADABLE_DIR=""
+RACE_PID=""
 cleanup() {
   if [ -n "$MOUNT_POINT" ]; then
     /usr/bin/hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1 || true
   fi
   [ -z "$UNTRACKED_SWIFT" ] || /bin/rm -f "$UNTRACKED_SWIFT"
   [ -z "$UNTRACKED_SWIFT_SYMLINK" ] || /bin/rm -f "$UNTRACKED_SWIFT_SYMLINK"
+  [ -z "$MODE_SWIFT" ] || /bin/rm -f "$MODE_SWIFT"
   [ -z "$UNREADABLE_DIR" ] || /bin/chmod 700 "$UNREADABLE_DIR" 2>/dev/null || true
+  [ -z "$RACE_PID" ] || /bin/kill -TERM "$RACE_PID" 2>/dev/null || true
+  [ -z "$RACE_PID" ] || wait "$RACE_PID" 2>/dev/null || true
   /bin/rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -100,6 +142,30 @@ UNTRACKED_SWIFT="$ROOT/macos/studio/Sources/DreamSkinStudioCore/Task10UntrackedR
 expect_build_input_rejection untracked-regular-input
 /bin/rm -f "$UNTRACKED_SWIFT"
 UNTRACKED_SWIFT=""
+
+MODE_SWIFT="$ROOT/macos/studio/Sources/DreamSkinStudioCore/Task10IndexModeGuard_$$.swift"
+/bin/cp "$ROOT/macos/studio/Sources/DreamSkinStudioCore/EngineProtocol.swift" "$MODE_SWIFT"
+ALTERNATE_INDEX="$TMP/index-mode-fixture"
+/bin/cp -P "$(/usr/bin/git -C "$ROOT" rev-parse --git-path index)" "$ALTERNATE_INDEX"
+MODE_PATH="${MODE_SWIFT#"$ROOT/"}"
+MODE_BLOB="$(/usr/bin/git -C "$ROOT" rev-parse ':macos/studio/Sources/DreamSkinStudioCore/EngineProtocol.swift')"
+/usr/bin/env GIT_INDEX_FILE="$ALTERNATE_INDEX" /usr/bin/git -C "$ROOT" update-index --add \
+  --cacheinfo "120000,$MODE_BLOB,$MODE_PATH"
+snapshot_release > "$TMP/release-before-index-mode"
+if /usr/bin/env GIT_INDEX_FILE="$ALTERNATE_INDEX" \
+  "$BUILD" --adhoc >"$TMP/index-mode.out" 2>"$TMP/index-mode.err"; then
+  printf 'Studio release builder accepted a non-regular index mode.\n' >&2
+  exit 1
+fi
+/usr/bin/printf '%s\n' \
+  'Studio build inputs must be tracked regular files matching the git index.' \
+  > "$TMP/index-mode.expected"
+/usr/bin/cmp "$TMP/index-mode.expected" "$TMP/index-mode.err"
+[ ! -s "$TMP/index-mode.out" ]
+snapshot_release > "$TMP/release-after-index-mode"
+/usr/bin/cmp "$TMP/release-before-index-mode" "$TMP/release-after-index-mode"
+/bin/rm -f "$MODE_SWIFT"
+MODE_SWIFT=""
 
 expect_scanner_failure() {
   if "$NODE" "$SCANNER" "$@" >"$TMP/scanner.out" 2>"$TMP/scanner.err"; then
@@ -195,10 +261,38 @@ expect_scanner_failure_reason 'filesystem error' \
 /bin/chmod 700 "$UNREADABLE_DIR"
 UNREADABLE_DIR=""
 
+CASE_ROOT="$TMP/file-mutation"
+make_allowed_tree "$CASE_ROOT"
+/bin/dd if=/dev/zero of="$CASE_ROOT/a-race.bin" bs=1048576 count=16 2>/dev/null
+(
+  iteration=0
+  while [ "$iteration" -lt 4000 ]; do
+    /usr/bin/touch "$CASE_ROOT/a-race.bin"
+    iteration=$((iteration + 1))
+  done
+) &
+RACE_PID="$!"
+expect_scanner_failure_reason 'filesystem changed' \
+  --root "$CASE_ROOT" --allowlist "$ALLOWLIST"
+wait "$RACE_PID"
+RACE_PID=""
+
 CASE_ROOT="$TMP/macos-absolute-path"
 make_allowed_tree "$CASE_ROOT"
 /usr/bin/printf '/Users/release-user/private/file\n' > "$CASE_ROOT/readme.txt"
 expect_scanner_failure --root "$CASE_ROOT" --allowlist "$ALLOWLIST"
+
+for template_escape in \
+  '/Users/$CURRENT_USERevil/private/file' \
+  '/Users/$CURRENT_USER /private/file' \
+  '/Users/$CURRENT_USER/private/file'
+do
+  CASE_ROOT="$TMP/template-boundary-${template_escape//[^A-Za-z0-9]/_}"
+  make_allowed_tree "$CASE_ROOT"
+  /usr/bin/printf '%s\n' "$template_escape" > "$CASE_ROOT/readme.txt"
+  expect_scanner_failure_reason 'absolute user path' \
+    --root "$CASE_ROOT" --allowlist "$ALLOWLIST"
+done
 
 CASE_ROOT="$TMP/windows-absolute-path"
 make_allowed_tree "$CASE_ROOT"

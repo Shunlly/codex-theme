@@ -1,5 +1,10 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
+
+const FILE_OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+const DIRECTORY_OPEN_FLAGS = FILE_OPEN_FLAGS | (fsConstants.O_DIRECTORY ?? 0);
+const CAN_OPEN_DIRECTORY_HANDLE = typeof fsConstants.O_DIRECTORY === "number";
 
 class ReleaseContentError extends Error {
   constructor(reason) {
@@ -17,6 +22,40 @@ async function readFilesystem(operation) {
     return await operation();
   } catch {
     reject("filesystem error");
+  }
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameStableStat(left, right) {
+  return sameIdentity(left, right)
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+async function readStableFile(filePath, pathStat) {
+  let handle;
+  try {
+    handle = await readFilesystem(() => fs.open(filePath, FILE_OPEN_FLAGS));
+    const openedStat = await readFilesystem(() => handle.stat());
+    if (!pathStat.isFile() || !openedStat.isFile() || !sameStableStat(pathStat, openedStat)) {
+      reject("filesystem changed");
+    }
+    const bytes = await readFilesystem(() => handle.readFile());
+    const descriptorAfter = await readFilesystem(() => handle.stat());
+    const pathAfter = await readFilesystem(() => fs.lstat(filePath));
+    if (
+      pathAfter.isSymbolicLink()
+      || !pathAfter.isFile()
+      || !sameStableStat(openedStat, descriptorAfter)
+      || !sameStableStat(openedStat, pathAfter)
+    ) reject("filesystem changed");
+    return bytes;
+  } finally {
+    if (handle) await readFilesystem(() => handle.close());
   }
 }
 
@@ -38,7 +77,9 @@ function parseArguments(args) {
 async function readAllowlist(file) {
   let entries;
   try {
-    entries = JSON.parse(await fs.readFile(file, "utf8"));
+    const stat = await fs.lstat(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) reject("invalid allowlist");
+    entries = JSON.parse((await readStableFile(file, stat)).toString("utf8"));
   } catch {
     reject("invalid allowlist");
   }
@@ -91,7 +132,7 @@ function isNativeExecutable(bytes) {
 }
 
 function containsUserPathText(text) {
-  const withoutRuntimeTemplate = text.replace(/\/Users\/\$CURRENT_USER(?!\/)/g, "");
+  const withoutRuntimeTemplate = text.replace(/"\/Users\/\$CURRENT_USER"/g, "");
   return /\/Users\/[^/\0\r\n]+\//.test(withoutRuntimeTemplate)
     || /C:\\Users\\[^\\\0\r\n]+\\/i.test(text);
 }
@@ -111,30 +152,70 @@ async function scan(root, allowedExecutables) {
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) reject("invalid root");
   const foundExecutables = new Set();
 
-  async function visit(directory, relativeDirectory = "") {
-    const names = await readFilesystem(() => fs.readdir(directory));
-    names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
-    for (const name of names) {
-      if (forbiddenName(name)) reject("forbidden name");
-      const relative = relativeDirectory ? `${relativeDirectory}/${name}` : name;
-      const absolute = path.join(directory, name);
-      const stat = await readFilesystem(() => fs.lstat(absolute));
-      if (stat.isSymbolicLink()) reject("symbolic link");
-      if (stat.isDirectory()) {
-        await visit(absolute, relative);
-        continue;
+  async function visit(directory, directoryStat, relativeDirectory = "") {
+    let directoryHandle;
+    let identityHandle;
+    try {
+      let openedStat = directoryStat;
+      if (CAN_OPEN_DIRECTORY_HANDLE) {
+        identityHandle = await readFilesystem(() => fs.open(directory, DIRECTORY_OPEN_FLAGS));
+        openedStat = await readFilesystem(() => identityHandle.stat());
+        if (!openedStat.isDirectory() || !sameStableStat(directoryStat, openedStat)) {
+          reject("filesystem changed");
+        }
       }
-      if (!stat.isFile()) reject("unsupported filesystem entry");
-      const bytes = await readFilesystem(() => fs.readFile(absolute));
-      if (containsUserPath(bytes)) reject("absolute user path");
-      if (isNativeExecutable(bytes)) {
-        if (!allowedExecutables.has(relative)) reject("undeclared native executable");
-        foundExecutables.add(relative);
+      directoryHandle = await readFilesystem(() => fs.opendir(directory));
+      const pathAfterOpen = await readFilesystem(() => fs.lstat(directory));
+      if (
+        pathAfterOpen.isSymbolicLink()
+        || !pathAfterOpen.isDirectory()
+        || !sameStableStat(directoryStat, pathAfterOpen)
+      ) reject("filesystem changed");
+
+      const names = [];
+      let entry;
+      while ((entry = await readFilesystem(() => directoryHandle.read())) !== null) {
+        names.push(entry.name);
       }
+      names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+      for (const name of names) {
+        if (forbiddenName(name)) reject("forbidden name");
+        const relative = relativeDirectory ? `${relativeDirectory}/${name}` : name;
+        const absolute = path.join(directory, name);
+        const stat = await readFilesystem(() => fs.lstat(absolute));
+        if (stat.isSymbolicLink()) reject("symbolic link");
+        if (stat.isDirectory()) {
+          await visit(absolute, stat, relative);
+          continue;
+        }
+        if (!stat.isFile()) reject("unsupported filesystem entry");
+        const bytes = await readStableFile(absolute, stat);
+        if (containsUserPath(bytes)) reject("absolute user path");
+        if (isNativeExecutable(bytes)) {
+          if (!allowedExecutables.has(relative)) reject("undeclared native executable");
+          foundExecutables.add(relative);
+        }
+      }
+
+      const pathAfter = await readFilesystem(() => fs.lstat(directory));
+      if (
+        pathAfter.isSymbolicLink()
+        || !pathAfter.isDirectory()
+        || !sameStableStat(directoryStat, pathAfter)
+      ) reject("filesystem changed");
+      if (identityHandle) {
+        const descriptorAfter = await readFilesystem(() => identityHandle.stat());
+        if (!descriptorAfter.isDirectory() || !sameStableStat(openedStat, descriptorAfter)) {
+          reject("filesystem changed");
+        }
+      }
+    } finally {
+      if (directoryHandle) await readFilesystem(() => directoryHandle.close());
+      if (identityHandle) await readFilesystem(() => identityHandle.close());
     }
   }
 
-  await visit(root);
+  await visit(root, rootStat);
   for (const entry of allowedExecutables) {
     if (!foundExecutables.has(entry)) reject("missing declared native executable");
   }

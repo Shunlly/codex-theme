@@ -38,7 +38,7 @@ esac
   printf 'Studio macOS releases must be built on macOS.\n' >&2
   exit 1
 }
-for tool in swift lipo strip sips iconutil codesign hdiutil xcrun git node ditto xattr shasum; do
+for tool in swift lipo strip sips iconutil codesign hdiutil xcrun git node ditto xattr shasum tar; do
   command -v "$tool" >/dev/null 2>&1 || {
     printf 'Required release tool is unavailable: %s\n' "$tool" >&2
     exit 1
@@ -54,6 +54,11 @@ if [ "$MODE" = "notarize" ] && ! command -v spctl >/dev/null 2>&1; then
   exit 1
 fi
 
+INDEX_TREE="$(/usr/bin/git -C "$REPO_ROOT" write-tree 2>/dev/null)" || {
+  printf 'Studio build inputs must be tracked regular files matching the git index.\n' >&2
+  exit 1
+}
+
 release_input_error() {
   printf 'Studio build inputs must be tracked regular files matching the git index.\n' >&2
   exit 1
@@ -62,11 +67,28 @@ release_input_error() {
 verify_tracked_regular_file() {
   local source="$1"
   local absolute="$REPO_ROOT/$source"
+  local index_entry=""
+  local index_mode=""
   [ -f "$absolute" ] && [ ! -L "$absolute" ] || release_input_error
-  /usr/bin/git -C "$REPO_ROOT" ls-files --error-unmatch "$source" >/dev/null 2>&1 \
+  index_entry="$(/usr/bin/git -C "$REPO_ROOT" ls-tree "$INDEX_TREE" -- "$source" 2>/dev/null)" \
     || release_input_error
-  /usr/bin/git -C "$REPO_ROOT" cat-file blob ":$source" 2>/dev/null \
+  [ -n "$index_entry" ] || release_input_error
+  case "$index_entry" in *$'\n'*) release_input_error ;; esac
+  index_mode="${index_entry%% *}"
+  case "$index_mode" in 100644|100755) ;; *) release_input_error ;; esac
+  /usr/bin/git -C "$REPO_ROOT" cat-file blob "$INDEX_TREE:$source" 2>/dev/null \
     | /usr/bin/cmp -s - "$absolute" || release_input_error
+}
+
+verify_index_package_modes() {
+  local entry=""
+  local mode=""
+  /usr/bin/git -C "$REPO_ROOT" ls-tree -r -z "$INDEX_TREE" -- macos/studio >/dev/null 2>&1 \
+    || release_input_error
+  while IFS= read -r -d '' entry; do
+    mode="${entry%% *}"
+    case "$mode" in 100644|100755) ;; *) release_input_error ;; esac
+  done < <(/usr/bin/git -C "$REPO_ROOT" ls-tree -r -z "$INDEX_TREE" -- macos/studio)
 }
 
 verify_swift_build_inputs() {
@@ -87,6 +109,9 @@ verify_swift_build_inputs() {
 }
 
 verify_swift_build_inputs
+verify_index_package_modes
+[ "$(/usr/bin/git -C "$REPO_ROOT" write-tree 2>/dev/null)" = "$INDEX_TREE" ] \
+  || release_input_error
 
 TMP="$(/usr/bin/mktemp -d "$MACOS_ROOT/.studio-release.XXXXXX")"
 OLD_RELEASE="$MACOS_ROOT/.release-old.$$"
@@ -97,6 +122,16 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+SNAPSHOT_ROOT="$TMP/index"
+SNAPSHOT_PACKAGE="$SNAPSHOT_ROOT/macos/studio"
+/bin/mkdir -p "$SNAPSHOT_ROOT"
+/usr/bin/git -C "$REPO_ROOT" archive --format=tar "$INDEX_TREE" -- macos/studio \
+  | /usr/bin/tar -xf - -C "$SNAPSHOT_ROOT" || release_input_error
+[ -f "$SNAPSHOT_PACKAGE/Package.swift" ] && [ ! -L "$SNAPSHOT_PACKAGE/Package.swift" ] \
+  && [ -d "$SNAPSHOT_PACKAGE/Sources" ] && [ ! -L "$SNAPSHOT_PACKAGE/Sources" ] \
+  || release_input_error
+/usr/bin/find "$SNAPSHOT_ROOT" -type f -exec /bin/chmod a-w {} +
 
 PUBLISH="$TMP/publish"
 APP="$PUBLISH/$APP_NAME"
@@ -115,7 +150,7 @@ copy_tracked_file() {
   /bin/mkdir -p "$(/usr/bin/dirname "$destination")"
   /bin/cp -P "$REPO_ROOT/$source" "$destination"
   [ -f "$destination" ] && [ ! -L "$destination" ] || release_input_error
-  /usr/bin/git -C "$REPO_ROOT" cat-file blob ":$source" 2>/dev/null \
+  /usr/bin/git -C "$REPO_ROOT" cat-file blob "$INDEX_TREE:$source" 2>/dev/null \
     | /usr/bin/cmp -s - "$destination" || release_input_error
   /bin/chmod 644 "$destination"
 }
@@ -125,10 +160,10 @@ build_thin() {
   local architecture="$2"
   local triple="$3"
   local scratch="$TMP/build-$product-$architecture"
-  /usr/bin/swift build --package-path "$PACKAGE" --scratch-path "$scratch" \
+  /usr/bin/swift build --package-path "$SNAPSHOT_PACKAGE" --scratch-path "$scratch" \
     --configuration release --triple "$triple" --product "$product"
   local bin_path
-  bin_path="$(/usr/bin/swift build --package-path "$PACKAGE" --scratch-path "$scratch" \
+  bin_path="$(/usr/bin/swift build --package-path "$SNAPSHOT_PACKAGE" --scratch-path "$scratch" \
     --configuration release --triple "$triple" --show-bin-path)"
   local binary="$bin_path/$product"
   [ -f "$binary" ] || {
