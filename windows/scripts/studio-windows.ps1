@@ -61,7 +61,9 @@ function script:Test-DreamSkinStudioVersion {
   if (-not (Test-DreamSkinStudioReadableFile -Path $versionPath)) { return $false }
   try {
     $bytes = [IO.File]::ReadAllBytes($versionPath)
-    return $bytes.Length -eq 5 -and [Text.Encoding]::ASCII.GetString($bytes) -ceq '1.3.0'
+    $value = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    if ($value.Length -gt 0 -and $value[0] -eq [char]0xFEFF) { $value = $value.Substring(1) }
+    return [regex]::IsMatch($value, '\A1\.3\.0(?:\r\n|\n)?\z')
   } catch {
     return $false
   }
@@ -142,42 +144,76 @@ function Get-DreamSkinStudioStatus {
 
   $stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   $install = if (Test-DreamSkinStudioInstalled -StateRoot $stateRoot) { 'ready' } else { 'not-installed' }
+  $statePath = Join-Path $stateRoot 'state.json'
+  $savedState = $null
+  $stateDamaged = $false
+  if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+    try {
+      $savedState = Read-DreamSkinState -Path $statePath
+      if ($null -eq $savedState) { $stateDamaged = $true }
+    } catch {
+      $stateDamaged = $true
+    }
+  }
+
   $codexState = 'not-installed'
   $codex = $null
-  try {
-    $installs = @(Get-DreamSkinRegisteredCodexInstalls)
-    if ($installs.Count -gt 0) {
-      $codex = $installs[0]
-      $configPath = Join-Path $env:USERPROFILE '.codex\config.toml'
-      if (Test-Path -LiteralPath $configPath -PathType Leaf) {
-        $codexState = if (@(Get-DreamSkinCodexProcesses -Codex $codex).Count -gt 0) { 'running' } else { 'stopped' }
-      } else {
-        $codexState = 'needs-first-run'
+  $codexProcesses = @()
+  $installs = @(Get-DreamSkinRegisteredCodexInstalls)
+  if ($installs.Count -gt 0) {
+    $savedCodex = $null
+    if ($null -ne $savedState) {
+      $savedCodex = Resolve-DreamSkinCodexInstallFromState -State $savedState -RegisteredInstalls $installs
+    }
+    $savedProcesses = @()
+    $newestProcesses = @()
+    $runningCodex = $null
+    $runningProcesses = @()
+    foreach ($candidate in $installs) {
+      $candidateProcesses = @(Get-DreamSkinCodexProcesses -Codex $candidate)
+      if (Test-DreamSkinPathEqual -Left $candidate.Executable -Right $installs[0].Executable) {
+        $newestProcesses = $candidateProcesses
+      }
+      if ($null -ne $savedCodex -and
+        (Test-DreamSkinPathEqual -Left $candidate.Executable -Right $savedCodex.Executable)) {
+        $savedProcesses = $candidateProcesses
+      }
+      if ($null -eq $runningCodex -and $candidateProcesses.Count -gt 0) {
+        $runningCodex = $candidate
+        $runningProcesses = $candidateProcesses
       }
     }
-  } catch {
-    $codexState = 'not-installed'
+    if ($null -ne $savedCodex) {
+      $codex = $savedCodex
+      $codexProcesses = $savedProcesses
+    } elseif ($null -ne $runningCodex) {
+      $codex = $runningCodex
+      $codexProcesses = $runningProcesses
+    } else {
+      $codex = $installs[0]
+      $codexProcesses = $newestProcesses
+    }
+    $configPath = Join-Path $env:USERPROFILE '.codex\config.toml'
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+      $codexState = if ($null -ne $runningCodex) { 'running' } else { 'stopped' }
+    } else {
+      $codexState = 'needs-first-run'
+    }
   }
 
   $session = 'official'
   $themeName = $null
   $verified = $null
-  $statePath = Join-Path $stateRoot 'state.json'
-  $savedState = $null
   try { $pausedMarker = Test-DreamSkinPaused -StateRoot $stateRoot } catch { $pausedMarker = $false }
-  if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-    try {
-      $savedState = Read-DreamSkinState -Path $statePath
-      if ($null -eq $savedState) { throw 'State is empty.' }
-      if ($pausedMarker) {
-        $session = 'paused'
-      } elseif ($codexState -eq 'running' -and $null -ne $codex -and
-        (Test-DreamSkinStudioInjectorIdentity -State $savedState -Codex $codex)) {
-        $session = 'active'
-      } else {
-        $session = 'stale'
-      }
-    } catch {
+  if ($stateDamaged) {
+    $session = 'stale'
+  } elseif ($null -ne $savedState) {
+    if ($pausedMarker) {
+      $session = 'paused'
+    } elseif ($codexState -eq 'running' -and $codexProcesses.Count -gt 0 -and $null -ne $codex -and
+      (Test-DreamSkinStudioInjectorIdentity -State $savedState -Codex $codex)) {
+      $session = 'active'
+    } else {
       $session = 'stale'
     }
   } elseif ($pausedMarker) {
@@ -190,11 +226,18 @@ function Get-DreamSkinStudioStatus {
   } catch {}
 
   if ($Deep -and $session -eq 'active') {
-    try {
-      # CDP identity is only a soft probe; renderer verification remains false until a strict verifier exists.
-      [void](Get-DreamSkinVerifiedCdpIdentity -Port ([int]$savedState.port) -Codex $codex)
-    } catch {}
     $verified = $false
+    try {
+      $port = [int]$savedState.port
+      $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $port -Codex $codex
+      if ($null -ne $cdpIdentity -and $cdpIdentity.BrowserId -is [string] -and
+        "$($cdpIdentity.BrowserId)" -ceq "$($savedState.browserId)") {
+        $node = Get-DreamSkinNodeRuntime -NodePath (Join-Path $EngineRoot 'runtime\node.exe')
+        & $node.Path (Join-Path $PSScriptRoot 'injector.mjs') --verify --port "$port" `
+          --browser-id "$($cdpIdentity.BrowserId)" --timeout-ms 5000 *> $null
+        $verified = $LASTEXITCODE -eq 0
+      }
+    } catch {}
   } elseif ($Deep -and $session -eq 'paused') {
     $verified = $false
   }
