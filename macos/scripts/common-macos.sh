@@ -33,6 +33,7 @@ INJECTOR_JOB_LABEL="com.openai.codex-dream-skin-studio.injector"
 EXPECTED_CODEX_TEAM_ID="${CODEX_EXPECTED_TEAM_ID:-2DC432GLL2}"
 SKIN_VERSION="1.2.0"
 CODEX_APP_VALIDATED="false"
+CODEX_APP_CONTROL_VALIDATED="false"
 NODE_RUNTIME_VALIDATED="false"
 
 fail() {
@@ -110,6 +111,7 @@ try_discover_codex_app() {
   unset CODEX_BUNDLE CODEX_EXE CODEX_VERSION CODEX_TEAM_ID
   unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
   CODEX_APP_VALIDATED="false"
+  CODEX_APP_CONTROL_VALIDATED="false"
   NODE_RUNTIME_VALIDATED="false"
 
   for candidate in "$configured" \
@@ -172,6 +174,7 @@ try_validate_codex_app_identity() {
   local executable_identifier=""
   local executable_team_id=""
   CODEX_APP_VALIDATED="false"
+  CODEX_APP_CONTROL_VALIDATED="false"
   NODE_RUNTIME_VALIDATED="false"
   if [ "$(/usr/bin/uname -s)" != "Darwin" ]; then
     runtime_discovery_error "This launcher requires macOS."
@@ -190,7 +193,7 @@ try_validate_codex_app_identity() {
     runtime_discovery_error "Unexpected Codex bundle identifier: ${bundle_identifier:-missing}."
     return 1
   fi
-  if ! /usr/bin/codesign --verify --strict --ignore-resources "$CODEX_BUNDLE" >/dev/null 2>&1; then
+  if ! /usr/bin/codesign --verify --deep --strict "$CODEX_BUNDLE" >/dev/null 2>&1; then
     runtime_discovery_error "The Codex app signature is not valid. Restore or reinstall the official app before continuing."
     return 1
   fi
@@ -220,6 +223,56 @@ try_validate_codex_app_identity() {
 
   CODEX_APP_VALIDATED="true"
   export CODEX_APP_VALIDATED CODEX_TEAM_ID
+}
+
+try_validate_codex_app_control_identity() {
+  local bundle_identifier=""
+  local executable_identifier=""
+  local executable_name=""
+  local executable_team_id=""
+  CODEX_APP_VALIDATED="false"
+  CODEX_APP_CONTROL_VALIDATED="false"
+  NODE_RUNTIME_VALIDATED="false"
+  unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID CODEX_TEAM_ID
+  if [ "$(/usr/bin/uname -s)" != "Darwin" ]; then
+    runtime_discovery_error "This launcher requires macOS."
+    return 1
+  fi
+  if [ -z "${CODEX_BUNDLE:-}" ]; then
+    runtime_discovery_error "Discover the Codex app before validating its control identity."
+    return 1
+  fi
+  bundle_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$CODEX_BUNDLE/Contents/Info.plist" 2>/dev/null || true)"
+  executable_name="$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$CODEX_BUNDLE/Contents/Info.plist" 2>/dev/null || true)"
+  if [ "$bundle_identifier" != "com.openai.codex" ]; then
+    runtime_discovery_error "Unexpected Codex bundle identifier: ${bundle_identifier:-missing}."
+    return 1
+  fi
+  if [ -z "$executable_name" ] || [ "${CODEX_EXE:-}" != "$CODEX_BUNDLE/Contents/MacOS/$executable_name" ]; then
+    runtime_discovery_error "The Codex executable does not match the app bundle identity."
+    return 1
+  fi
+  if [ ! -f "$CODEX_EXE" ] || [ -L "$CODEX_EXE" ] || [ ! -x "$CODEX_EXE" ]; then
+    runtime_discovery_error "The official Codex executable is not a trusted regular file: $CODEX_EXE"
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --strict "$CODEX_EXE" >/dev/null 2>&1; then
+    runtime_discovery_error "The Codex executable signature is not valid."
+    return 1
+  fi
+  executable_identifier="$(codesign_identifier "$CODEX_EXE")"
+  if [ "$executable_identifier" != "com.openai.codex" ]; then
+    runtime_discovery_error "Unexpected Codex executable signing identifier: ${executable_identifier:-missing}."
+    return 1
+  fi
+  executable_team_id="$(codesign_team_id "$CODEX_EXE")"
+  if [ "$executable_team_id" != "$EXPECTED_CODEX_TEAM_ID" ]; then
+    runtime_discovery_error "Unexpected Codex executable signing team: ${executable_team_id:-missing}."
+    return 1
+  fi
+
+  CODEX_APP_CONTROL_VALIDATED="true"
+  export CODEX_APP_CONTROL_VALIDATED
 }
 
 try_require_macos_node_runtime() {

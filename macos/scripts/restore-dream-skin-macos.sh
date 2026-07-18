@@ -26,13 +26,21 @@ CODEX_AVAILABLE="false"
 NODE_AVAILABLE="false"
 unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID CODEX_TEAM_ID
 CODEX_APP_VALIDATED="false"
+CODEX_APP_CONTROL_VALIDATED="false"
 NODE_RUNTIME_VALIDATED="false"
-if try_discover_codex_app && try_validate_codex_app_identity; then
-  CODEX_AVAILABLE="true"
-  if try_require_macos_node_runtime; then
-    NODE_AVAILABLE="true"
-  else
+if try_discover_codex_app; then
+  if try_validate_codex_app_identity; then
+    CODEX_AVAILABLE="true"
+    if try_require_macos_node_runtime; then
+      NODE_AVAILABLE="true"
+    else
+      unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
+    fi
+  elif try_validate_codex_app_control_identity; then
+    CODEX_AVAILABLE="true"
     unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
+  elif [ "$RESTART_CODEX" = "true" ]; then
+    fail "The official Codex app is required to complete the requested restart."
   fi
 elif [ "$RESTART_CODEX" = "true" ]; then
   fail "The official Codex app is required to complete the requested restart."
@@ -111,7 +119,11 @@ fi
 
 if [ "$RESTART_CODEX" = "true" ]; then
   [ "$CODEX_RUNNING" = "true" ] && stop_codex "$FORCE_STOP_AUTHORIZED"
-  launch_codex_normally
+  if [ "$CODEX_APP_VALIDATED" = "true" ]; then
+    launch_codex_normally
+  else
+    printf 'Codex was not restarted because full app signature validation failed. Repair or reinstall the official Codex app, then open it again.\n'
+  fi
 fi
 
 /bin/rm -f "$STATE_PATH"

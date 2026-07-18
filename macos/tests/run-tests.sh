@@ -794,8 +794,8 @@ CRLF_BACKUP="$TMP/config-crlf-backup.json"
 "$NODE" "$ROOT/scripts/theme-config.mjs" restore "$CRLF_CONFIG" "$CRLF_BACKUP" >/dev/null
 /usr/bin/cmp -s "$CRLF_CONFIG" "$TMP/original-crlf.toml"
 
-# Complete config restore must use the installed native helper when the
-# official Codex Node runtime is unavailable.
+# Complete config restore must use the installed native helper when full app
+# validation fails but the signed main executable remains safe to control.
 NATIVE_HOME="$TMP/native-restore-home"
 NATIVE_ENGINE="$NATIVE_HOME/.codex/codex-dream-skin-studio"
 NATIVE_STATE="$NATIVE_HOME/Library/Application Support/CodexDreamSkinStudio"
@@ -822,34 +822,49 @@ NATIVE_MARKER="$TMP/native-restore-marker"
     },
   })}\n`);
 ' "$NATIVE_STATE/theme-backup.json" "$NATIVE_HOME/.codex/config.toml"
+/usr/bin/printf '%s\n' '{"port":9341}' > "$NATIVE_STATE/state.json"
 /usr/bin/sed "s|__MARKER__|$NATIVE_MARKER|g" \
   >> "$NATIVE_ENGINE/scripts/common-macos.sh" <<'STUB'
 try_discover_codex_app() { printf 'discover\n' >> "__MARKER__"; return 0; }
-try_validate_codex_app_identity() { printf 'trusted-app\n' >> "__MARKER__"; return 0; }
-try_require_macos_node_runtime() { printf 'missing-node\n' >> "__MARKER__"; return 1; }
+try_validate_codex_app_identity() {
+  CODEX_APP_VALIDATED=false
+  printf 'deep-app-invalid\n' >> "__MARKER__"
+  return 1
+}
+try_validate_codex_app_control_identity() {
+  CODEX_APP_VALIDATED=false
+  CODEX_APP_CONTROL_VALIDATED=true
+  printf 'control-app-valid\n' >> "__MARKER__"
+  return 0
+}
+try_require_macos_node_runtime() { printf 'node-validation\n' >> "__MARKER__"; return 1; }
 try_require_macos_runtime() { printf 'legacy-runtime\n' >> "__MARKER__"; return 1; }
 ensure_state_root() { :; }
-state_field() { return 1; }
+state_field() { printf '9341\n'; }
 codex_is_running() { return 0; }
 verified_cdp_endpoint() { return 1; }
 stop_codex() { printf 'stop:%s\n' "$1" >> "__MARKER__"; }
-stop_recorded_injector() { return 0; }
-release_codex_launchd_job() { return 0; }
+stop_recorded_injector() { printf 'stop-injector\n' >> "__MARKER__"; return 0; }
+release_codex_launchd_job() { printf 'release-job\n' >> "__MARKER__"; return 0; }
 launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
 STUB
 : > "$NATIVE_MARKER"
-/usr/bin/env -u NODE HOME="$NATIVE_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+NATIVE_OUTPUT="$(/usr/bin/env -u NODE HOME="$NATIVE_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
   "$NATIVE_ENGINE/scripts/restore-dream-skin-macos.sh" \
-  --restore-base-theme --restart-codex --restart-authorized >/dev/null
+  --restore-base-theme --restart-codex --restart-authorized)"
 /usr/bin/grep -F -q 'appearanceTheme = "system"' "$NATIVE_HOME/.codex/config.toml"
 /usr/bin/grep -F -q 'keepMe = "中文保留"' "$NATIVE_HOME/.codex/config.toml"
 [ ! -e "$NATIVE_STATE/theme-backup.json" ]
-/usr/bin/grep -Fx -q 'trusted-app' "$NATIVE_MARKER"
-/usr/bin/grep -Fx -q 'missing-node' "$NATIVE_MARKER"
+[ ! -e "$NATIVE_STATE/state.json" ]
+/usr/bin/grep -Fx -q 'deep-app-invalid' "$NATIVE_MARKER"
+/usr/bin/grep -Fx -q 'control-app-valid' "$NATIVE_MARKER"
 /usr/bin/grep -Fx -q 'stop:false' "$NATIVE_MARKER"
-/usr/bin/grep -Fx -q 'launch' "$NATIVE_MARKER"
-if /usr/bin/grep -Fx -q 'legacy-runtime' "$NATIVE_MARKER"; then
-  printf 'Node-free restore used the combined legacy runtime validator.\n' >&2
+/usr/bin/grep -Fx -q 'stop-injector' "$NATIVE_MARKER"
+/usr/bin/grep -Fx -q 'release-job' "$NATIVE_MARKER"
+/usr/bin/printf '%s\n' "$NATIVE_OUTPUT" | /usr/bin/grep -F -q \
+  'Codex was not restarted because full app signature validation failed. Repair or reinstall the official Codex app, then open it again.'
+if /usr/bin/grep -Eq '^(node-validation|legacy-runtime|launch)$' "$NATIVE_MARKER"; then
+  printf 'Control-only restore validated Node, used legacy runtime validation, or relaunched Codex.\n' >&2
   exit 1
 fi
 
@@ -1027,6 +1042,7 @@ CONFIG_PATH="__HOME__/.codex/config.toml"
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
 try_discover_codex_app() { return 0; }
 try_validate_codex_app_identity() { printf 'untrusted-app\n' >> "__MARKER__"; return 1; }
+try_validate_codex_app_control_identity() { printf 'untrusted-control\n' >> "__MARKER__"; return 1; }
 try_require_macos_node_runtime() { printf 'node-validation\n' >> "__MARKER__"; return 0; }
 try_require_macos_runtime() { return 0; }
 codex_is_running() { printf 'process-probe\n' >> "__MARKER__"; return 0; }
@@ -1042,6 +1058,7 @@ UNTRUSTED_EXIT="$?"
 set -e
 [ "$UNTRUSTED_EXIT" -ne 0 ] || { printf 'Untrusted Codex app restore unexpectedly succeeded.\n' >&2; exit 1; }
 /usr/bin/grep -Fx -q 'untrusted-app' "$UNTRUSTED_MARKER"
+/usr/bin/grep -Fx -q 'untrusted-control' "$UNTRUSTED_MARKER"
 if /usr/bin/grep -Eq '^(node-validation|process-probe|stop|launch)$' "$UNTRUSTED_MARKER"; then
   printf 'Untrusted Codex app was probed, stopped, or relaunched.\n' >&2
   exit 1
@@ -1049,9 +1066,9 @@ fi
 [ "$(/bin/cat "$UNTRUSTED_HOME/.codex/config.toml")" = 'config sentinel' ]
 [ "$(/bin/cat "$UNTRUSTED_STATE/theme-backup.json")" = 'backup sentinel' ]
 
-# Main app identity must remain independently trustworthy when its nested Node
-# runtime is missing. Replace only the codesign command in a copied common
-# layer so the real discovery and validation functions exercise exact args.
+# Full app identity must retain deep validation. A separate control-only layer
+# may trust the signed main executable after nested resource validation fails.
+# Replace only codesign so the real validators exercise exact command args.
 APP_IDENTITY_HOME="$TMP/app-identity-home"
 APP_IDENTITY_BUNDLE="$TMP/app-identity.app"
 APP_IDENTITY_EXE="$APP_IDENTITY_BUNDLE/Contents/MacOS/Codex"
@@ -1074,10 +1091,10 @@ APP_IDENTITY_ERROR="$TMP/app-identity.error"
   > "$APP_IDENTITY_CODESIGN" <<'STUB'
 #!/bin/bash
 mode="${CODESIGN_MODE:-valid}"
-if [ "$#" -eq 4 ] && [ "$1" = "--verify" ] && [ "$2" = "--strict" ] \
-  && [ "$3" = "--ignore-resources" ] && [ "$4" = "__BUNDLE__" ]; then
-  printf 'verify-bundle\n' >> "$CODESIGN_LOG"
-  [ "$mode" != "bundle-signature" ]
+if [ "$#" -eq 4 ] && [ "$1" = "--verify" ] && [ "$2" = "--deep" ] \
+  && [ "$3" = "--strict" ] && [ "$4" = "__BUNDLE__" ]; then
+  printf 'verify-bundle-deep\n' >> "$CODESIGN_LOG"
+  [ "$mode" != "bundle-signature" ] && [ "$mode" != "resource-tamper" ]
   exit
 fi
 if [ "$#" -eq 3 ] && [ "$1" = "--verify" ] && [ "$2" = "--strict" ] \
@@ -1123,6 +1140,7 @@ if ! /usr/bin/env HOME="$APP_IDENTITY_HOME" CODEX_APP_BUNDLE="$APP_IDENTITY_BUND
     try_discover_codex_app
     try_validate_codex_app_identity
     [ "$CODEX_APP_VALIDATED" = "true" ]
+    [ "${CODEX_APP_CONTROL_VALIDATED:-false}" = "false" ]
     [ ! -e "$CODEX_BUNDLE/Contents/Resources/cua_node/bin/node" ]
     if try_require_macos_node_runtime 2>"$2"; then exit 1; fi
     [ "$CODEX_APP_VALIDATED" = "true" ]
@@ -1133,7 +1151,7 @@ if ! /usr/bin/env HOME="$APP_IDENTITY_HOME" CODEX_APP_BUNDLE="$APP_IDENTITY_BUND
   exit 1
 fi
 /usr/bin/printf '%s\n' \
-  verify-bundle describe-bundle describe-bundle \
+  verify-bundle-deep describe-bundle describe-bundle \
   verify-executable describe-executable describe-executable \
   > "$TMP/app-identity-codesign.expected"
 /usr/bin/cmp -s "$APP_IDENTITY_LOG" "$TMP/app-identity-codesign.expected" || {
@@ -1141,7 +1159,31 @@ fi
   exit 1
 }
 
-for app_identity_failure in bundle-signature bundle-identifier \
+: > "$APP_IDENTITY_LOG"
+/usr/bin/env HOME="$APP_IDENTITY_HOME" CODEX_APP_BUNDLE="$APP_IDENTITY_BUNDLE" \
+  CODESIGN_LOG="$APP_IDENTITY_LOG" CODESIGN_MODE=resource-tamper /bin/bash -c '
+    . "$1"
+    try_discover_codex_app
+    if try_validate_codex_app_identity >/dev/null 2>&1; then exit 1; fi
+    [ "$CODEX_APP_VALIDATED" = "false" ]
+    try_validate_codex_app_control_identity
+    [ "$CODEX_APP_VALIDATED" = "false" ]
+    [ "$CODEX_APP_CONTROL_VALIDATED" = "true" ]
+    if try_require_macos_node_runtime >/dev/null 2>&1; then exit 1; fi
+    [ "$NODE_RUNTIME_VALIDATED" = "false" ]
+  ' _ "$APP_IDENTITY_COMMON" || {
+    printf 'Control-only identity did not safely survive nested resource failure.\n' >&2
+    exit 1
+  }
+/usr/bin/printf '%s\n' \
+  verify-bundle-deep verify-executable describe-executable describe-executable \
+  > "$TMP/app-control-codesign.expected"
+/usr/bin/cmp -s "$APP_IDENTITY_LOG" "$TMP/app-control-codesign.expected" || {
+  printf 'Control-only identity used full-app or unexpected codesign branches.\n' >&2
+  exit 1
+}
+
+for app_identity_failure in resource-tamper bundle-signature bundle-identifier \
   executable-signature executable-identifier executable-team; do
   : > "$APP_IDENTITY_LOG"
   /usr/bin/env HOME="$APP_IDENTITY_HOME" CODEX_APP_BUNDLE="$APP_IDENTITY_BUNDLE" \
@@ -1156,6 +1198,21 @@ for app_identity_failure in bundle-signature bundle-identifier \
     }
 done
 
+for control_identity_failure in executable-signature executable-identifier executable-team; do
+  : > "$APP_IDENTITY_LOG"
+  /usr/bin/env HOME="$APP_IDENTITY_HOME" CODEX_APP_BUNDLE="$APP_IDENTITY_BUNDLE" \
+    CODESIGN_LOG="$APP_IDENTITY_LOG" CODESIGN_MODE="$control_identity_failure" /bin/bash -c '
+      . "$1"
+      try_discover_codex_app
+      if try_validate_codex_app_control_identity >/dev/null 2>&1; then exit 1; fi
+      [ "$CODEX_APP_VALIDATED" = "false" ]
+      [ "$CODEX_APP_CONTROL_VALIDATED" = "false" ]
+    ' _ "$APP_IDENTITY_COMMON" || {
+      printf 'Control-only identity accepted %s.\n' "$control_identity_failure" >&2
+      exit 1
+    }
+done
+
 /usr/bin/plutil -replace CFBundleIdentifier -string com.example.forged \
   "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
 : > "$APP_IDENTITY_LOG"
@@ -1165,7 +1222,9 @@ done
     CODEX_BUNDLE="$2"
     CODEX_EXE="$3"
     if try_validate_codex_app_identity 2>"$4"; then exit 1; fi
+    if try_validate_codex_app_control_identity 2>>"$4"; then exit 1; fi
     [ "$CODEX_APP_VALIDATED" = "false" ]
+    [ "$CODEX_APP_CONTROL_VALIDATED" = "false" ]
     /usr/bin/grep -F -q "bundle identifier" "$4"
   ' _ "$APP_IDENTITY_COMMON" "$APP_IDENTITY_BUNDLE" "$APP_IDENTITY_EXE" \
   "$APP_IDENTITY_ERROR" || {
