@@ -415,7 +415,7 @@ final class StudioModelTests: CoreTestCase {
         await model.request(.apply)
 
         XCTAssertEqual(await engine.recordedCalls(), [call(.status), call(.apply)])
-        XCTAssertEqual(model.presentation, .restartConfirmation(.apply))
+        XCTAssertEqual(model.presentation, .restartConfirmation(.apply, deleteUserThemes: false))
 
         await model.confirmPresentation()
 
@@ -433,7 +433,12 @@ final class StudioModelTests: CoreTestCase {
 #endif
     @MainActor
     func testInstallCloseRequirementUsesRestartConfirmation() async {
-        let ready = makeEnvelope(operation: .status, availableActions: ["install"])
+        let ready = makeEnvelope(
+            operation: .status,
+            install: "not-installed",
+            session: "official",
+            availableActions: ["install"]
+        )
         let closeRequired = makeEnvelope(
             operation: .install,
             ok: false,
@@ -455,7 +460,7 @@ final class StudioModelTests: CoreTestCase {
         await model.request(.install)
 
         XCTAssertEqual(await engine.recordedCalls(), [call(.status), call(.install)])
-        XCTAssertEqual(model.presentation, .restartConfirmation(.install))
+        XCTAssertEqual(model.presentation, .restartConfirmation(.install, deleteUserThemes: false))
 
         await model.confirmPresentation()
 
@@ -507,7 +512,7 @@ final class StudioModelTests: CoreTestCase {
             call(.apply),
             call(.apply, restart: true),
         ])
-        XCTAssertEqual(model.presentation, .forceStopConfirmation(.apply))
+        XCTAssertEqual(model.presentation, .forceStopConfirmation(.apply, deleteUserThemes: false))
 
         await model.confirmPresentation()
 
@@ -629,9 +634,9 @@ final class StudioModelTests: CoreTestCase {
         await model.refresh(.status)
         await model.request(.uninstall)
         await model.confirmPresentation(deleteUserThemes: true)
-        XCTAssertEqual(model.presentation, .restartConfirmation(.uninstall))
+        XCTAssertEqual(model.presentation, .restartConfirmation(.uninstall, deleteUserThemes: true))
         await model.confirmPresentation()
-        XCTAssertEqual(model.presentation, .forceStopConfirmation(.uninstall))
+        XCTAssertEqual(model.presentation, .forceStopConfirmation(.uninstall, deleteUserThemes: true))
         await model.confirmPresentation()
 
         XCTAssertEqual(await engine.recordedCalls(), [
@@ -639,6 +644,173 @@ final class StudioModelTests: CoreTestCase {
             call(.uninstall, delete: true),
             call(.uninstall, restart: true, delete: true),
             call(.uninstall, restart: true, force: true, delete: true),
+            call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testMenuProjectionTracksPreflightBusyAndConfirmationTransitions() async {
+        let ready = makeEnvelope(operation: .preflight, availableActions: ["apply", "pause", "restore"])
+
+        let busy = StudioMenuState(envelope: ready, isBusy: true, presentation: nil)
+        XCTAssertEqual(busy.primaryOperation, .apply)
+        XCTAssertFalse(busy.primaryEnabled)
+        XCTAssertEqual(busy.pauseResumeOperation, .pause)
+        XCTAssertFalse(busy.pauseResumeEnabled)
+        XCTAssertFalse(busy.restoreEnabled)
+
+        let idle = StudioMenuState(envelope: ready, isBusy: false, presentation: nil)
+        XCTAssertTrue(idle.primaryEnabled)
+        XCTAssertTrue(idle.pauseResumeEnabled)
+        XCTAssertTrue(idle.restoreEnabled)
+
+        let confirming = StudioMenuState(
+            envelope: ready,
+            isBusy: false,
+            presentation: .restartConfirmation(.apply, deleteUserThemes: false)
+        )
+        XCTAssertEqual(confirming.primaryOperation, .apply)
+        XCTAssertFalse(confirming.primaryEnabled)
+        XCTAssertEqual(confirming.pauseResumeOperation, .pause)
+        XCTAssertFalse(confirming.pauseResumeEnabled)
+        XCTAssertFalse(confirming.restoreEnabled)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testCancelledUninstallDoesNotCarryDeletionToNextAttempt() async {
+        let ready = makeEnvelope(operation: .status, availableActions: ["uninstall"])
+        let reconciliation = makeEnvelope(operation: .status, availableActions: ["uninstall"])
+        let uninstalled = makeEnvelope(operation: .uninstall, session: "official", verified: false)
+        let status = makeEnvelope(operation: .status, session: "official", verified: false)
+        let engine = ScriptedEngine([
+            .envelope(ready),
+            .failure(.cancelled),
+            .envelope(reconciliation),
+            .envelope(uninstalled),
+            .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.refresh(.status)
+        await model.request(.uninstall)
+        await model.confirmPresentation(deleteUserThemes: true)
+        await model.request(.uninstall)
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.status),
+            call(.uninstall, delete: true),
+            call(.status),
+            call(.uninstall),
+            call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testTerminalUninstallErrorDoesNotCarryDeletionToNextAttempt() async {
+        let ready = makeEnvelope(operation: .status, availableActions: ["uninstall"])
+        let terminalError = makeEnvelope(
+            operation: .uninstall,
+            ok: false,
+            session: "official",
+            verified: false,
+            errorCode: "OPERATION_FAILED",
+            availableActions: ["uninstall"]
+        )
+        let uninstalled = makeEnvelope(operation: .uninstall, session: "official", verified: false)
+        let status = makeEnvelope(operation: .status, session: "official", verified: false)
+        let engine = ScriptedEngine([
+            .envelope(ready),
+            .envelope(terminalError),
+            .envelope(uninstalled),
+            .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.refresh(.status)
+        await model.request(.uninstall)
+        await model.confirmPresentation(deleteUserThemes: true)
+        await model.request(.uninstall)
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.status),
+            call(.uninstall, delete: true),
+            call(.uninstall),
+            call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testTransportFailedUninstallDoesNotCarryDeletionToNextAttempt() async {
+        let ready = makeEnvelope(operation: .status, availableActions: ["uninstall"])
+        let uninstalled = makeEnvelope(operation: .uninstall, session: "official", verified: false)
+        let status = makeEnvelope(operation: .status, session: "official", verified: false)
+        let engine = ScriptedEngine([
+            .envelope(ready),
+            .foreignFailure,
+            .envelope(uninstalled),
+            .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.refresh(.status)
+        await model.request(.uninstall)
+        await model.confirmPresentation(deleteUserThemes: true)
+        await model.request(.uninstall)
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.status),
+            call(.uninstall, delete: true),
+            call(.uninstall),
+            call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testSuccessfulUninstallDoesNotCarryDeletionToNextAttempt() async {
+        let ready = makeEnvelope(operation: .status, availableActions: ["uninstall"])
+        let status = makeEnvelope(
+            operation: .status,
+            session: "official",
+            verified: false,
+            availableActions: ["uninstall"]
+        )
+        let uninstalled = makeEnvelope(operation: .uninstall, session: "official", verified: false)
+        let engine = ScriptedEngine([
+            .envelope(ready),
+            .envelope(uninstalled), .envelope(status),
+            .envelope(uninstalled), .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.refresh(.status)
+        await model.request(.uninstall)
+        await model.confirmPresentation(deleteUserThemes: true)
+        await model.request(.uninstall)
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.status),
+            call(.uninstall, delete: true),
+            call(.status),
+            call(.uninstall),
             call(.status),
         ])
     }
@@ -748,6 +920,7 @@ final class StudioModelTests: CoreTestCase {
     private func makeEnvelope(
         operation: EngineOperation,
         ok: Bool = true,
+        install: String = "ready",
         session: String = "active",
         verified: Bool? = true,
         errorCode: String = "INTERNAL_ERROR",
@@ -755,6 +928,7 @@ final class StudioModelTests: CoreTestCase {
         availableActions: [String]? = nil
     ) -> EngineEnvelope {
         var object = envelopeObject(operation: operation.rawValue, ok: ok)
+        state(object)["install"] = install
         state(object)["session"] = session
         state(object)["verified"] = verified ?? NSNull()
         if let availableActions { state(object)["availableActions"] = availableActions }

@@ -9,10 +9,7 @@ final class StatusItemController: NSObject {
     private let onPauseResume: () -> Void
     private let onRestore: () -> Void
     private let onQuit: () -> Void
-    private var isBusy = false
-    private var primaryOperation: EngineOperation?
-    private var pauseResumeOperation: EngineOperation?
-    private var restoreEnabled = false
+    private var menuState = StudioMenuState(envelope: nil, isBusy: false, presentation: nil)
 
     init(
         onShow: @escaping () -> Void,
@@ -32,21 +29,9 @@ final class StatusItemController: NSObject {
         rebuildMenu()
     }
 
-    func update(
-        isBusy: Bool,
-        primaryOperation: EngineOperation?,
-        pauseResumeOperation: EngineOperation?,
-        restoreEnabled: Bool
-    ) {
-        guard self.isBusy != isBusy
-            || self.primaryOperation != primaryOperation
-            || self.pauseResumeOperation != pauseResumeOperation
-            || self.restoreEnabled != restoreEnabled
-        else { return }
-        self.isBusy = isBusy
-        self.primaryOperation = primaryOperation
-        self.pauseResumeOperation = pauseResumeOperation
-        self.restoreEnabled = restoreEnabled
+    func update(_ menuState: StudioMenuState) {
+        guard self.menuState != menuState else { return }
+        self.menuState = menuState
         rebuildMenu()
     }
 
@@ -55,9 +40,9 @@ final class StatusItemController: NSObject {
         menu.autoenablesItems = false
         menu.addItem(item("Show Dream Skin", #selector(show), enabled: true))
         menu.addItem(.separator())
-        menu.addItem(item(actionTitle(primaryOperation, fallback: "Apply / Resume"), #selector(applyResume), enabled: primaryOperation != nil && !isBusy))
-        menu.addItem(item(actionTitle(pauseResumeOperation, fallback: "Pause / Resume"), #selector(pauseResume), enabled: pauseResumeOperation != nil && !isBusy))
-        menu.addItem(item("Complete Restore", #selector(restore), enabled: restoreEnabled && !isBusy))
+        menu.addItem(item(actionTitle(menuState.primaryOperation, fallback: "Apply / Resume"), #selector(applyResume), enabled: menuState.primaryEnabled))
+        menu.addItem(item(actionTitle(menuState.pauseResumeOperation, fallback: "Pause / Resume"), #selector(pauseResume), enabled: menuState.pauseResumeEnabled))
+        menu.addItem(item("Complete Restore", #selector(restore), enabled: menuState.restoreEnabled))
         menu.addItem(.separator())
         menu.addItem(item("Quit Dream Skin", #selector(quit), enabled: true))
         statusItem.menu = menu

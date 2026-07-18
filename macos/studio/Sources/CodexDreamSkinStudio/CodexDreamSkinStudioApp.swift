@@ -41,14 +41,9 @@ final class StudioAppController: ObservableObject {
         let adapterURL = Bundle.main.resourceURL!
             .appendingPathComponent("engine/scripts/studio-adapter-macos.sh")
         model = StudioModel(engine: EngineClient(adapterURL: adapterURL))
-        model.$envelope
-            .sink { [weak self] _ in self?.updateStatusItem() }
-            .store(in: &subscriptions)
-        model.$isBusy
-            .sink { [weak self] _ in self?.updateStatusItem() }
-            .store(in: &subscriptions)
-        model.$presentation
-            .sink { [weak self] _ in self?.updateStatusItem() }
+        Publishers.CombineLatest3(model.$envelope, model.$isBusy, model.$presentation)
+            .map(StudioMenuState.init)
+            .sink { [weak self] in self?.statusItem.update($0) }
             .store(in: &subscriptions)
     }
 
@@ -82,15 +77,6 @@ final class StudioAppController: ObservableObject {
 
     func quit() {
         NSApp.terminate(nil)
-    }
-
-    private func updateStatusItem() {
-        statusItem.update(
-            isBusy: model.isBusy,
-            primaryOperation: model.primaryOperation,
-            pauseResumeOperation: model.pauseResumeOperation,
-            restoreEnabled: model.canRequest(.restore)
-        )
     }
 
     private func showWindow() {

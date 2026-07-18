@@ -2,10 +2,68 @@ import Combine
 import Foundation
 
 public enum StudioPresentation: Equatable, Sendable {
-    case restartConfirmation(EngineOperation)
-    case forceStopConfirmation(EngineOperation)
+    case restartConfirmation(EngineOperation, deleteUserThemes: Bool)
+    case forceStopConfirmation(EngineOperation, deleteUserThemes: Bool)
     case restoreConfirmation
     case uninstallConfirmation
+}
+
+public struct StudioMenuState: Equatable, Sendable {
+    public let primaryOperation: EngineOperation?
+    public let primaryEnabled: Bool
+    public let pauseResumeOperation: EngineOperation?
+    public let pauseResumeEnabled: Bool
+    public let restoreEnabled: Bool
+    private let enabledOperations: [EngineOperation]
+
+    public init(envelope: EngineEnvelope?, isBusy: Bool, presentation: StudioPresentation?) {
+        let state = envelope?.state
+        let primaryOperation: EngineOperation?
+        if state?.install == .notInstalled {
+            primaryOperation = .install
+        } else if state?.session == .paused {
+            primaryOperation = .resume
+        } else if state != nil {
+            primaryOperation = .apply
+        } else {
+            primaryOperation = nil
+        }
+        let pauseResumeOperation: EngineOperation? = state.map { $0.session == .paused ? .resume : .pause }
+
+        let enabledOperations = EngineOperation.allCases.filter {
+            Self.isEnabled($0, envelope: envelope, isBusy: isBusy, presentation: presentation)
+        }
+        self.enabledOperations = enabledOperations
+        self.primaryOperation = primaryOperation
+        self.pauseResumeOperation = pauseResumeOperation
+        if let primaryOperation {
+            primaryEnabled = enabledOperations.contains(primaryOperation)
+        } else {
+            primaryEnabled = false
+        }
+        if let pauseResumeOperation {
+            pauseResumeEnabled = enabledOperations.contains(pauseResumeOperation)
+        } else {
+            pauseResumeEnabled = false
+        }
+        restoreEnabled = enabledOperations.contains(.restore)
+    }
+
+    public func isEnabled(_ operation: EngineOperation) -> Bool {
+        enabledOperations.contains(operation)
+    }
+
+    private static func isEnabled(
+        _ operation: EngineOperation?,
+        envelope: EngineEnvelope?,
+        isBusy: Bool,
+        presentation: StudioPresentation?
+    ) -> Bool {
+        guard let operation, !isBusy, presentation == nil, let envelope else { return false }
+        if operation == .restore, envelope.error?.recoveryActions.contains(.restore) == true { return true }
+        guard let action = operation.stateAction else { return false }
+        return envelope.state.availableActions.contains(action)
+    }
 }
 
 @MainActor
@@ -20,7 +78,6 @@ public final class StudioModel: ObservableObject {
     private var nextGeneration: UInt64 = 0
     private var activeGeneration: UInt64?
     private var hasLaunched = false
-    private var pendingDeleteUserThemes = false
 
     public init(engine: any EngineRunning) {
         self.engine = engine
@@ -31,25 +88,19 @@ public final class StudioModel: ObservableObject {
     }
 
     public var primaryOperation: EngineOperation? {
-        guard let state = envelope?.state else { return nil }
-        if state.install == .notInstalled { return canRequest(.install) ? .install : nil }
-        if state.session == .paused { return canRequest(.resume) ? .resume : nil }
-        return canRequest(.apply) ? .apply : nil
+        menuState.primaryOperation
     }
 
     public var pauseResumeOperation: EngineOperation? {
-        guard let state = envelope?.state else { return nil }
-        let operation: EngineOperation = state.session == .paused ? .resume : .pause
-        return canRequest(operation) ? operation : nil
+        menuState.pauseResumeOperation
     }
 
     public func canRequest(_ operation: EngineOperation) -> Bool {
-        guard !isBusy, presentation == nil, let envelope else { return false }
-        if operation == .restore, envelope.error?.recoveryActions.contains(.restore) == true {
-            return true
-        }
-        guard let action = operation.stateAction else { return false }
-        return envelope.state.availableActions.contains(action)
+        menuState.isEnabled(operation)
+    }
+
+    public var menuState: StudioMenuState {
+        StudioMenuState(envelope: envelope, isBusy: isBusy, presentation: presentation)
     }
 
     public func launch() async {
@@ -64,7 +115,6 @@ public final class StudioModel: ObservableObject {
         case .restore:
             presentation = .restoreConfirmation
         case .uninstall:
-            pendingDeleteUserThemes = false
             presentation = .uninstallConfirmation
         default:
             await perform(operation)
@@ -73,7 +123,6 @@ public final class StudioModel: ObservableObject {
 
     public func cancelPresentation() {
         presentation = nil
-        pendingDeleteUserThemes = false
     }
 
     public func confirmPresentation(deleteUserThemes: Bool = false) async {
@@ -81,19 +130,18 @@ public final class StudioModel: ObservableObject {
         self.presentation = nil
 
         switch presentation {
-        case let .restartConfirmation(operation):
-            await perform(operation, restartAuthorized: true, deleteUserThemes: deletionIntent(for: operation))
-        case let .forceStopConfirmation(operation):
+        case let .restartConfirmation(operation, deleteUserThemes):
+            await perform(operation, restartAuthorized: true, deleteUserThemes: deleteUserThemes)
+        case let .forceStopConfirmation(operation, deleteUserThemes):
             await perform(
                 operation,
                 restartAuthorized: true,
                 forceAuthorized: true,
-                deleteUserThemes: deletionIntent(for: operation)
+                deleteUserThemes: deleteUserThemes
             )
         case .restoreConfirmation:
             await perform(.restore)
         case .uninstallConfirmation:
-            pendingDeleteUserThemes = deleteUserThemes
             await perform(.uninstall, deleteUserThemes: deleteUserThemes)
         }
     }
@@ -105,7 +153,6 @@ public final class StudioModel: ObservableObject {
         do {
             envelope = try await invoke(operation)
         } catch {
-            if operation == .uninstall { pendingDeleteUserThemes = false }
             let clientError = normalized(error)
             self.clientError = clientError
             if clientError.isInterruption {
@@ -145,7 +192,6 @@ public final class StudioModel: ObservableObject {
             presentRecovery(for: mutation, operation: operation, deleteUserThemes: deleteUserThemes)
             return
         }
-        if operation == .uninstall { pendingDeleteUserThemes = false }
         guard operation != .preflight, operation != .status else { return }
         do {
             envelope = try await invoke(.status)
@@ -232,10 +278,6 @@ public final class StudioModel: ObservableObject {
         return error as? EngineClientError ?? .transportFailed
     }
 
-    private func deletionIntent(for operation: EngineOperation) -> Bool {
-        operation == .uninstall && pendingDeleteUserThemes
-    }
-
     private func presentRecovery(
         for envelope: EngineEnvelope,
         operation: EngineOperation,
@@ -243,13 +285,10 @@ public final class StudioModel: ObservableObject {
     ) {
         switch envelope.error?.code {
         case .restartRequired, .codexCloseRequired:
-            pendingDeleteUserThemes = operation == .uninstall && deleteUserThemes
-            presentation = .restartConfirmation(operation)
+            presentation = .restartConfirmation(operation, deleteUserThemes: operation == .uninstall && deleteUserThemes)
         case .forceStopRequired:
-            pendingDeleteUserThemes = operation == .uninstall && deleteUserThemes
-            presentation = .forceStopConfirmation(operation)
+            presentation = .forceStopConfirmation(operation, deleteUserThemes: operation == .uninstall && deleteUserThemes)
         default:
-            pendingDeleteUserThemes = false
             break
         }
     }
