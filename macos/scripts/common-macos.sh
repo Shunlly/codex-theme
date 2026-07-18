@@ -32,6 +32,8 @@ CODEX_APP_JOB_LABEL="com.openai.codex-dream-skin-studio.app"
 INJECTOR_JOB_LABEL="com.openai.codex-dream-skin-studio.injector"
 EXPECTED_CODEX_TEAM_ID="${CODEX_EXPECTED_TEAM_ID:-2DC432GLL2}"
 SKIN_VERSION="1.2.0"
+CODEX_APP_VALIDATED="false"
+NODE_RUNTIME_VALIDATED="false"
 
 fail() {
   local message="$*"
@@ -105,6 +107,11 @@ try_discover_codex_app() {
   local executable_name=""
   local configured="${CODEX_APP_BUNDLE:-}"
 
+  unset CODEX_BUNDLE CODEX_EXE CODEX_VERSION CODEX_TEAM_ID
+  unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
+  CODEX_APP_VALIDATED="false"
+  NODE_RUNTIME_VALIDATED="false"
+
   for candidate in "$configured" \
     "/Applications/ChatGPT.app" "$HOME/Applications/ChatGPT.app" \
     "/Applications/Codex.app" "$HOME/Applications/Codex.app"; do
@@ -155,23 +162,46 @@ codesign_team_id() {
     | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}'
 }
 
-try_require_macos_runtime() {
+try_validate_codex_app_identity() {
+  CODEX_APP_VALIDATED="false"
+  NODE_RUNTIME_VALIDATED="false"
   if [ "$(/usr/bin/uname -s)" != "Darwin" ]; then
     runtime_discovery_error "This launcher requires macOS."
     return 1
   fi
   if [ -z "${CODEX_BUNDLE:-}" ]; then
-    runtime_discovery_error "Discover the Codex app before validating its runtime."
+    runtime_discovery_error "Discover the Codex app before validating its identity."
     return 1
   fi
-
-  RUNTIME_NODE="$CODEX_BUNDLE/Contents/Resources/cua_node/bin/node"
-  if [ ! -x "$RUNTIME_NODE" ]; then
-    runtime_discovery_error "The signed Node.js runtime bundled with Codex was not found: $RUNTIME_NODE"
+  if [ -z "${CODEX_EXE:-}" ] || [ ! -f "$CODEX_EXE" ] || [ -L "$CODEX_EXE" ] || [ ! -x "$CODEX_EXE" ]; then
+    runtime_discovery_error "The official Codex executable is not a trusted regular file: ${CODEX_EXE:-missing}"
     return 1
   fi
   if ! /usr/bin/codesign --verify --deep --strict "$CODEX_BUNDLE" >/dev/null 2>&1; then
     runtime_discovery_error "The Codex app signature is not valid. Restore or reinstall the official app before continuing."
+    return 1
+  fi
+  CODEX_TEAM_ID="$(codesign_team_id "$CODEX_BUNDLE")"
+  if [ "$CODEX_TEAM_ID" != "$EXPECTED_CODEX_TEAM_ID" ]; then
+    runtime_discovery_error "Unexpected Codex signing team: ${CODEX_TEAM_ID:-missing}."
+    return 1
+  fi
+
+  CODEX_APP_VALIDATED="true"
+  export CODEX_APP_VALIDATED CODEX_TEAM_ID
+}
+
+try_require_macos_node_runtime() {
+  unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
+  NODE_RUNTIME_VALIDATED="false"
+  if [ "${CODEX_APP_VALIDATED:-false}" != "true" ] || [ -z "${CODEX_TEAM_ID:-}" ]; then
+    runtime_discovery_error "Validate the official Codex app before validating its Node.js runtime."
+    return 1
+  fi
+
+  RUNTIME_NODE="$CODEX_BUNDLE/Contents/Resources/cua_node/bin/node"
+  if [ ! -f "$RUNTIME_NODE" ] || [ -L "$RUNTIME_NODE" ] || [ ! -x "$RUNTIME_NODE" ]; then
+    runtime_discovery_error "The signed Node.js runtime bundled with Codex was not found: $RUNTIME_NODE"
     return 1
   fi
   if ! /usr/bin/codesign --verify --strict "$RUNTIME_NODE" >/dev/null 2>&1; then
@@ -179,12 +209,7 @@ try_require_macos_runtime() {
     return 1
   fi
 
-  CODEX_TEAM_ID="$(codesign_team_id "$CODEX_BUNDLE")"
   NODE_TEAM_ID="$(codesign_team_id "$RUNTIME_NODE")"
-  if [ "$CODEX_TEAM_ID" != "$EXPECTED_CODEX_TEAM_ID" ]; then
-    runtime_discovery_error "Unexpected Codex signing team: ${CODEX_TEAM_ID:-missing}."
-    return 1
-  fi
   if [ "$NODE_TEAM_ID" != "$CODEX_TEAM_ID" ]; then
     runtime_discovery_error "The bundled Node.js signer does not match the Codex app signer."
     return 1
@@ -215,12 +240,32 @@ try_require_macos_runtime() {
   fi
 
   NODE="$RUNTIME_NODE"
-  export NODE RUNTIME_NODE NODE_VERSION CODEX_TEAM_ID NODE_TEAM_ID
+  NODE_RUNTIME_VALIDATED="true"
+  export NODE RUNTIME_NODE NODE_VERSION CODEX_TEAM_ID NODE_TEAM_ID NODE_RUNTIME_VALIDATED
+}
+
+try_require_macos_runtime() {
+  try_validate_codex_app_identity || return 1
+  try_require_macos_node_runtime
 }
 
 require_macos_runtime() {
   local RUNTIME_DISCOVERY_FATAL="true"
   try_require_macos_runtime
+}
+
+native_restore_helper_identity() {
+  local root="$1"
+  local helper="$2"
+  local root_real=""
+  local bin_real=""
+  [ "$helper" = "$root/bin/dream-skin-config-restore" ] || return 1
+  [ -d "$root" ] && [ -d "$root/bin" ] && [ ! -L "$root/bin" ] || return 1
+  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -x "$helper" ] || return 1
+  root_real="$(cd "$root" && pwd -P)" || return 1
+  bin_real="$(cd "$root/bin" && pwd -P)" || return 1
+  [ "$bin_real" = "$root_real/bin" ] || return 1
+  /usr/bin/stat -f '%d:%i' "$helper"
 }
 
 codex_main_pids() {
@@ -389,7 +434,7 @@ wait_for_cdp() {
 
 state_field() {
   local key="$1"
-  if [ -n "${NODE:-}" ] && [ -x "$NODE" ]; then
+  if [ "${NODE_RUNTIME_VALIDATED:-false}" = "true" ] && [ -n "${NODE:-}" ] && [ -x "$NODE" ]; then
     "$NODE" -e '
       const fs = require("node:fs");
       const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))[process.argv[2]];

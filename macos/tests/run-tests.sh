@@ -47,6 +47,7 @@ fi
 "$NODE" "$ROOT/tests/injector-bootstrap.test.mjs"
 "$NODE" "$ROOT/tests/renderer-inject.test.mjs"
 "$NODE" "$ROOT/tests/theme-stage.test.mjs"
+"$NODE" "$ROOT/tests/theme-config.test.mjs"
 NODE="$NODE" "$ROOT/tests/studio-adapter.test.sh"
 
 /usr/bin/swift build --package-path "$ROOT/studio" --product dream-skin-config-restore >/dev/null
@@ -798,9 +799,11 @@ CRLF_BACKUP="$TMP/config-crlf-backup.json"
 NATIVE_HOME="$TMP/native-restore-home"
 NATIVE_ENGINE="$NATIVE_HOME/.codex/codex-dream-skin-studio"
 NATIVE_STATE="$NATIVE_HOME/Library/Application Support/CodexDreamSkinStudio"
+NATIVE_MARKER="$TMP/native-restore-marker"
 /bin/mkdir -p "$NATIVE_ENGINE/bin" "$NATIVE_ENGINE/scripts" "$NATIVE_STATE" "$NATIVE_HOME/.codex"
 /bin/cp "$NATIVE_CONFIG_RESTORE" "$NATIVE_ENGINE/bin/dream-skin-config-restore"
 /bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$NATIVE_ENGINE/scripts/"
+/bin/cp "$ROOT/scripts/common-macos.sh" "$NATIVE_ENGINE/scripts/"
 /usr/bin/printf '%s\n' \
   'model = "gpt-5"' \
   '' \
@@ -819,40 +822,260 @@ NATIVE_STATE="$NATIVE_HOME/Library/Application Support/CodexDreamSkinStudio"
     },
   })}\n`);
 ' "$NATIVE_STATE/theme-backup.json" "$NATIVE_HOME/.codex/config.toml"
-/usr/bin/sed "s|__HOME__|$NATIVE_HOME|g; s|__ENGINE__|$NATIVE_ENGINE|g" \
-  > "$NATIVE_ENGINE/scripts/common-macos.sh" <<'STUB'
+/usr/bin/sed "s|__MARKER__|$NATIVE_MARKER|g" \
+  >> "$NATIVE_ENGINE/scripts/common-macos.sh" <<'STUB'
+try_discover_codex_app() { printf 'discover\n' >> "__MARKER__"; return 0; }
+try_validate_codex_app_identity() { printf 'trusted-app\n' >> "__MARKER__"; return 0; }
+try_require_macos_node_runtime() { printf 'missing-node\n' >> "__MARKER__"; return 1; }
+try_require_macos_runtime() { printf 'legacy-runtime\n' >> "__MARKER__"; return 1; }
+ensure_state_root() { :; }
+state_field() { return 1; }
+codex_is_running() { return 0; }
+verified_cdp_endpoint() { return 1; }
+stop_codex() { printf 'stop:%s\n' "$1" >> "__MARKER__"; }
+stop_recorded_injector() { return 0; }
+release_codex_launchd_job() { return 0; }
+launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
+STUB
+: > "$NATIVE_MARKER"
+/usr/bin/env -u NODE HOME="$NATIVE_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$NATIVE_ENGINE/scripts/restore-dream-skin-macos.sh" \
+  --restore-base-theme --restart-codex --restart-authorized >/dev/null
+/usr/bin/grep -F -q 'appearanceTheme = "system"' "$NATIVE_HOME/.codex/config.toml"
+/usr/bin/grep -F -q 'keepMe = "中文保留"' "$NATIVE_HOME/.codex/config.toml"
+[ ! -e "$NATIVE_STATE/theme-backup.json" ]
+/usr/bin/grep -Fx -q 'trusted-app' "$NATIVE_MARKER"
+/usr/bin/grep -Fx -q 'missing-node' "$NATIVE_MARKER"
+/usr/bin/grep -Fx -q 'stop:false' "$NATIVE_MARKER"
+/usr/bin/grep -Fx -q 'launch' "$NATIVE_MARKER"
+if /usr/bin/grep -Fx -q 'legacy-runtime' "$NATIVE_MARKER"; then
+  printf 'Node-free restore used the combined legacy runtime validator.\n' >&2
+  exit 1
+fi
+
+assert_unsafe_native_restore_helper_rejected() {
+  local kind="$1"
+  local fixture_home="$TMP/native-helper-$kind-home"
+  local fixture_engine="$fixture_home/.codex/codex-dream-skin-studio"
+  local fixture_state="$fixture_home/Library/Application Support/CodexDreamSkinStudio"
+  local fixture_helper="$fixture_engine/bin/dream-skin-config-restore"
+  local fixture_marker="$TMP/native-helper-$kind-marker"
+  local malicious_helper="$TMP/native-helper-$kind-malicious"
+  local malicious_marker="$TMP/native-helper-$kind-malicious-marker"
+  local error_path="$TMP/native-helper-$kind.error"
+  local restore_exit
+
+  /bin/mkdir -p "$fixture_engine/bin" "$fixture_engine/scripts" "$fixture_state" \
+    "$fixture_home/.codex"
+  /bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$fixture_engine/scripts/"
+  /bin/cp "$ROOT/scripts/common-macos.sh" "$fixture_engine/scripts/"
+  /usr/bin/printf 'config sentinel\n' > "$fixture_home/.codex/config.toml"
+  /usr/bin/printf 'backup sentinel\n' > "$fixture_state/theme-backup.json"
+  /bin/cp "$fixture_home/.codex/config.toml" "$fixture_home/.codex/config.toml.original"
+  /bin/cp "$fixture_state/theme-backup.json" "$fixture_state/theme-backup.json.original"
+  /usr/bin/sed "s|__MARKER__|$malicious_marker|g" > "$malicious_helper" <<'STUB'
+#!/bin/bash
+: > "__MARKER__"
+exit 0
+STUB
+  /bin/chmod 755 "$malicious_helper"
+  case "$kind" in
+    missing) : ;;
+    symlink) /bin/ln -s "$malicious_helper" "$fixture_helper" ;;
+    directory) /bin/mkdir "$fixture_helper" ;;
+    *) printf 'Unknown native helper fixture: %s\n' "$kind" >&2; exit 1 ;;
+  esac
+  /usr/bin/sed "s|__MARKER__|$fixture_marker|g" \
+    >> "$fixture_engine/scripts/common-macos.sh" <<'STUB'
+try_discover_codex_app() { printf 'discover\n' >> "__MARKER__"; return 0; }
+try_validate_codex_app_identity() { printf 'trusted-app\n' >> "__MARKER__"; return 0; }
+try_require_macos_node_runtime() { printf 'missing-node\n' >> "__MARKER__"; return 1; }
+state_field() { printf 'state-field\n' >> "__MARKER__"; return 1; }
+codex_is_running() { printf 'process-probe\n' >> "__MARKER__"; return 1; }
+ensure_state_root() { printf 'ensure-state\n' >> "__MARKER__"; }
+verified_cdp_endpoint() { printf 'endpoint-probe\n' >> "__MARKER__"; return 1; }
+stop_codex() { printf 'stop\n' >> "__MARKER__"; }
+stop_recorded_injector() { printf 'stop-injector\n' >> "__MARKER__"; return 0; }
+release_codex_launchd_job() { printf 'release-job\n' >> "__MARKER__"; return 0; }
+launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
+STUB
+  : > "$fixture_marker"
+
+  set +e
+  /usr/bin/env -u NODE HOME="$fixture_home" DREAM_SKIN_STUDIO_ADAPTER=true \
+    "$fixture_engine/scripts/restore-dream-skin-macos.sh" \
+    --restore-base-theme --restart-codex --restart-authorized \
+    >/dev/null 2>"$error_path"
+  restore_exit="$?"
+  set -e
+
+  [ "$restore_exit" -ne 0 ] || {
+    printf 'Restore unexpectedly accepted a %s native helper.\n' "$kind" >&2
+    exit 1
+  }
+  if /usr/bin/grep -Eq \
+    '^(state-field|process-probe|ensure-state|endpoint-probe|stop|stop-injector|release-job|launch)$' \
+    "$fixture_marker"; then
+    printf 'Restore touched process or state hooks before rejecting a %s native helper.\n' "$kind" >&2
+    exit 1
+  fi
+  /usr/bin/grep -F -q 'Native config restore helper is unsafe or missing' "$error_path" || {
+    printf 'Restore did not report an unsafe or missing %s native helper.\n' "$kind" >&2
+    exit 1
+  }
+  /usr/bin/cmp -s "$fixture_home/.codex/config.toml" \
+    "$fixture_home/.codex/config.toml.original"
+  /usr/bin/cmp -s "$fixture_state/theme-backup.json" \
+    "$fixture_state/theme-backup.json.original"
+  [ ! -e "$malicious_marker" ] || {
+    printf 'Restore executed a rejected %s native helper.\n' "$kind" >&2
+    exit 1
+  }
+}
+
+for unsafe_native_helper_kind in missing symlink directory; do
+  assert_unsafe_native_restore_helper_rejected "$unsafe_native_helper_kind"
+done
+
+# A valid helper can be replaced after preflight. The restore path must bind
+# execution to the original device/inode and reject the swapped path.
+RACE_HOME="$TMP/native-helper-race-home"
+RACE_ENGINE="$RACE_HOME/.codex/codex-dream-skin-studio"
+RACE_STATE="$RACE_HOME/Library/Application Support/CodexDreamSkinStudio"
+RACE_HELPER="$RACE_ENGINE/bin/dream-skin-config-restore"
+RACE_MARKER="$TMP/native-helper-race-marker"
+RACE_MALICIOUS="$TMP/native-helper-race-malicious"
+RACE_MALICIOUS_MARKER="$TMP/native-helper-race-malicious-marker"
+RACE_ERROR="$TMP/native-helper-race.error"
+/bin/mkdir -p "$RACE_ENGINE/bin" "$RACE_ENGINE/scripts" "$RACE_STATE" "$RACE_HOME/.codex"
+/bin/cp "$NATIVE_CONFIG_RESTORE" "$RACE_HELPER"
+/bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$RACE_ENGINE/scripts/"
+/bin/cp "$ROOT/scripts/common-macos.sh" "$RACE_ENGINE/scripts/"
+/usr/bin/printf 'config sentinel\n' > "$RACE_HOME/.codex/config.toml"
+/usr/bin/printf 'backup sentinel\n' > "$RACE_STATE/theme-backup.json"
+/bin/cp "$RACE_HOME/.codex/config.toml" "$RACE_HOME/.codex/config.toml.original"
+/bin/cp "$RACE_STATE/theme-backup.json" "$RACE_STATE/theme-backup.json.original"
+/usr/bin/sed "s|__MARKER__|$RACE_MALICIOUS_MARKER|g" > "$RACE_MALICIOUS" <<'STUB'
+#!/bin/bash
+: > "__MARKER__"
+exit 0
+STUB
+/bin/chmod 755 "$RACE_MALICIOUS"
+/usr/bin/sed \
+  "s|__MARKER__|$RACE_MARKER|g; s|__MALICIOUS__|$RACE_MALICIOUS|g" \
+  >> "$RACE_ENGINE/scripts/common-macos.sh" <<'STUB'
+try_discover_codex_app() { return 0; }
+try_validate_codex_app_identity() { return 0; }
+try_require_macos_node_runtime() { return 1; }
+codex_is_running() {
+  /bin/mv "$INSTALL_ROOT/bin/dream-skin-config-restore" \
+    "$INSTALL_ROOT/bin/dream-skin-config-restore.preflight"
+  /bin/ln -s "__MALICIOUS__" "$INSTALL_ROOT/bin/dream-skin-config-restore"
+  printf 'process-probe\n' >> "__MARKER__"
+  return 1
+}
+ensure_state_root() { :; }
+verified_cdp_endpoint() { return 1; }
+release_codex_launchd_job() { return 0; }
+launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
+STUB
+: > "$RACE_MARKER"
+set +e
+/usr/bin/env -u NODE HOME="$RACE_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RACE_ENGINE/scripts/restore-dream-skin-macos.sh" \
+  --restore-base-theme --restart-codex --restart-authorized \
+  >/dev/null 2>"$RACE_ERROR"
+RACE_EXIT="$?"
+set -e
+[ "$RACE_EXIT" -ne 0 ] || {
+  printf 'Restore accepted a native helper swapped after preflight.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q 'Native config restore helper changed before execution' "$RACE_ERROR" || {
+  printf 'Restore did not report a native helper changed after preflight.\n' >&2
+  exit 1
+}
+/usr/bin/grep -Fx -q 'process-probe' "$RACE_MARKER"
+if /usr/bin/grep -Fx -q 'launch' "$RACE_MARKER"; then
+  printf 'Restore relaunched Codex after the native helper identity changed.\n' >&2
+  exit 1
+fi
+[ ! -e "$RACE_MALICIOUS_MARKER" ] || {
+  printf 'Restore executed a native helper swapped after preflight.\n' >&2
+  exit 1
+}
+/usr/bin/cmp -s "$RACE_HOME/.codex/config.toml" "$RACE_HOME/.codex/config.toml.original"
+/usr/bin/cmp -s "$RACE_STATE/theme-backup.json" "$RACE_STATE/theme-backup.json.original"
+
+UNTRUSTED_HOME="$TMP/untrusted-app-home"
+UNTRUSTED_ENGINE="$UNTRUSTED_HOME/.codex/codex-dream-skin-studio"
+UNTRUSTED_STATE="$UNTRUSTED_HOME/Library/Application Support/CodexDreamSkinStudio"
+UNTRUSTED_MARKER="$TMP/untrusted-app-marker"
+/bin/mkdir -p "$UNTRUSTED_ENGINE/bin" "$UNTRUSTED_ENGINE/scripts" "$UNTRUSTED_STATE" "$UNTRUSTED_HOME/.codex"
+/bin/cp "$NATIVE_CONFIG_RESTORE" "$UNTRUSTED_ENGINE/bin/dream-skin-config-restore"
+/bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$UNTRUSTED_ENGINE/scripts/"
+/usr/bin/printf 'config sentinel\n' > "$UNTRUSTED_HOME/.codex/config.toml"
+/usr/bin/printf 'backup sentinel\n' > "$UNTRUSTED_STATE/theme-backup.json"
+/usr/bin/sed "s|__HOME__|$UNTRUSTED_HOME|g; s|__ENGINE__|$UNTRUSTED_ENGINE|g; s|__MARKER__|$UNTRUSTED_MARKER|g" \
+  > "$UNTRUSTED_ENGINE/scripts/common-macos.sh" <<'STUB'
 INSTALL_ROOT="__ENGINE__"
 STATE_ROOT="__HOME__/Library/Application Support/CodexDreamSkinStudio"
 STATE_PATH="$STATE_ROOT/state.json"
 THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
 THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="__HOME__/.codex/config.toml"
-INJECTOR="$INSTALL_ROOT/scripts/injector.mjs"
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
 try_discover_codex_app() { return 0; }
-try_require_macos_runtime() { [ -z "${NODE+x}" ] && return 1; return 99; }
-ensure_state_root() { :; }
-state_field() { return 1; }
-codex_is_running() { return 1; }
-verified_cdp_endpoint() { return 1; }
-stop_recorded_injector() { return 0; }
-release_codex_launchd_job() { return 0; }
-launch_codex_normally() { :; }
+try_validate_codex_app_identity() { printf 'untrusted-app\n' >> "__MARKER__"; return 1; }
+try_require_macos_node_runtime() { printf 'node-validation\n' >> "__MARKER__"; return 0; }
+try_require_macos_runtime() { return 0; }
+codex_is_running() { printf 'process-probe\n' >> "__MARKER__"; return 0; }
+stop_codex() { printf 'stop\n' >> "__MARKER__"; }
+launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
 STUB
-/usr/bin/env -u NODE HOME="$NATIVE_HOME" \
-  "$NATIVE_ENGINE/scripts/restore-dream-skin-macos.sh" --restore-base-theme >/dev/null
-/usr/bin/grep -F -q 'appearanceTheme = "system"' "$NATIVE_HOME/.codex/config.toml"
-/usr/bin/grep -F -q 'keepMe = "中文保留"' "$NATIVE_HOME/.codex/config.toml"
-[ ! -e "$NATIVE_STATE/theme-backup.json" ]
+: > "$UNTRUSTED_MARKER"
+set +e
+/usr/bin/env -u NODE HOME="$UNTRUSTED_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$UNTRUSTED_ENGINE/scripts/restore-dream-skin-macos.sh" \
+  --restore-base-theme --restart-codex --restart-authorized >/dev/null 2>&1
+UNTRUSTED_EXIT="$?"
+set -e
+[ "$UNTRUSTED_EXIT" -ne 0 ] || { printf 'Untrusted Codex app restore unexpectedly succeeded.\n' >&2; exit 1; }
+/usr/bin/grep -Fx -q 'untrusted-app' "$UNTRUSTED_MARKER"
+if /usr/bin/grep -Eq '^(node-validation|process-probe|stop|launch)$' "$UNTRUSTED_MARKER"; then
+  printf 'Untrusted Codex app was probed, stopped, or relaunched.\n' >&2
+  exit 1
+fi
+[ "$(/bin/cat "$UNTRUSTED_HOME/.codex/config.toml")" = 'config sentinel' ]
+[ "$(/bin/cat "$UNTRUSTED_STATE/theme-backup.json")" = 'backup sentinel' ]
 
 STATE_FALLBACK_HOME="$TMP/state-fallback-home"
 STATE_FALLBACK_ROOT="$STATE_FALLBACK_HOME/Library/Application Support/CodexDreamSkinStudio"
 /bin/mkdir -p "$STATE_FALLBACK_ROOT"
 /usr/bin/printf '%s\n' '{"port":9341,"injectorPid":0}' > "$STATE_FALLBACK_ROOT/state.json"
+MALICIOUS_NODE="$TMP/inherited-node"
+MALICIOUS_NODE_MARKER="$TMP/inherited-node-marker"
+/usr/bin/sed "s|__MARKER__|$MALICIOUS_NODE_MARKER|g" > "$MALICIOUS_NODE" <<'STUB'
+#!/bin/bash
+: > "__MARKER__"
+exit 91
+STUB
+/bin/chmod 755 "$MALICIOUS_NODE"
+/usr/bin/env HOME="$STATE_FALLBACK_HOME" NODE="$MALICIOUS_NODE" \
+  NODE_RUNTIME_VALIDATED=true /bin/bash -c '
+    . "$1/scripts/common-macos.sh"
+    [ "$(state_field port)" = "9341" ]
+  ' _ "$ROOT"
+[ ! -e "$MALICIOUS_NODE_MARKER" ] || {
+  printf 'state_field executed an inherited unvalidated Node.\n' >&2
+  exit 1
+}
 /usr/bin/env -u NODE HOME="$STATE_FALLBACK_HOME" /bin/bash -c '
   . "$1/scripts/common-macos.sh"
   CODEX_BUNDLE="$2"
-  if try_require_macos_runtime 2>"$3"; then exit 1; fi
+  CODEX_APP_VALIDATED=true
+  CODEX_TEAM_ID="$EXPECTED_CODEX_TEAM_ID"
+  if try_require_macos_node_runtime 2>"$3"; then exit 1; fi
   /usr/bin/grep -F -q "signed Node.js runtime bundled with Codex was not found" "$3"
 ' _ "$ROOT" "$TMP/missing-codex.app" "$TMP/try-runtime.error"
 /usr/bin/env -u NODE HOME="$STATE_FALLBACK_HOME" /bin/bash -c '

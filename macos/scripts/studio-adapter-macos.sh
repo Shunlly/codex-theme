@@ -38,6 +38,28 @@ fi
 if [ "$DELETE_USER_THEMES" = "true" ] && [ "$OPERATION" != "uninstall" ]; then
   emit_invalid_request
 fi
+
+native_restore_helper_is_safe() {
+  local root="$1"
+  local helper="$root/bin/dream-skin-config-restore"
+  local root_real=""
+  local bin_real=""
+  [ -d "$root" ] && [ -d "$root/bin" ] && [ ! -L "$root/bin" ] || return 1
+  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -x "$helper" ] || return 1
+  root_real="$(cd "$root" && pwd -P)" || return 1
+  bin_real="$(cd "$root/bin" && pwd -P)" || return 1
+  [ "$bin_real" = "$root_real/bin" ]
+}
+
+emit_runtime_invalid() {
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"RUNTIME_INVALID","message":"The Studio runtime is unavailable.","recoveryActions":["diagnostics","cancel"]}}\n' "$OPERATION"
+  exit 1
+}
+
+if { [ "$OPERATION" = "preflight" ] || [ "$OPERATION" = "install" ]; } \
+  && ! native_restore_helper_is_safe "$PROJECT_ROOT"; then
+  emit_runtime_invalid
+fi
 if [ "$OPERATION" = "preflight" ] || [ "$OPERATION" = "status" ]; then
   [ "$RESTART_AUTHORIZED" = "false" ] && [ "$DELETE_USER_THEMES" = "false" ] || emit_invalid_request
   exec "$SCRIPT_DIR/status-dream-skin-macos.sh" --studio-json --deep --operation "$OPERATION"
@@ -61,7 +83,8 @@ fi
 
 engine_complete() {
   local root="$1"
-  [ -f "$root/VERSION" ] \
+  native_restore_helper_is_safe "$root" \
+    && [ -f "$root/VERSION" ] \
     && [ -x "$root/scripts/status-dream-skin-macos.sh" ] \
     && [ -x "$root/scripts/start-dream-skin-macos.sh" ] \
     && [ -x "$root/scripts/pause-dream-skin-macos.sh" ] \

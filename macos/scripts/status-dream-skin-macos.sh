@@ -157,6 +157,18 @@ studio_strict_verify() {
   )
 }
 
+native_restore_helper_is_safe() {
+  local root="$1"
+  local helper="$root/bin/dream-skin-config-restore"
+  local root_real=""
+  local bin_real=""
+  [ -d "$root" ] && [ -d "$root/bin" ] && [ ! -L "$root/bin" ] || return 1
+  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -x "$helper" ] || return 1
+  root_real="$(cd "$root" && pwd -P)" || return 1
+  bin_real="$(cd "$root/bin" && pwd -P)" || return 1
+  [ "$bin_real" = "$root_real/bin" ]
+}
+
 if [ "$STUDIO_JSON" = "true" ]; then
   # Studio status must inspect only; lifecycle scripts own all writes and PID changes.
   json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
@@ -170,7 +182,8 @@ if [ "$STUDIO_JSON" = "true" ]; then
   ERROR="null"
   EXIT_CODE=0
 
-  if [ -f "$INSTALL_ROOT/VERSION" ] && /usr/bin/cmp -s "$INSTALL_ROOT/VERSION" "$PROJECT_ROOT/VERSION" \
+  if native_restore_helper_is_safe "$INSTALL_ROOT" \
+    && [ -f "$INSTALL_ROOT/VERSION" ] && /usr/bin/cmp -s "$INSTALL_ROOT/VERSION" "$PROJECT_ROOT/VERSION" \
     && [ -x "$INSTALL_ROOT/scripts/studio-adapter-macos.sh" ] \
     && [ -x "$INSTALL_ROOT/scripts/start-dream-skin-macos.sh" ] \
     && [ -x "$INSTALL_ROOT/scripts/restore-dream-skin-macos.sh" ] \

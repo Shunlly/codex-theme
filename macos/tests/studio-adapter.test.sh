@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 NODE="${NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 [ -x "$NODE" ] || { printf 'Codex bundled Node.js was not found: %s\n' "$NODE" >&2; exit 1; }
 
@@ -11,11 +11,18 @@ NODE="${NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
   if (!/mdfind '\''kMDItemCFBundleIdentifier == "com\.openai\.codex"'\''/.test(source)) {
     throw new Error("Studio status is missing the official Codex Spotlight fallback.");
   }
-' "$ROOT/scripts/status-dream-skin-macos.sh"
+' "$SOURCE_ROOT/scripts/status-dream-skin-macos.sh"
 
 TMP="$(/usr/bin/mktemp -d /tmp/codex-dream-skin-studio-adapter.XXXXXX)"
+ROOT="$TMP/bundled-engine"
 TEST_HOME="$TMP/home"
-/bin/mkdir -p "$TEST_HOME"
+/bin/mkdir -p "$TEST_HOME" "$ROOT/bin"
+/bin/cp -R "$SOURCE_ROOT/scripts" "$ROOT/scripts"
+/bin/cp "$SOURCE_ROOT/VERSION" "$ROOT/VERSION"
+/usr/bin/swift build --package-path "$SOURCE_ROOT/studio" --product dream-skin-config-restore >/dev/null
+BUILT_NATIVE_HELPER="$(/usr/bin/swift build --package-path "$SOURCE_ROOT/studio" --show-bin-path)/dream-skin-config-restore"
+/bin/cp "$BUILT_NATIVE_HELPER" "$ROOT/bin/dream-skin-config-restore"
+/bin/chmod 755 "$ROOT/bin/dream-skin-config-restore"
 RESPONDER_PID=""
 cleanup() {
   [ -z "$RESPONDER_PID" ] || /bin/kill -TERM "$RESPONDER_PID" 2>/dev/null || true
@@ -67,6 +74,37 @@ assert_recovery() {
     if (!actions.includes(process.argv[2]) || (process.argv[3] && actions.includes(process.argv[3]))) process.exit(1);
   ' "$ADAPTER_JSON" "$1" "${2:-}"
 }
+
+VALID_NATIVE_HELPER="$TMP/valid-dream-skin-config-restore"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$VALID_NATIVE_HELPER"
+for invalid_helper in missing symlink directory; do
+  /bin/rm -rf "$ROOT/bin/dream-skin-config-restore"
+  case "$invalid_helper" in
+    missing) ;;
+    symlink) /bin/ln -s "$VALID_NATIVE_HELPER" "$ROOT/bin/dream-skin-config-restore" ;;
+    directory) /bin/mkdir "$ROOT/bin/dream-skin-config-restore" ;;
+  esac
+  for guarded_operation in preflight install; do
+    BEFORE="$(snapshot)"
+    run_adapter "$guarded_operation"
+    assert_error RUNTIME_INVALID
+    [ "$BEFORE" = "$(snapshot)" ] || {
+      printf '%s with a %s native helper changed HOME.\n' "$guarded_operation" "$invalid_helper" >&2
+      exit 1
+    }
+  done
+done
+/bin/rm -rf "$ROOT/bin/dream-skin-config-restore"
+/bin/cp "$VALID_NATIVE_HELPER" "$ROOT/bin/dream-skin-config-restore"
+/bin/chmod 755 "$ROOT/bin/dream-skin-config-restore"
+
+INSTALLED_LAYOUT="$TMP/installed-layout"
+/bin/mkdir -p "$INSTALLED_LAYOUT"
+/usr/bin/rsync -a "$ROOT/" "$INSTALLED_LAYOUT/"
+[ -f "$INSTALLED_LAYOUT/bin/dream-skin-config-restore" ]
+[ ! -L "$INSTALLED_LAYOUT/bin/dream-skin-config-restore" ]
+[ -x "$INSTALLED_LAYOUT/bin/dream-skin-config-restore" ]
+/usr/bin/cmp -s "$ROOT/bin/dream-skin-config-restore" "$INSTALLED_LAYOUT/bin/dream-skin-config-restore"
 
 BEFORE="$(snapshot)"
 run_adapter preflight
@@ -124,8 +162,9 @@ printf '%s\n' "$LEGACY_TEXT" | /usr/bin/grep -Fx 'cdp=true' >/dev/null
 TEST_HOME="$TMP/success-home"
 INSTALL_ROOT="$TEST_HOME/.codex/codex-dream-skin-studio"
 STATE_ROOT="$TEST_HOME/Library/Application Support/CodexDreamSkinStudio"
-/bin/mkdir -p "$INSTALL_ROOT/scripts" "$STATE_ROOT/theme"
+/bin/mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/scripts" "$STATE_ROOT/theme"
 /bin/cp "$ROOT/VERSION" "$INSTALL_ROOT/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$INSTALL_ROOT/bin/"
 for script in studio-adapter-macos.sh start-dream-skin-macos.sh restore-dream-skin-macos.sh; do
   : > "$INSTALL_ROOT/scripts/$script"
   /bin/chmod 755 "$INSTALL_ROOT/scripts/$script"
@@ -162,10 +201,12 @@ BUNDLED="$FIXTURE/bundled"
 INSTALLED="$FIXTURE_HOME/.codex/codex-dream-skin-studio"
 MARKER="$FIXTURE/marker"
 STATUS_FIXTURE="$FIXTURE/status.json"
-/bin/mkdir -p "$FIXTURE_HOME" "$BUNDLED/scripts" "$INSTALLED/scripts"
+/bin/mkdir -p "$FIXTURE_HOME" "$BUNDLED/bin" "$BUNDLED/scripts" "$INSTALLED/bin" "$INSTALLED/scripts"
 /bin/cp "$ROOT/scripts/studio-adapter-macos.sh" "$BUNDLED/scripts/"
 /bin/cp "$ROOT/VERSION" "$BUNDLED/VERSION"
 /bin/cp "$ROOT/VERSION" "$INSTALLED/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$BUNDLED/bin/"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$INSTALLED/bin/"
 
 write_status() {
   /usr/bin/printf '{"schemaVersion":1,"ok":true,"operation":"status","state":{"install":"%s","codex":"%s","session":"%s","operation":"idle","themeName":"Fixture","requiresRestart":%s,"availableActions":["apply","pause","resume","restore","verify","uninstall"],"verified":%s},"error":null}\n' \
@@ -382,6 +423,8 @@ discover_codex_app() { :; }
 require_macos_runtime() { :; }
 try_discover_codex_app() { :; }
 try_require_macos_runtime() { :; }
+try_validate_codex_app_identity() { CODEX_APP_VALIDATED=true; }
+try_require_macos_node_runtime() { NODE=/usr/bin/true; NODE_RUNTIME_VALIDATED=true; }
 ensure_state_root() { printf 'ensure\n' >> "__MARKER__"; }
 state_field() { printf '9341\n'; }
 codex_is_running() { return 0; }
@@ -431,8 +474,9 @@ run_fixture_adapter uninstall --restart-authorized
 [ "$(/usr/bin/head -n 1 "$MARKER")" = 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex --uninstall --restart-authorized' ]
 
 # Recreate the installed fixture after uninstall, then prove explicit theme deletion is last.
-/bin/mkdir -p "$INSTALLED/scripts"
+/bin/mkdir -p "$INSTALLED/bin" "$INSTALLED/scripts"
 /bin/cp "$ROOT/VERSION" "$INSTALLED/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$INSTALLED/bin/"
 for script in start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh common-macos.sh theme-config.mjs injector.mjs; do
   make_stub "$INSTALLED/scripts/$script"
 done
@@ -444,8 +488,9 @@ run_fixture_adapter uninstall --restart-authorized --delete-user-themes
 [ ! -e "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/theme" ]
 
 # A failed restore must leave both the installed engine and saved themes untouched.
-/bin/mkdir -p "$INSTALLED/scripts" "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/themes"
+/bin/mkdir -p "$INSTALLED/bin" "$INSTALLED/scripts" "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/themes"
 /bin/cp "$ROOT/VERSION" "$INSTALLED/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$INSTALLED/bin/"
 for script in start-dream-skin-macos.sh pause-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh common-macos.sh theme-config.mjs injector.mjs; do
   make_stub "$INSTALLED/scripts/$script"
 done
@@ -464,8 +509,9 @@ assert_error OPERATION_FAILED
   || { printf 'failed restore deleted saved themes.\n' >&2; exit 1; }
 
 # Cleanup failures stay in the operation log and return one stable JSON line.
-/bin/mkdir -p "$INSTALLED/scripts"
+/bin/mkdir -p "$INSTALLED/bin" "$INSTALLED/scripts"
 /bin/cp "$ROOT/VERSION" "$INSTALLED/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$INSTALLED/bin/"
 for script in start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh common-macos.sh theme-config.mjs injector.mjs; do
   make_stub "$INSTALLED/scripts/$script"
 done

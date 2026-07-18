@@ -79,6 +79,73 @@ function settingLines(body, key) {
   return { matches, token };
 }
 
+function hexDigitValue(character) {
+  const code = character?.charCodeAt(0);
+  if (code >= 0x30 && code <= 0x39) return code - 0x30;
+  if (code >= 0x41 && code <= 0x46) return code - 0x41 + 10;
+  if (code >= 0x61 && code <= 0x66) return code - 0x61 + 10;
+  return -1;
+}
+
+function tomlStringEnd(line, start) {
+  const quote = line[start];
+  if (quote !== `"` && quote !== `'`) return -1;
+  let index = start + 1;
+  while (index < line.length) {
+    const character = line[index];
+    if (character === quote) return index + 1;
+    if (quote === `"` && character === "\\") {
+      index += 1;
+      if (index >= line.length) return -1;
+      const escape = line[index];
+      if ([`"`, "\\", "b", "t", "n", "f", "r"].includes(escape)) {
+        index += 1;
+        continue;
+      }
+      if (escape !== "u" && escape !== "U") return -1;
+      const digits = escape === "u" ? 4 : 8;
+      let scalar = 0;
+      for (let offset = 1; offset <= digits; offset += 1) {
+        const digit = hexDigitValue(line[index + offset]);
+        if (digit < 0) return -1;
+        scalar = (scalar * 16) + digit;
+      }
+      if (scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff)) return -1;
+      index += digits + 1;
+      continue;
+    }
+    const code = line.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const low = line.charCodeAt(index + 1);
+      if (low < 0xdc00 || low > 0xdfff) return -1;
+      index += 2;
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) return -1;
+    index += 1;
+  }
+  return -1;
+}
+
+function validBackupAssignment(line, key) {
+  if (
+    typeof line !== "string"
+    || /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/u.test(line)
+    || !line.startsWith(key)
+  ) {
+    return false;
+  }
+  let index = key.length;
+  while (line[index] === " " || line[index] === "\t") index += 1;
+  if (line[index] !== "=") return false;
+  index += 1;
+  while (line[index] === " " || line[index] === "\t") index += 1;
+  index = tomlStringEnd(line, index);
+  if (index < 0) return false;
+  while (line[index] === " " || line[index] === "\t") index += 1;
+  return index === line.length || line[index] === "#";
+}
+
 function validateBackup(backup) {
   if (
     backup?.schemaVersion !== 1
@@ -102,13 +169,7 @@ function validateBackup(backup) {
   for (const key of expectedKeys) {
     const line = backup.values[key];
     if (line === null) continue;
-    const token = key.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
-    const assignment = new RegExp(`^${token}[\\t ]*=[\\t ]*[^\\r\\n\\u2028\\u2029]*$`, "u");
-    if (
-      typeof line !== "string"
-      || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/u.test(line)
-      || !assignment.test(line)
-    ) {
+    if (!validBackupAssignment(line, key)) {
       throw new Error(`Theme backup contains an invalid ${key} assignment; nothing was restored.`);
     }
   }

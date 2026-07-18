@@ -23,7 +23,9 @@ public enum SelectiveConfigRestore {
             throw RestoreError("Refusing to rewrite TOML containing multiline strings.")
         }
         try assertSupportedTOMLLayout(content)
+        try assertNoQuotedDesktopTable(content)
         var section = try desktopSection(content)
+        let preferredNewline = content.contains("\r\n") ? "\r\n" : "\n"
 
         let backupBytes: Data
         do {
@@ -62,7 +64,7 @@ public enum SelectiveConfigRestore {
                 try removeBackup(backupURL)
                 return
             }
-            content = trimEnd(content) + "\n\n[desktop]\n"
+            content = trimEnd(content) + preferredNewline + preferredNewline + "[desktop]" + preferredNewline
             section = try desktopSection(content)
         }
 
@@ -70,8 +72,14 @@ public enum SelectiveConfigRestore {
             throw RestoreError("Could not locate the [desktop] table.")
         }
         var body = String(content[section.bodyRange])
+        try assertNoAmbiguousSettings(body)
         for key in settingKeys {
-            body = try replaceSetting(in: body, key: key, line: values[key] ?? nil)
+            body = try replaceSetting(
+                in: body,
+                key: key,
+                line: values[key] ?? nil,
+                preferredNewline: preferredNewline
+            )
         }
         let restored = String(content[..<section.bodyRange.lowerBound])
             + body
@@ -145,6 +153,27 @@ public enum SelectiveConfigRestore {
         }
     }
 
+    private static func assertNoQuotedDesktopTable(_ content: String) throws {
+        let pattern = #"(?m)^[\t ]*\[[\t ]*[\"']desktop[\"'][\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let range = NSRange(content.startIndex..<content.endIndex, in: content)
+        if regex.firstMatch(in: content, range: range) != nil {
+            throw RestoreError("Refusing to rewrite a quoted [desktop] table.")
+        }
+    }
+
+    private static func assertNoAmbiguousSettings(_ body: String) throws {
+        let keys = settingKeys.map(NSRegularExpression.escapedPattern).joined(separator: "|")
+        let patterns = [
+            "(?m)^[\\t ]+(?:\(keys))[\\t ]*=",
+            "(?m)^[\\t ]*[\\\"'](?:\(keys))[\\\"'][\\t ]*=",
+        ]
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        for pattern in patterns where try NSRegularExpression(pattern: pattern).firstMatch(in: body, range: range) != nil {
+            throw RestoreError("Refusing to rewrite quoted or indented appearance settings.")
+        }
+    }
+
     private static func tomlStructure(for line: String) -> String {
         var result = ""
         var quote: Character?
@@ -185,13 +214,18 @@ public enum SelectiveConfigRestore {
         return matches
     }
 
-    private static func replaceSetting(in body: String, key: String, line: String?) throws -> String {
+    private static func replaceSetting(
+        in body: String,
+        key: String,
+        line: String?,
+        preferredNewline: String
+    ) throws -> String {
         _ = try settingMatches(in: body, key: key)
         let token = NSRegularExpression.escapedPattern(for: key)
         let regex = try NSRegularExpression(pattern: "(?m)^\(token)[\\t ]*=.*(?:\\r?\\n)?")
         let fullRange = NSRange(body.startIndex..<body.endIndex, in: body)
         let match = regex.firstMatch(in: body, range: fullRange).flatMap { Range($0.range, in: body) }
-        let newline = body.contains("\r\n") ? "\r\n" : "\n"
+        let newline = body.contains("\r\n") ? "\r\n" : preferredNewline
 
         guard let line else {
             guard let match else { return body }
@@ -242,17 +276,60 @@ public enum SelectiveConfigRestore {
             .union(CharacterSet(charactersIn: "\u{007f}"..."\u{009f}"))
             .union(CharacterSet(charactersIn: "\u{2028}\u{2029}"))
         guard !line.contains("\n"), line.rangeOfCharacter(from: invalidControls) == nil else { return false }
-        guard line.hasPrefix(key) else { return false }
-        var index = line.index(line.startIndex, offsetBy: key.count)
-        while index < line.endIndex, line[index] == " " || line[index] == "\t" {
-            index = line.index(after: index)
+        let scalars = Array(line.unicodeScalars)
+        let keyScalars = Array(key.unicodeScalars)
+        guard scalars.starts(with: keyScalars) else { return false }
+        var index = keyScalars.count
+        while index < scalars.count, scalars[index] == " " || scalars[index] == "\t" { index += 1 }
+        guard index < scalars.count, scalars[index] == "=" else { return false }
+        index += 1
+        while index < scalars.count, scalars[index] == " " || scalars[index] == "\t" { index += 1 }
+        guard let valueEnd = tomlStringEnd(scalars, start: index) else { return false }
+        index = valueEnd
+        while index < scalars.count, scalars[index] == " " || scalars[index] == "\t" { index += 1 }
+        return index == scalars.count || scalars[index] == "#"
+    }
+
+    private static func tomlStringEnd(_ scalars: [Unicode.Scalar], start: Int) -> Int? {
+        guard start < scalars.count, scalars[start] == "\"" || scalars[start] == "'" else { return nil }
+        let quote = scalars[start]
+        var index = start + 1
+        while index < scalars.count {
+            let scalar = scalars[index]
+            if scalar == quote { return index + 1 }
+            if quote == "\"", scalar == "\\" {
+                index += 1
+                guard index < scalars.count else { return nil }
+                switch scalars[index] {
+                case "\"", "\\", "b", "t", "n", "f", "r":
+                    index += 1
+                case "u", "U":
+                    let digits = scalars[index] == "u" ? 4 : 8
+                    guard index + digits < scalars.count else { return nil }
+                    var value: UInt32 = 0
+                    for offset in 1...digits {
+                        guard let digit = hexDigitValue(scalars[index + offset]) else { return nil }
+                        value = (value * 16) + digit
+                    }
+                    guard value <= 0x10ffff, !(0xd800...0xdfff).contains(value) else { return nil }
+                    index += digits + 1
+                default:
+                    return nil
+                }
+            } else {
+                index += 1
+            }
         }
-        guard index < line.endIndex, line[index] == "=" else { return false }
-        index = line.index(after: index)
-        while index < line.endIndex, line[index] == " " || line[index] == "\t" {
-            index = line.index(after: index)
+        return nil
+    }
+
+    private static func hexDigitValue(_ scalar: Unicode.Scalar) -> UInt32? {
+        switch scalar.value {
+        case 0x30...0x39: return scalar.value - 0x30
+        case 0x41...0x46: return scalar.value - 0x41 + 10
+        case 0x61...0x66: return scalar.value - 0x61 + 10
+        default: return nil
         }
-        return true
     }
 
     private static func trimEnd(_ content: String) -> String {
@@ -311,6 +388,9 @@ public enum SelectiveConfigRestore {
 
         descriptor = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL, mode)
         guard descriptor >= 0 else { throw posixError("Could not create config temporary file") }
+        guard Darwin.fchmod(descriptor, mode) == 0 else {
+            throw posixError("Could not set config temporary file permissions")
+        }
         try data.withUnsafeBytes { bytes in
             guard var cursor = bytes.baseAddress else { return }
             var remaining = bytes.count
@@ -331,9 +411,6 @@ public enum SelectiveConfigRestore {
         try assertConfigUnchanged(at: url, expectedBytes: expectedBytes, expectedStat: expectedStat)
         guard Darwin.rename(temporary.path, url.path) == 0 else {
             throw posixError("Could not atomically replace Codex config")
-        }
-        guard Darwin.chmod(url.path, mode) == 0 else {
-            throw posixError("Could not preserve Codex config permissions")
         }
     }
 

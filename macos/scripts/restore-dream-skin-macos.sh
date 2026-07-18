@@ -24,9 +24,12 @@ done
 
 CODEX_AVAILABLE="false"
 NODE_AVAILABLE="false"
-if try_discover_codex_app; then
+unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID CODEX_TEAM_ID
+CODEX_APP_VALIDATED="false"
+NODE_RUNTIME_VALIDATED="false"
+if try_discover_codex_app && try_validate_codex_app_identity; then
   CODEX_AVAILABLE="true"
-  if try_require_macos_runtime; then
+  if try_require_macos_node_runtime; then
     NODE_AVAILABLE="true"
   else
     unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
@@ -35,10 +38,11 @@ elif [ "$RESTART_CODEX" = "true" ]; then
   fail "The official Codex app is required to complete the requested restart."
 fi
 NATIVE_CONFIG_RESTORE=""
+NATIVE_CONFIG_RESTORE_IDENTITY=""
 if [ "$RESTORE_BASE_THEME" = "true" ] && [ "$NODE_AVAILABLE" != "true" ]; then
   NATIVE_CONFIG_RESTORE="$INSTALL_ROOT/bin/dream-skin-config-restore"
-  [ -x "$NATIVE_CONFIG_RESTORE" ] \
-    || fail "Native config restore helper is missing: $NATIVE_CONFIG_RESTORE"
+  NATIVE_CONFIG_RESTORE_IDENTITY="$(native_restore_helper_identity "$INSTALL_ROOT" "$NATIVE_CONFIG_RESTORE")" \
+    || fail "Native config restore helper is unsafe or missing: $NATIVE_CONFIG_RESTORE"
 fi
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
   PORT="$(state_field port)" || fail "Could not read the saved CDP port; state was preserved."
@@ -99,6 +103,8 @@ if [ "$RESTORE_BASE_THEME" = "true" ]; then
   if [ "$NODE_AVAILABLE" = "true" ]; then
     "$NODE" "$SCRIPT_DIR/theme-config.mjs" restore "$CONFIG_PATH" "$THEME_BACKUP_PATH"
   else
+    [ "$(native_restore_helper_identity "$INSTALL_ROOT" "$NATIVE_CONFIG_RESTORE")" = "$NATIVE_CONFIG_RESTORE_IDENTITY" ] \
+      || fail "Native config restore helper changed before execution; restore stopped safely."
     "$NATIVE_CONFIG_RESTORE" "$CONFIG_PATH" "$THEME_BACKUP_PATH"
   fi
 fi

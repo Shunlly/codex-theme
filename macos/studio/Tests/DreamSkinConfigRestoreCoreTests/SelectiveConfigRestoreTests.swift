@@ -179,6 +179,44 @@ final class SelectiveConfigRestoreTests: TestCase {
 #if !canImport(XCTest)
     @Test
 #endif
+    func testRestoresSpacedDesktopTableWithoutAppendingAnotherTable() throws {
+        let fixture = try makeFixture(
+            config: "[  desktop  ] # keep\nappearanceTheme = \"dark\"\n",
+            appearanceTheme: "appearanceTheme = \"system\""
+        )
+
+        try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup)
+
+        XCTAssertEqual(
+            try String(contentsOf: fixture.config, encoding: .utf8),
+            "[  desktop  ] # keep\nappearanceTheme = \"system\"\n"
+        )
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRejectsQuotedDesktopTableInsteadOfAppendingDuplicate() throws {
+        try assertRejected(config: "[\"desktop\"]\nkeep = true\n")
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRejectsIndentedAppearanceKeyInsteadOfAppendingDuplicate() throws {
+        try assertRejected(config: "[desktop]\n  appearanceTheme = \"dark\"\n")
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRejectsQuotedAppearanceKeyInsteadOfAppendingDuplicate() throws {
+        try assertRejected(config: "[desktop]\n\"appearanceTheme\" = \"dark\"\n")
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
     func testRejectsMultilineStrings() throws {
         try assertRejected(config: "note = \"\"\"value\ncontinued\"\"\"\n[desktop]\nkeep = true\n")
     }
@@ -219,6 +257,76 @@ final class SelectiveConfigRestoreTests: TestCase {
             "appearanceTheme": "appearanceTheme = \"dark\"\nmodel = \"unsafe\"",
             "appearanceDarkCodeThemeId": NSNull(),
         ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testAcceptsCompleteSingleLineStringBackupAssignments() throws {
+        let assignments = [
+            "appearanceTheme = \"\"",
+            "appearanceTheme = ''",
+            "appearanceTheme\t=\t\"dark\\tmode\\u0021\"\t# keep escaped content",
+            "appearanceTheme = \"dark \\\"quoted\\\" \\\\ path\" # keep comment",
+            "appearanceTheme = \"emoji: \\U0001F600\"",
+            "appearanceTheme = 'dark # literal \\q'",
+            "appearanceTheme = 'literal value'\t",
+        ]
+
+        for assignment in assignments {
+            let fixture = try makeFixture(
+                config: "[desktop]\nkeepMe = true\n",
+                appearanceTheme: assignment
+            )
+
+            try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup)
+
+            XCTAssertEqual(
+                try String(contentsOf: fixture.config, encoding: .utf8),
+                "[desktop]\nkeepMe = true\n\(assignment)\n"
+            )
+            XCTAssertFalse(fileManager.fileExists(atPath: fixture.backup.path))
+        }
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRejectsNonStringAndMalformedBackupAssignments() throws {
+        let assignments = [
+            "appearanceTheme =",
+            "appearanceTheme =   # no value",
+            "appearanceTheme = \"unterminated",
+            "appearanceTheme = 'unterminated",
+            "appearanceTheme = 1",
+            "appearanceTheme = true",
+            "appearanceTheme = []",
+            "appearanceTheme = {}",
+            "appearanceTheme = \"\"\"multiline\"\"\"",
+            "appearanceTheme = '' extra",
+            "appearanceTheme = \"dark\" extra",
+            "\"appearanceTheme\" = \"dark\"",
+            "appearanceDarkCodeThemeId = \"dark\"",
+            "appearanceThemeExtra = \"dark\"",
+            " appearanceTheme = \"dark\"",
+            "appearanceTheme = \"bad\\q\"",
+            "appearanceTheme = \"\\u123\"",
+            "appearanceTheme = \"\\uD800\"",
+            "appearanceTheme = \"\\U00110000\"",
+            "appearanceTheme = 'can't'",
+            "appearanceTheme = \"dark\"\r",
+            "appearanceTheme = \"dark\"\nmodel = \"unsafe\"",
+            "appearanceTheme = \"dark\nunsafe\"",
+            "appearanceTheme = \"dark\u{2028}unsafe\"",
+            "appearanceTheme = \"dark\u{2029}unsafe\"",
+        ]
+
+        for assignment in assignments {
+            try assertRejectedBackup(values: [
+                "appearanceTheme": assignment,
+                "appearanceDarkCodeThemeId": NSNull(),
+            ])
+        }
     }
 
 #if !canImport(XCTest)
@@ -325,6 +433,40 @@ final class SelectiveConfigRestoreTests: TestCase {
         XCTAssertEqual(
             try String(contentsOf: fixture.config, encoding: .utf8),
             "model = \"gpt-5\"\nkeepMe = true\n\n[desktop]\nappearanceTheme = \"system\"\n"
+        )
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testSavedSettingCreatesMissingDesktopTableWithCRLF() throws {
+        let fixture = try makeFixture(
+            config: "model = \"gpt-5\"\r\nkeepMe = true\r\n",
+            appearanceTheme: "appearanceTheme = \"system\""
+        )
+
+        try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup)
+
+        XCTAssertEqual(
+            try String(contentsOf: fixture.config, encoding: .utf8),
+            "model = \"gpt-5\"\r\nkeepMe = true\r\n\r\n[desktop]\r\nappearanceTheme = \"system\"\r\n"
+        )
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testSavedSettingUsesCRLFInEmptyDesktopTable() throws {
+        let fixture = try makeFixture(
+            config: "model = \"gpt-5\"\r\n\r\n[desktop]\r\n",
+            appearanceTheme: "appearanceTheme = \"system\""
+        )
+
+        try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup)
+
+        XCTAssertEqual(
+            try String(contentsOf: fixture.config, encoding: .utf8),
+            "model = \"gpt-5\"\r\n\r\n[desktop]\r\nappearanceTheme = \"system\"\r\n"
         )
     }
 
