@@ -25,6 +25,11 @@ if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
 fi
 
 REMOVED="false"
+# A running Codex must expose the recorded verified endpoint before pause may
+# stop its watcher or replace active state with paused state.
+if codex_is_running && ! verified_cdp_endpoint "$PORT" 2>/dev/null; then
+  fail "Could not verify the live skin endpoint; pause state was not written."
+fi
 # Drop any launchd job that would relaunch Codex with CDP after quit / quitting the menu bar.
 release_codex_launchd_job || true
 if [ -f "$STATE_PATH" ]; then
@@ -39,7 +44,7 @@ fi
 
 if [ "$DEBUG_READY" = "true" ]; then
   "$NODE" "$INJECTOR" --remove --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null \
-    || fail "Could not remove the live skin from Codex."
+    || fail "Could not remove the live skin from Codex; pause state was not written."
   REMOVED="true"
 fi
 

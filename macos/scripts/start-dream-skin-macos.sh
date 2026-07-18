@@ -17,12 +17,16 @@ PORT_EXPLICIT="false"
 RESTART_EXISTING="false"
 PROMPT_RESTART="false"
 FOREGROUND_INJECTOR="false"
+FORCE_STOP_AUTHORIZED="false"
+STUDIO_STRICT_VERIFY="false"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --port) PORT="${2:-}"; PORT_EXPLICIT="true"; shift 2 ;;
     --restart-existing) RESTART_EXISTING="true"; shift ;;
     --prompt-restart) PROMPT_RESTART="true"; shift ;;
     --foreground-injector) FOREGROUND_INJECTOR="true"; shift ;;
+    --force-stop-authorized) FORCE_STOP_AUTHORIZED="true"; shift ;;
+    --studio-strict-verify) STUDIO_STRICT_VERIFY="true"; shift ;;
     *) fail "Unknown start argument: $1" ;;
   esac
 done
@@ -48,7 +52,11 @@ if codex_is_running && [ "$DEBUG_READY" = "false" ]; then
     RESTART_EXISTING="true"
   fi
   [ "$RESTART_EXISTING" = "true" ] || fail "Codex is already running without the verified skin CDP endpoint. Close it first or pass --restart-existing."
-  stop_codex true
+  if [ "$STUDIO_STRICT_VERIFY" = "true" ]; then
+    stop_codex "$FORCE_STOP_AUTHORIZED"
+  else
+    stop_codex true
+  fi
 fi
 
 if [ -f "$STATE_PATH" ]; then
@@ -108,7 +116,8 @@ if [ "$verify_code" -ne 0 ]; then
 fi
 if [ "$verify_code" -ne 0 ]; then
   # If CSS markers are present, treat as soft success (do not kill injector).
-  if /usr/bin/grep -q '"installed": true' "$VERIFY_OUTPUT" 2>/dev/null; then
+  if [ "$STUDIO_STRICT_VERIFY" != "true" ] \
+    && /usr/bin/grep -q '"installed": true' "$VERIFY_OUTPUT" 2>/dev/null; then
     printf 'Codex Dream Skin Studio %s is active (soft verify) on port %s.\n' "$SKIN_VERSION" "$PORT"
     cleanup_verify_output
     trap - EXIT
@@ -124,7 +133,17 @@ if [ "$verify_code" -ne 0 ]; then
     trap - EXIT
     fail "Injection verification failed and the recorded injector could not be stopped safely; state was preserved. See $INJECTOR_ERROR_LOG"
   fi
+  if [ "$STUDIO_STRICT_VERIFY" = "true" ]; then
+    verified_cdp_endpoint "$PORT" \
+      || fail "Injection verification failed and the live skin endpoint could not be verified; state was preserved."
+    "$NODE" "$INJECTOR" --remove --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null 2>&1 \
+      || fail "Injection verification failed and the live skin could not be removed safely; state was preserved."
+  fi
   /bin/rm -f "$STATE_PATH"
+  if [ "$STUDIO_STRICT_VERIFY" = "true" ]; then
+    stop_codex "$FORCE_STOP_AUTHORIZED"
+    launch_codex_normally
+  fi
   cleanup_verify_output
   trap - EXIT
   fail "Injection verification failed. The injector was stopped; see $INJECTOR_ERROR_LOG"

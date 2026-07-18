@@ -7,12 +7,16 @@ PORT=9341
 CREATE_LAUNCHERS="true"
 LAUNCH_AFTER_INSTALL="true"
 IN_PLACE="false"
+CLOSE_RUNNING="false"
+FORCE_STOP_AUTHORIZED="false"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --port) PORT="${2:-}"; shift 2 ;;
     --no-launchers) CREATE_LAUNCHERS="false"; shift ;;
     --no-launch) LAUNCH_AFTER_INSTALL="false"; shift ;;
     --in-place) IN_PLACE="true"; shift ;;
+    --close-running) CLOSE_RUNNING="true"; shift ;;
+    --force-stop-authorized) FORCE_STOP_AUTHORIZED="true"; shift ;;
     *) fail "Unknown installer argument: $1" ;;
   esac
 done
@@ -39,19 +43,29 @@ deploy_project() {
   /bin/rm -rf "$previous"
 }
 
+discover_codex_app
+require_macos_runtime
+if codex_is_running; then
+  [ "$CLOSE_RUNNING" = "true" ] || fail "Close Codex before installation so config.toml cannot be rewritten while the app is saving it."
+  stop_codex "$FORCE_STOP_AUTHORIZED"
+fi
+if [ -f "$STATE_PATH" ]; then
+  stop_recorded_injector \
+    || fail "Could not stop the recorded injector; the installed engine was preserved."
+fi
+
 if [ "$IN_PLACE" = "false" ] && [ "$PROJECT_ROOT" != "$INSTALL_ROOT" ]; then
   /bin/mkdir -p "$(dirname "$INSTALL_ROOT")"
   deploy_project
   install_args=(--in-place --port "$PORT")
   [ "$CREATE_LAUNCHERS" = "true" ] || install_args+=(--no-launchers)
   [ "$LAUNCH_AFTER_INSTALL" = "true" ] || install_args+=(--no-launch)
+  [ "$CLOSE_RUNNING" != "true" ] || install_args+=(--close-running)
+  [ "$FORCE_STOP_AUTHORIZED" != "true" ] || install_args+=(--force-stop-authorized)
   exec "$INSTALL_ROOT/scripts/install-dream-skin-macos.sh" "${install_args[@]}"
 fi
 
-discover_codex_app
-require_macos_runtime
 ensure_state_root
-codex_is_running && fail "Close Codex before installation so config.toml cannot be rewritten while the app is saving it."
 seed_bundled_presets
 if [ ! -f "$THEME_DIR/theme.json" ]; then
   "$SCRIPT_DIR/switch-theme-macos.sh" --id preset-midnight-aurora --no-apply >/dev/null
