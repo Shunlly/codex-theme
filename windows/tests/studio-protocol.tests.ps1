@@ -296,6 +296,7 @@ foreach ($required in @(
   "`$childArguments += '-AdapterLockHeld'",
   "`$startInfo.EnvironmentVariables['DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'] = \"`$PID\"",
   "@('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')",
+  "`$status.Error.code -in @('STATE_UNSAFE', 'RUNTIME_INVALID')",
   "New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official'"
 )) {
   if (-not $adapterSource.Contains($required)) { throw "Studio adapter contract is missing: $required" }
@@ -1193,6 +1194,35 @@ try {
   if ($result.ExitCode -ne 0) { throw 'Force-authorized cold resume failed.' }
   Assert-ChildInvocation -Case $resumeForce -Expected "start-dream-skin.ps1 -NodePath|$nodePath|-RestartExisting|-ForceRestart|-AdapterLockHeld"
 
+  $wrongRuntimeApply = New-CaseRoot -Name 'wrong-runtime-apply'
+  $before = Get-StateSnapshot -Root $wrongRuntimeApply.StateRoot
+  $result = Invoke-Studio -Case $wrongRuntimeApply -Scenario 'active-wrong-runtime' -Operation 'apply'
+  Assert-Equal (Get-StateSnapshot -Root $wrongRuntimeApply.StateRoot) $before 'Wrong-runtime apply changed protected state.'
+  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'RUNTIME_INVALID') {
+    throw 'A Node-dependent operation bypassed exact runtime validation.'
+  }
+  Assert-NoChildOrLog -Case $wrongRuntimeApply
+
+  $wrongRuntimeRestoreUnauthorized = New-CaseRoot -Name 'wrong-runtime-restore-unauthorized'
+  $before = Get-StateSnapshot -Root $wrongRuntimeRestoreUnauthorized.StateRoot
+  $result = Invoke-Studio -Case $wrongRuntimeRestoreUnauthorized -Scenario 'active-wrong-runtime' -Operation 'restore'
+  Assert-Equal (Get-StateSnapshot -Root $wrongRuntimeRestoreUnauthorized.StateRoot) $before `
+    'Unauthorized wrong-runtime restore changed protected state.'
+  Assert-StudioResult -Result $result -Operation 'restore' -ExitCode 1 -Ok $false -Install 'ready' `
+    -Codex 'running' -Session 'active' -ThemeName '午夜极光' -RequiresRestart $true -Verified $false `
+    -AvailableActions @('pause', 'resume', 'restore', 'verify', 'uninstall') -ErrorCode 'RESTART_REQUIRED' `
+    -RecoveryActions @('authorize-restart', 'cancel')
+  Assert-NoChildOrLog -Case $wrongRuntimeRestoreUnauthorized
+
+  $wrongRuntimeRestore = New-CaseRoot -Name 'wrong-runtime-restore'
+  $result = Invoke-Studio -Case $wrongRuntimeRestore -Scenario 'active-wrong-runtime' -Operation 'restore' `
+    -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'official') {
+    throw 'Authorized Node-free restore was blocked by private Node validation.'
+  }
+  Assert-ChildInvocation -Case $wrongRuntimeRestore `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning|-AdapterLockHeld'
+
   $restoreUnauthorized = New-CaseRoot -Name 'restore-unauthorized' -NoState
   $before = Get-StateSnapshot -Root $restoreUnauthorized.StateRoot
   $result = Invoke-Studio -Case $restoreUnauthorized -Scenario 'lifecycle-restore' -Operation 'restore'
@@ -1272,6 +1302,15 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $uninstall.StateRoot $preserved) -PathType Container)) { throw "Default uninstall deleted $preserved." }
   }
   Assert-Equal (Get-StateSnapshot -Root $engineRoot) $engineBefore 'Uninstall deleted its running versioned engine.'
+
+  $wrongRuntimeUninstall = New-CaseRoot -Name 'wrong-runtime-uninstall'
+  $result = Invoke-Studio -Case $wrongRuntimeUninstall -Scenario 'active-wrong-runtime' -Operation 'uninstall' `
+    -ExtraArguments @('-RestartAuthorized')
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
+    -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @('install') -ErrorCode $null
+  Assert-ChildInvocation -Case $wrongRuntimeUninstall `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-CloseRunning|-AdapterLockHeld'
 
   $uninstallIncomplete = New-CaseRoot -Name 'uninstall-incomplete' -NoState
   $result = Invoke-Studio -Case $uninstallIncomplete -Scenario 'uninstall-incomplete' -Operation 'uninstall'

@@ -188,9 +188,9 @@ try {
   }
 
   $status = Get-DreamSkinLifecycleStatus
-  $recoveringStaleState = $Operation -in @('restore', 'uninstall') -and
-    $null -ne $status.Error -and $status.Error.code -eq 'STATE_UNSAFE'
-  if (-not $status.Ok -and -not $recoveringStaleState) {
+  $recoveringStatusError = $Operation -in @('restore', 'uninstall') -and
+    $null -ne $status.Error -and $status.Error.code -in @('STATE_UNSAFE', 'RUNTIME_INVALID')
+  if (-not $status.Ok -and -not $recoveringStatusError) {
     Write-DreamSkinStudioEnvelope -Operation $Operation -Ok $false -State $status.State -Error $status.Error
     exit 1
   }
