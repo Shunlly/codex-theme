@@ -57,45 +57,64 @@ struct ContentView: View {
                 .font(.headline)
             Text(statusMessage)
                 .foregroundStyle(.secondary)
-            if let progress = model.progress {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(progressText(progress))
+                .lineLimit(1)
+                .frame(height: 20, alignment: .leading)
+            Group {
+                if let progress = model.progress {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(progressText(progress))
+                    }
+                    .foregroundStyle(.secondary)
+                } else {
+                    Color.clear
                 }
-                .foregroundStyle(.secondary)
             }
+            .frame(height: 20, alignment: .leading)
         }
     }
 
     private var primaryAction: some View {
-        Button(action: { controller.request(primaryOperation) }) {
+        Button(action: controller.requestPrimaryAction) {
             Label(primaryTitle, systemImage: "play.fill")
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(model.isBusy || !canPerformPrimary)
+        .disabled(model.primaryOperation == nil)
         .accessibilityLabel(primaryTitle)
         .help(primaryTitle)
     }
 
     private var secondaryActions: some View {
         HStack(spacing: 12) {
-            Button(action: { controller.request(pauseResumeOperation) }) {
-                Label(pauseResumeTitle, systemImage: pauseResumeOperation == .pause ? "pause.fill" : "play.fill")
+            VStack(alignment: .leading, spacing: 4) {
+                Button(action: controller.requestPauseResumeAction) {
+                    Label(pauseResumeTitle, systemImage: pauseResumeOperation == .pause ? "pause.fill" : "play.fill")
+                }
+                .disabled(model.pauseResumeOperation == nil)
+                .accessibilityLabel(pauseResumeTitle)
+                .help(pauseResumeTitle)
+                Text("Pause may keep the managed session ready to resume.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-            .disabled(model.isBusy || !canPerform(pauseResumeOperation))
-            .accessibilityLabel(pauseResumeTitle)
-            .help(pauseResumeTitle)
 
             Spacer()
 
-            Button(role: .destructive, action: { controller.request(.restore) }) {
-                Label("Complete Restore", systemImage: "arrow.counterclockwise")
+            VStack(alignment: .trailing, spacing: 4) {
+                Button(role: .destructive, action: { controller.request(.restore) }) {
+                    Label("Complete Restore", systemImage: "arrow.counterclockwise")
+                }
+                .disabled(!model.canRequest(.restore))
+                .accessibilityLabel("Complete Restore")
+                .help("Complete Restore")
+                Text("Complete Restore closes it and returns Codex to the standard appearance.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: 225, alignment: .trailing)
             }
-            .disabled(model.isBusy || !canRestore)
-            .accessibilityLabel("Complete Restore")
-            .help("Complete Restore")
         }
     }
 
@@ -111,7 +130,7 @@ struct ContentView: View {
             Button(role: .destructive, action: { controller.request(.uninstall) }) {
                 Label("Remove Dream Skin", systemImage: "trash")
             }
-            .disabled(model.isBusy || !canPerform(.uninstall))
+            .disabled(!model.canRequest(.uninstall))
             .accessibilityLabel("Remove Dream Skin")
             .help("Remove Dream Skin")
 
@@ -133,11 +152,7 @@ struct ContentView: View {
 
     private var state: EngineState? { model.envelope?.state }
 
-    private var primaryOperation: EngineOperation {
-        if state?.install == .notInstalled { return .install }
-        if state?.session == .paused { return .resume }
-        return .apply
-    }
+    private var primaryOperation: EngineOperation { model.primaryOperation ?? .apply }
 
     private var primaryTitle: String {
         switch primaryOperation {
@@ -147,32 +162,10 @@ struct ContentView: View {
         }
     }
 
-    private var pauseResumeOperation: EngineOperation {
-        state?.session == .paused ? .resume : .pause
-    }
+    private var pauseResumeOperation: EngineOperation { model.pauseResumeOperation ?? .pause }
 
     private var pauseResumeTitle: String {
         pauseResumeOperation == .pause ? "Pause Dream Skin" : "Resume Dream Skin"
-    }
-
-    private var canPerformPrimary: Bool { canPerform(primaryOperation) }
-
-    private var canRestore: Bool {
-        canPerform(.restore) || model.envelope?.error?.recoveryActions.contains(.restore) == true
-    }
-
-    private func canPerform(_ operation: EngineOperation) -> Bool {
-        guard let state else { return false }
-        return switch operation {
-        case .install: state.availableActions.contains(.install)
-        case .apply: state.availableActions.contains(.apply)
-        case .pause: state.availableActions.contains(.pause)
-        case .resume: state.availableActions.contains(.resume)
-        case .restore: state.availableActions.contains(.restore)
-        case .verify: state.availableActions.contains(.verify)
-        case .uninstall: state.availableActions.contains(.uninstall)
-        case .preflight, .status: false
-        }
     }
 
     private var statusTitle: String {

@@ -15,6 +15,7 @@ struct CodexDreamSkinStudioApp: App {
                 .task { await controller.launch() }
         }
         .commands {
+            CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .appTermination) {
                 Button("Quit Dream Skin") { controller.quit() }
             }
@@ -31,7 +32,7 @@ final class StudioAppController: ObservableObject {
     private lazy var statusItem = StatusItemController(
         onShow: { [weak self] in self?.showWindow() },
         onApplyResume: { [weak self] in self?.requestPrimaryAction() },
-        onPause: { [weak self] in self?.request(.pause) },
+        onPauseResume: { [weak self] in self?.requestPauseResumeAction() },
         onRestore: { [weak self] in self?.request(.restore) },
         onQuit: { [weak self] in self?.quit() }
     )
@@ -40,8 +41,14 @@ final class StudioAppController: ObservableObject {
         let adapterURL = Bundle.main.resourceURL!
             .appendingPathComponent("engine/scripts/studio-adapter-macos.sh")
         model = StudioModel(engine: EngineClient(adapterURL: adapterURL))
+        model.$envelope
+            .sink { [weak self] _ in self?.updateStatusItem() }
+            .store(in: &subscriptions)
         model.$isBusy
-            .sink { [weak self] in self?.statusItem.setBusy($0) }
+            .sink { [weak self] _ in self?.updateStatusItem() }
+            .store(in: &subscriptions)
+        model.$presentation
+            .sink { [weak self] _ in self?.updateStatusItem() }
             .store(in: &subscriptions)
     }
 
@@ -56,14 +63,12 @@ final class StudioAppController: ObservableObject {
     }
 
     func requestPrimaryAction() {
-        let operation: EngineOperation
-        if model.envelope?.state.install == .notInstalled {
-            operation = .install
-        } else if model.envelope?.state.session == .paused {
-            operation = .resume
-        } else {
-            operation = .apply
-        }
+        guard let operation = model.primaryOperation else { return }
+        request(operation)
+    }
+
+    func requestPauseResumeAction() {
+        guard let operation = model.pauseResumeOperation else { return }
         request(operation)
     }
 
@@ -77,6 +82,15 @@ final class StudioAppController: ObservableObject {
 
     func quit() {
         NSApp.terminate(nil)
+    }
+
+    private func updateStatusItem() {
+        statusItem.update(
+            isBusy: model.isBusy,
+            primaryOperation: model.primaryOperation,
+            pauseResumeOperation: model.pauseResumeOperation,
+            restoreEnabled: model.canRequest(.restore)
+        )
     }
 
     private func showWindow() {

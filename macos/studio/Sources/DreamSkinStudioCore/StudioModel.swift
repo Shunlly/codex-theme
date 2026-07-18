@@ -20,6 +20,7 @@ public final class StudioModel: ObservableObject {
     private var nextGeneration: UInt64 = 0
     private var activeGeneration: UInt64?
     private var hasLaunched = false
+    private var pendingDeleteUserThemes = false
 
     public init(engine: any EngineRunning) {
         self.engine = engine
@@ -29,6 +30,28 @@ public final class StudioModel: ObservableObject {
         envelope?.state.verified == true
     }
 
+    public var primaryOperation: EngineOperation? {
+        guard let state = envelope?.state else { return nil }
+        if state.install == .notInstalled { return canRequest(.install) ? .install : nil }
+        if state.session == .paused { return canRequest(.resume) ? .resume : nil }
+        return canRequest(.apply) ? .apply : nil
+    }
+
+    public var pauseResumeOperation: EngineOperation? {
+        guard let state = envelope?.state else { return nil }
+        let operation: EngineOperation = state.session == .paused ? .resume : .pause
+        return canRequest(operation) ? operation : nil
+    }
+
+    public func canRequest(_ operation: EngineOperation) -> Bool {
+        guard !isBusy, presentation == nil, let envelope else { return false }
+        if operation == .restore, envelope.error?.recoveryActions.contains(.restore) == true {
+            return true
+        }
+        guard let action = operation.stateAction else { return false }
+        return envelope.state.availableActions.contains(action)
+    }
+
     public func launch() async {
         guard !hasLaunched else { return }
         hasLaunched = true
@@ -36,11 +59,12 @@ public final class StudioModel: ObservableObject {
     }
 
     public func request(_ operation: EngineOperation) async {
-        guard !isBusy, presentation == nil else { return }
+        guard canRequest(operation) else { return }
         switch operation {
         case .restore:
             presentation = .restoreConfirmation
         case .uninstall:
+            pendingDeleteUserThemes = false
             presentation = .uninstallConfirmation
         default:
             await perform(operation)
@@ -49,6 +73,7 @@ public final class StudioModel: ObservableObject {
 
     public func cancelPresentation() {
         presentation = nil
+        pendingDeleteUserThemes = false
     }
 
     public func confirmPresentation(deleteUserThemes: Bool = false) async {
@@ -57,12 +82,18 @@ public final class StudioModel: ObservableObject {
 
         switch presentation {
         case let .restartConfirmation(operation):
-            await perform(operation, restartAuthorized: true)
+            await perform(operation, restartAuthorized: true, deleteUserThemes: deletionIntent(for: operation))
         case let .forceStopConfirmation(operation):
-            await perform(operation, restartAuthorized: true, forceAuthorized: true)
+            await perform(
+                operation,
+                restartAuthorized: true,
+                forceAuthorized: true,
+                deleteUserThemes: deletionIntent(for: operation)
+            )
         case .restoreConfirmation:
             await perform(.restore)
         case .uninstallConfirmation:
+            pendingDeleteUserThemes = deleteUserThemes
             await perform(.uninstall, deleteUserThemes: deleteUserThemes)
         }
     }
@@ -74,6 +105,7 @@ public final class StudioModel: ObservableObject {
         do {
             envelope = try await invoke(operation)
         } catch {
+            if operation == .uninstall { pendingDeleteUserThemes = false }
             let clientError = normalized(error)
             self.clientError = clientError
             if clientError.isInterruption {
@@ -110,9 +142,10 @@ public final class StudioModel: ObservableObject {
         }
 
         guard mutation.ok else {
-            presentRecovery(for: mutation, operation: operation)
+            presentRecovery(for: mutation, operation: operation, deleteUserThemes: deleteUserThemes)
             return
         }
+        if operation == .uninstall { pendingDeleteUserThemes = false }
         guard operation != .preflight, operation != .status else { return }
         do {
             envelope = try await invoke(.status)
@@ -199,14 +232,40 @@ public final class StudioModel: ObservableObject {
         return error as? EngineClientError ?? .transportFailed
     }
 
-    private func presentRecovery(for envelope: EngineEnvelope, operation: EngineOperation) {
+    private func deletionIntent(for operation: EngineOperation) -> Bool {
+        operation == .uninstall && pendingDeleteUserThemes
+    }
+
+    private func presentRecovery(
+        for envelope: EngineEnvelope,
+        operation: EngineOperation,
+        deleteUserThemes: Bool
+    ) {
         switch envelope.error?.code {
         case .restartRequired, .codexCloseRequired:
+            pendingDeleteUserThemes = operation == .uninstall && deleteUserThemes
             presentation = .restartConfirmation(operation)
         case .forceStopRequired:
+            pendingDeleteUserThemes = operation == .uninstall && deleteUserThemes
             presentation = .forceStopConfirmation(operation)
         default:
+            pendingDeleteUserThemes = false
             break
+        }
+    }
+}
+
+private extension EngineOperation {
+    var stateAction: EngineState.Action? {
+        switch self {
+        case .install: .install
+        case .apply: .apply
+        case .pause: .pause
+        case .resume: .resume
+        case .restore: .restore
+        case .verify: .verify
+        case .uninstall: .uninstall
+        case .preflight, .status: nil
         }
     }
 }

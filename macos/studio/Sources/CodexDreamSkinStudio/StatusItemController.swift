@@ -1,25 +1,29 @@
 import AppKit
+import DreamSkinStudioCore
 
 @MainActor
 final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let onShow: () -> Void
     private let onApplyResume: () -> Void
-    private let onPause: () -> Void
+    private let onPauseResume: () -> Void
     private let onRestore: () -> Void
     private let onQuit: () -> Void
     private var isBusy = false
+    private var primaryOperation: EngineOperation?
+    private var pauseResumeOperation: EngineOperation?
+    private var restoreEnabled = false
 
     init(
         onShow: @escaping () -> Void,
         onApplyResume: @escaping () -> Void,
-        onPause: @escaping () -> Void,
+        onPauseResume: @escaping () -> Void,
         onRestore: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onShow = onShow
         self.onApplyResume = onApplyResume
-        self.onPause = onPause
+        self.onPauseResume = onPauseResume
         self.onRestore = onRestore
         self.onQuit = onQuit
         super.init()
@@ -28,9 +32,21 @@ final class StatusItemController: NSObject {
         rebuildMenu()
     }
 
-    func setBusy(_ isBusy: Bool) {
-        guard self.isBusy != isBusy else { return }
+    func update(
+        isBusy: Bool,
+        primaryOperation: EngineOperation?,
+        pauseResumeOperation: EngineOperation?,
+        restoreEnabled: Bool
+    ) {
+        guard self.isBusy != isBusy
+            || self.primaryOperation != primaryOperation
+            || self.pauseResumeOperation != pauseResumeOperation
+            || self.restoreEnabled != restoreEnabled
+        else { return }
         self.isBusy = isBusy
+        self.primaryOperation = primaryOperation
+        self.pauseResumeOperation = pauseResumeOperation
+        self.restoreEnabled = restoreEnabled
         rebuildMenu()
     }
 
@@ -39,9 +55,9 @@ final class StatusItemController: NSObject {
         menu.autoenablesItems = false
         menu.addItem(item("Show Dream Skin", #selector(show), enabled: true))
         menu.addItem(.separator())
-        menu.addItem(item("Apply / Resume", #selector(applyResume), enabled: !isBusy))
-        menu.addItem(item("Pause", #selector(pause), enabled: !isBusy))
-        menu.addItem(item("Complete Restore", #selector(restore), enabled: !isBusy))
+        menu.addItem(item(actionTitle(primaryOperation, fallback: "Apply / Resume"), #selector(applyResume), enabled: primaryOperation != nil && !isBusy))
+        menu.addItem(item(actionTitle(pauseResumeOperation, fallback: "Pause / Resume"), #selector(pauseResume), enabled: pauseResumeOperation != nil && !isBusy))
+        menu.addItem(item("Complete Restore", #selector(restore), enabled: restoreEnabled && !isBusy))
         menu.addItem(.separator())
         menu.addItem(item("Quit Dream Skin", #selector(quit), enabled: true))
         statusItem.menu = menu
@@ -56,7 +72,17 @@ final class StatusItemController: NSObject {
 
     @objc private func show() { onShow() }
     @objc private func applyResume() { onApplyResume() }
-    @objc private func pause() { onPause() }
+    @objc private func pauseResume() { onPauseResume() }
     @objc private func restore() { onRestore() }
     @objc private func quit() { onQuit() }
+
+    private func actionTitle(_ operation: EngineOperation?, fallback: String) -> String {
+        switch operation {
+        case .install: "Install Dream Skin"
+        case .apply: "Apply Dream Skin"
+        case .pause: "Pause Dream Skin"
+        case .resume: "Resume Dream Skin"
+        default: fallback
+        }
+    }
 }
