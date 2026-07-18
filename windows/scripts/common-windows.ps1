@@ -21,6 +21,21 @@ function Exit-DreamSkinOperationLock {
   try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() }
 }
 
+function Test-DreamSkinAdapterOperationLockOwner {
+  param([switch]$AdapterLockHeld)
+  if (-not $AdapterLockHeld) { return $false }
+
+  $ownerPid = 0
+  if (-not [int]::TryParse("$env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID", [ref]$ownerPid) -or $ownerPid -le 0) {
+    throw 'The Studio adapter operation lock marker is invalid.'
+  }
+  $currentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue
+  if ($null -eq $currentProcess -or [int]$currentProcess.ParentProcessId -ne $ownerPid) {
+    throw 'The Studio adapter operation lock owner could not be verified.'
+  }
+  return $true
+}
+
 function Assert-DreamSkinPort {
   param([Parameter(Mandatory = $true)][int]$Port)
   if ($Port -lt 1024 -or $Port -gt 65535) { throw "Port must be between 1024 and 65535: $Port" }
@@ -76,7 +91,7 @@ function Get-DreamSkinProcessExecutablePath {
 }
 
 function Get-DreamSkinNodeRuntime {
-  param([int]$MinimumMajor = 22, [string]$NodePath)
+  param([int]$MinimumMajor = 22, [string]$NodePath, [string]$ExpectedVersion)
 
   if ($NodePath) {
     try { $runtimePath = [System.IO.Path]::GetFullPath($NodePath) } catch { throw 'The private Node.js runtime is missing.' }
@@ -96,6 +111,9 @@ function Get-DreamSkinNodeRuntime {
   $major = 0
   if (-not [int]::TryParse(($version -split '\.')[0], [ref]$major) -or $major -lt $MinimumMajor) {
     throw "Node.js $MinimumMajor or newer is required; found $version at $realPath."
+  }
+  if ($ExpectedVersion -and $version -cne $ExpectedVersion) {
+    throw "Node.js $ExpectedVersion is required; found $version at $realPath."
   }
   if (-not (Test-DreamSkinPathEqual -Left $runtimePath -Right $realPath)) {
     throw 'The Node.js executable path could not be validated.'

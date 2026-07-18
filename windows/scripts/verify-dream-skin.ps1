@@ -2,7 +2,8 @@
 param(
   [int]$Port = 9335,
   [string]$ScreenshotPath,
-  [string]$NodePath
+  [string]$NodePath,
+  [switch]$AdapterLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,7 +11,10 @@ $PortExplicit = $PSBoundParameters.ContainsKey('Port')
 $injector = Join-Path $PSScriptRoot 'injector.mjs'
 . (Join-Path $PSScriptRoot 'common-windows.ps1')
 
-$operationLock = Enter-DreamSkinOperationLock
+$operationLock = $null
+if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
+  $operationLock = Enter-DreamSkinOperationLock
+}
 $verifyExitCode = 1
 try {
   $StatePath = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin\state.json'
@@ -45,6 +49,6 @@ try {
   & $node.Path @arguments
   $verifyExitCode = $LASTEXITCODE
 } finally {
-  Exit-DreamSkinOperationLock -Mutex $operationLock
+  if ($null -ne $operationLock) { Exit-DreamSkinOperationLock -Mutex $operationLock }
 }
 exit $verifyExitCode

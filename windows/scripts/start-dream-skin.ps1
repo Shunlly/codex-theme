@@ -6,7 +6,8 @@ param(
   [string]$ProfilePath,
   [switch]$ForegroundInjector,
   [string]$NodePath,
-  [switch]$ForceRestart
+  [switch]$ForceRestart,
+  [switch]$AdapterLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,7 +16,10 @@ $Injector = Join-Path $PSScriptRoot 'injector.mjs'
 . (Join-Path $PSScriptRoot 'common-windows.ps1')
 . (Join-Path $PSScriptRoot 'theme-windows.ps1')
 
-$operationLock = Enter-DreamSkinOperationLock
+$operationLock = $null
+if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
+  $operationLock = Enter-DreamSkinOperationLock
+}
 try {
   Assert-DreamSkinPort -Port $Port
   if ($ProfilePath) { $ProfilePath = [System.IO.Path]::GetFullPath($ProfilePath) }

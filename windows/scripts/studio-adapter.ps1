@@ -78,20 +78,7 @@ function Exit-DreamSkinStudioError {
 }
 
 function Get-DreamSkinLifecycleStatus {
-  $mutex = $null
-  try {
-    try {
-      $mutex = Enter-DreamSkinOperationLock
-    } catch {
-      $state = New-DreamSkinStudioState -Install 'not-installed' -Codex 'not-installed' -Session 'official' `
-        -Operation 'busy' -ThemeName $null -Verified $null -AvailableActions @()
-      Exit-DreamSkinStudioError -Code 'OPERATION_BUSY' -Message 'Another Studio operation is already running.' `
-        -RecoveryActions @('retry', 'cancel') -State $state
-    }
-    return Get-DreamSkinStudioStatus -Deep
-  } finally {
-    if ($null -ne $mutex) { Exit-DreamSkinOperationLock -Mutex $mutex }
-  }
+  return Get-DreamSkinStudioStatus -Deep
 }
 
 function Test-DreamSkinResumeHotPath {
@@ -130,6 +117,7 @@ function Invoke-DreamSkinLifecycleChild {
   $startInfo.RedirectStandardError = $true
   $startInfo.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
   $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+  $startInfo.EnvironmentVariables['DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'] = "$PID"
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $startInfo
   try {
@@ -182,9 +170,18 @@ function Exit-DreamSkinChildFailure {
 }
 
 $status = $null
+$operationLock = $null
 try {
+  try {
+    $operationLock = Enter-DreamSkinOperationLock
+  } catch {
+    $busyState = New-DreamSkinStudioState -Install 'not-installed' -Codex 'not-installed' -Session 'official' `
+      -Operation 'busy' -ThemeName $null -Verified $null -AvailableActions @()
+    Exit-DreamSkinStudioError -Code 'OPERATION_BUSY' -Message 'Another Studio operation is already running.' `
+      -RecoveryActions @('retry', 'cancel') -State $busyState
+  }
   if ($Operation -in @('install', 'apply', 'pause', 'resume', 'verify')) {
-    try { $null = Get-DreamSkinNodeRuntime -NodePath $PrivateNodePath } catch {
+    try { $null = Get-DreamSkinNodeRuntime -NodePath $PrivateNodePath -ExpectedVersion '22.23.1' } catch {
       Exit-DreamSkinStudioError -Code 'RUNTIME_INVALID' -Message 'The Studio runtime is unavailable.' `
         -RecoveryActions @('diagnostics', 'cancel') -State $null
     }
@@ -243,7 +240,7 @@ try {
     }
     'uninstall' {
       $progress = 'uninstalling'; $scriptPath = Join-Path $PSScriptRoot 'restore-dream-skin.ps1'
-      $childArguments = @('-RestoreBaseTheme', '-Uninstall')
+      $childArguments = @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
     }
   }
   if ($RestartAuthorized) {
@@ -256,6 +253,7 @@ try {
     }
   }
   if ($ForceAuthorized) { $childArguments += '-ForceRestart' }
+  $childArguments += '-AdapterLockHeld'
 
   $stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   Ensure-DreamSkinManagedDirectory -Path $stateRoot -Root $stateRoot
@@ -291,6 +289,14 @@ try {
     Exit-DreamSkinStudioError -Code 'OPERATION_FAILED' -Message 'The official Codex session could not be verified.' `
       -RecoveryActions @('retry', 'restore', 'diagnostics', 'cancel') -State $postStatus.State
   }
+  if ($Operation -eq 'uninstall' -and $postStatus.State.install -ne 'not-installed') {
+    Exit-DreamSkinStudioError -Code 'OPERATION_FAILED' -Message 'The Studio uninstall could not be verified.' `
+      -RecoveryActions @('retry', 'diagnostics', 'cancel') -State $postStatus.State
+  }
+  if ($Operation -eq 'uninstall' -and $postStatus.State.codex -ne 'stopped') {
+    Exit-DreamSkinStudioError -Code 'OPERATION_FAILED' -Message 'Codex did not remain stopped after uninstall.' `
+      -RecoveryActions @('retry', 'diagnostics', 'cancel') -State $postStatus.State
+  }
 
   if ($Operation -eq 'uninstall' -and $DeleteUserThemes) {
     $deletePaths = @('themes', 'images', 'active-theme') | ForEach-Object { Join-Path $stateRoot $_ }
@@ -305,7 +311,11 @@ try {
         Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
       }
     }
-    $postStatus.State.themeName = $null
+  }
+
+  if ($Operation -eq 'uninstall') {
+    $postStatus.State = New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official' `
+      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @('install')
   }
 
   Write-DreamSkinStudioEnvelope -Operation $Operation -Ok $true -State $postStatus.State -Error $null
@@ -319,4 +329,6 @@ try {
   if ($null -ne $status) { $errorState = $status.State } else { $errorState = $null }
   Exit-DreamSkinStudioError -Code 'OPERATION_FAILED' -Message 'The Studio operation failed.' `
     -RecoveryActions @('retry', 'diagnostics', 'cancel') -State $errorState
+} finally {
+  if ($null -ne $operationLock) { Exit-DreamSkinOperationLock -Mutex $operationLock }
 }

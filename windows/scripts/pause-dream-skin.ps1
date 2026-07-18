@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
   [int]$Port = 9335,
-  [string]$NodePath
+  [string]$NodePath,
+  [switch]$AdapterLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,7 +11,10 @@ $Injector = Join-Path $PSScriptRoot 'injector.mjs'
 . (Join-Path $PSScriptRoot 'common-windows.ps1')
 . (Join-Path $PSScriptRoot 'theme-windows.ps1')
 
-$operationLock = Enter-DreamSkinOperationLock
+$operationLock = $null
+if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
+  $operationLock = Enter-DreamSkinOperationLock
+}
 try {
   $node = Get-DreamSkinNodeRuntime -NodePath $NodePath
   $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
@@ -45,5 +49,5 @@ try {
   Set-DreamSkinPaused -Paused $true -StateRoot $StateRoot | Out-Null
   Write-Host 'Codex Dream Skin is paused.'
 } finally {
-  Exit-DreamSkinOperationLock -Mutex $operationLock
+  if ($null -ne $operationLock) { Exit-DreamSkinOperationLock -Mutex $operationLock }
 }

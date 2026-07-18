@@ -4,7 +4,8 @@ param(
   [switch]$NoShortcuts,
   [string]$NodePath,
   [switch]$CloseRunning,
-  [switch]$ForceRestart
+  [switch]$ForceRestart,
+  [switch]$AdapterLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,7 +14,10 @@ $SkillRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'common-windows.ps1')
 . (Join-Path $PSScriptRoot 'theme-windows.ps1')
 
-$operationLock = Enter-DreamSkinOperationLock
+$operationLock = $null
+if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
+  $operationLock = Enter-DreamSkinOperationLock
+}
 try {
   Assert-DreamSkinPort -Port $Port
   $node = Get-DreamSkinNodeRuntime -NodePath $NodePath
@@ -112,5 +116,5 @@ try {
     Write-Host 'Codex Dream Skin installed. The launch shortcut asks before restarting an open Codex window.'
   }
 } finally {
-  Exit-DreamSkinOperationLock -Mutex $operationLock
+  if ($null -ne $operationLock) { Exit-DreamSkinOperationLock -Mutex $operationLock }
 }

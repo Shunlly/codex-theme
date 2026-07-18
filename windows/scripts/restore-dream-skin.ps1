@@ -7,7 +7,8 @@ param(
   [switch]$PromptRestart,
   [switch]$CloseRunning,
   [switch]$ForceRestart,
-  [switch]$NoRelaunch
+  [switch]$NoRelaunch,
+  [switch]$AdapterLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,7 +32,10 @@ function Stop-DreamSkinTrayProcess {
   }
 }
 
-$operationLock = Enter-DreamSkinOperationLock
+$operationLock = $null
+if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
+  $operationLock = Enter-DreamSkinOperationLock
+}
 try {
   if ($RestoreBaseTheme -and $RecoverConfigBackup) {
     throw 'Choose either -RestoreBaseTheme or -RecoverConfigBackup, not both.'
@@ -201,5 +205,5 @@ try {
 
   Write-Host 'Dream Skin restore actions completed; any saved CDP session was closed.'
 } finally {
-  Exit-DreamSkinOperationLock -Mutex $operationLock
+  if ($null -ne $operationLock) { Exit-DreamSkinOperationLock -Mutex $operationLock }
 }
