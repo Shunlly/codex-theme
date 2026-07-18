@@ -687,6 +687,9 @@ launch_injector_daemon() {
     printf '%s\n' "$pid"
     return 0
   fi
+  if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ]; then
+    fail "The injector did not start. See $INJECTOR_ERROR_LOG and $INJECTOR_LOG"
+  fi
 
   # Fallback: launchctl submit
   /bin/launchctl submit -l "$INJECTOR_JOB_LABEL" -o "$INJECTOR_LOG" -e "$INJECTOR_ERROR_LOG" -- \

@@ -23,14 +23,22 @@ let package = Package(
     platforms: [.macOS(.v12)],
     products: [
         .library(name: "DreamSkinConfigRestoreCore", targets: ["DreamSkinConfigRestoreCore"]),
+        .library(name: "DreamSkinStudioCore", targets: ["DreamSkinStudioCore"]),
         .executable(name: "dream-skin-config-restore", targets: ["DreamSkinConfigRestore"]),
     ],
     targets: [
         .target(name: "DreamSkinConfigRestoreCore"),
+        .target(name: "DreamSkinStudioCore"),
         .executableTarget(name: "DreamSkinConfigRestore", dependencies: ["DreamSkinConfigRestoreCore"]),
         .testTarget(
             name: "DreamSkinConfigRestoreCoreTests",
             dependencies: ["DreamSkinConfigRestoreCore"],
+            swiftSettings: testSwiftSettings,
+            linkerSettings: testLinkerSettings
+        ),
+        .testTarget(
+            name: "DreamSkinStudioCoreTests",
+            dependencies: ["DreamSkinStudioCore"],
             swiftSettings: testSwiftSettings,
             linkerSettings: testLinkerSettings
         ),

@@ -31,6 +31,58 @@ cleanup() {
 }
 trap cleanup EXIT
 
+WATCHER_FIXTURE="$TMP/watcher-guard"
+WATCHER_HOME="$WATCHER_FIXTURE/home"
+WATCHER_MARKER="$WATCHER_FIXTURE/commands"
+/bin/mkdir -p "$WATCHER_HOME/Library/Application Support/CodexDreamSkinStudio"
+/usr/bin/sed \
+  -e "s|/usr/bin/nohup|$WATCHER_FIXTURE/nohup|g" \
+  -e "s|/bin/launchctl|$WATCHER_FIXTURE/launchctl|g" \
+  -e "s|/bin/kill|$WATCHER_FIXTURE/kill|g" \
+  -e "s|/bin/sleep|$WATCHER_FIXTURE/sleep|g" \
+  "$SOURCE_ROOT/scripts/common-macos.sh" > "$WATCHER_FIXTURE/common-macos.sh"
+/usr/bin/sed "s|__MARKER__|$WATCHER_MARKER|g" > "$WATCHER_FIXTURE/nohup" <<'STUB'
+#!/bin/bash
+printf 'nohup %s\n' "$*" >> "__MARKER__"
+exit 1
+STUB
+/usr/bin/sed "s|__MARKER__|$WATCHER_MARKER|g" > "$WATCHER_FIXTURE/launchctl" <<'STUB'
+#!/bin/bash
+printf 'launchctl %s\n' "$*" >> "__MARKER__"
+[ "${1:-}" = "print" ] && printf '  pid = 4242\n'
+STUB
+/usr/bin/sed > "$WATCHER_FIXTURE/kill" <<'STUB'
+#!/bin/bash
+[ "${1:-}" = "-0" ] && [ "${2:-}" = "4242" ]
+STUB
+/usr/bin/sed > "$WATCHER_FIXTURE/sleep" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+/bin/chmod 755 "$WATCHER_FIXTURE/nohup" "$WATCHER_FIXTURE/launchctl" \
+  "$WATCHER_FIXTURE/kill" "$WATCHER_FIXTURE/sleep"
+
+run_watcher_fixture() (
+  source "$WATCHER_FIXTURE/common-macos.sh"
+  NODE=/usr/bin/false
+  launch_injector_daemon 9341
+)
+
+: > "$WATCHER_MARKER"
+set +e
+HOME="$WATCHER_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  run_watcher_fixture > "$WATCHER_FIXTURE/studio.out" 2>/dev/null
+WATCHER_EXIT="$?"
+set -e
+[ "$WATCHER_EXIT" -ne 0 ] || { printf 'Studio watcher failure fell back to launchctl submit.\n' >&2; exit 1; }
+/usr/bin/grep -q '^nohup ' "$WATCHER_MARKER"
+! /usr/bin/grep -q '^launchctl submit ' "$WATCHER_MARKER"
+
+: > "$WATCHER_MARKER"
+WATCHER_PID="$(HOME="$WATCHER_HOME" run_watcher_fixture)"
+[ "$WATCHER_PID" = "4242" ] || { printf 'Legacy watcher fallback did not return its launchctl PID.\n' >&2; exit 1; }
+/usr/bin/grep -q '^launchctl submit ' "$WATCHER_MARKER"
+
 snapshot() {
   /usr/bin/find "$TEST_HOME" -print0 | /usr/bin/sort -z | while IFS= read -r -d '' path; do
     if [ -f "$path" ]; then
