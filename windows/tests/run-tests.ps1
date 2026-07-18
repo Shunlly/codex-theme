@@ -574,7 +574,18 @@ public static class Program {
     throw 'Verified private Node runtime did not preserve its license and notice.'
   }
   $tamperedLock = Get-Content -LiteralPath $runtimeLockPath -Raw | ConvertFrom-Json
-  $tamperedLock.archives.x64.sha256 = '0' + $archiveHash.Substring(1)
+  foreach ($representativeHash in @(
+    ('0' + (('a' * 63) -join '')),
+    ('a' + (('0' * 63) -join ''))
+  )) {
+    $replacementNibble = if ($representativeHash[0] -ceq '0') { '1' } else { '0' }
+    $representativeTamperedHash = $replacementNibble + $representativeHash.Substring(1)
+    if ($representativeTamperedHash -ceq $representativeHash -or $representativeTamperedHash -notmatch '^[a-f0-9]{64}$') {
+      throw 'Node archive tamper test did not produce a different SHA-256 value.'
+    }
+  }
+  $replacementNibble = if ($archiveHash[0] -ceq '0') { '1' } else { '0' }
+  $tamperedLock.archives.x64.sha256 = $replacementNibble + $archiveHash.Substring(1)
   $tamperedLock | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $runtimeLockPath -Encoding UTF8
   $tamperedDestination = Join-Path $temporaryRoot 'runtime\tampered'
   $tamperedRejected = $false
