@@ -192,8 +192,14 @@ set -e
 if [ "$command_exit" -ne 0 ]; then
   if /usr/bin/grep -Eqi 'identity does not match|state is damaged|identity is incomplete|state was preserved' "$OPERATION_LOG"; then
     emit_error STATE_UNSAFE "Theme state needs recovery before it can be used." '["restore","diagnostics","cancel"]'
-  elif /usr/bin/grep -Eqi 'did not close|forced stop|force stop|explicit restart authorization' "$OPERATION_LOG"; then
+  elif /usr/bin/grep -Fqi 'Codex did not close within 15 seconds; explicit restart authorization is required for a forced stop.' "$OPERATION_LOG"; then
     emit_error FORCE_STOP_REQUIRED "Codex must close before the theme can be applied." '["authorize-force-stop","cancel"]'
+  elif /usr/bin/grep -Fqi 'Close Codex before installation so config.toml cannot be rewritten while the app is saving it.' "$OPERATION_LOG"; then
+    emit_error CODEX_CLOSE_REQUIRED "Codex must close before Studio can be installed." '["authorize-restart","cancel"]' true
+  elif /usr/bin/grep -Fqi 'Codex is already running without the verified skin CDP endpoint. Close it first or pass --restart-existing.' "$OPERATION_LOG"; then
+    emit_error RESTART_REQUIRED "Codex must restart once to apply the theme." '["authorize-restart","cancel"]' true
+  elif /usr/bin/grep -Fqi 'Explicit restart authorization is required before Studio can close Codex.' "$OPERATION_LOG"; then
+    emit_error RESTART_REQUIRED "Codex must restart once to apply the theme." '["authorize-restart","cancel"]' true
   elif /usr/bin/grep -Eqi 'verification failed|verify failed' "$OPERATION_LOG"; then
     emit_error VERIFY_FAILED "Theme verification failed." '["retry","restore","diagnostics","cancel"]'
   elif /usr/bin/grep -Eqi 'remove the live skin|live skin could not be removed' "$OPERATION_LOG"; then

@@ -61,6 +61,13 @@ assert_error() {
   "$NODE" -e 'if (JSON.parse(process.argv[1]).error?.code !== process.argv[2]) process.exit(1)' "$ADAPTER_JSON" "$code"
 }
 
+assert_recovery() {
+  "$NODE" -e '
+    const actions = JSON.parse(process.argv[1]).error?.recoveryActions || [];
+    if (!actions.includes(process.argv[2]) || (process.argv[3] && actions.includes(process.argv[3]))) process.exit(1);
+  ' "$ADAPTER_JSON" "$1" "${2:-}"
+}
+
 BEFORE="$(snapshot)"
 run_adapter preflight
 [ "$ADAPTER_EXIT" -eq 1 ] || {
@@ -190,6 +197,17 @@ STUB
   /bin/chmod 755 "$path"
 }
 
+make_failure_stub() {
+  local path="$1"
+  local message="$2"
+  /usr/bin/sed "s|__MESSAGE__|$message|g" > "$path" <<'STUB'
+#!/bin/bash
+printf '%s\n' '__MESSAGE__' >&2
+exit 1
+STUB
+  /bin/chmod 755 "$path"
+}
+
 for root in "$BUNDLED" "$INSTALLED"; do
   for script in install-dream-skin-macos.sh start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh common-macos.sh theme-config.mjs injector.mjs; do
     make_stub "$root/scripts/$script"
@@ -248,6 +266,36 @@ run_fixture_adapter verify --restart-authorized --force-authorized
 /usr/bin/grep -Fx 'verify-dream-skin-macos.sh --reload' "$MARKER" >/dev/null
 ! /usr/bin/grep -q -- '--force-stop-authorized' "$MARKER"
 
+# A process appearing after the read-only status snapshot must map the exact
+# lifecycle message to normal authorization before force is ever offered.
+write_status ready stopped official false null
+make_failure_stub "$BUNDLED/scripts/install-dream-skin-macos.sh" \
+  'Close Codex before installation so config.toml cannot be rewritten while the app is saving it.'
+run_fixture_adapter install
+assert_error CODEX_CLOSE_REQUIRED
+assert_recovery authorize-restart authorize-force-stop
+make_stub "$BUNDLED/scripts/install-dream-skin-macos.sh"
+
+make_failure_stub "$INSTALLED/scripts/start-dream-skin-macos.sh" \
+  'Codex is already running without the verified skin CDP endpoint. Close it first or pass --restart-existing.'
+run_fixture_adapter apply
+assert_error RESTART_REQUIRED
+assert_recovery authorize-restart authorize-force-stop
+make_stub "$INSTALLED/scripts/start-dream-skin-macos.sh"
+
+make_failure_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh" \
+  'Explicit restart authorization is required before Studio can close Codex.'
+run_fixture_adapter restore
+assert_error RESTART_REQUIRED
+assert_recovery authorize-restart authorize-force-stop
+
+make_failure_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh" \
+  'Codex did not close within 15 seconds; explicit restart authorization is required for a forced stop.'
+run_fixture_adapter restore --restart-authorized
+assert_error FORCE_STOP_REQUIRED
+assert_recovery authorize-force-stop
+make_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh"
+
 write_status ready running official true null
 : > "$MARKER"
 run_fixture_adapter install
@@ -285,7 +333,7 @@ PROTECTED_BEFORE="$(/usr/bin/shasum -a 256 \
   "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/theme-backup.json")"
 /usr/bin/sed > "$INSTALLED/scripts/restore-dream-skin-macos.sh" <<'STUB'
 #!/bin/bash
-printf 'Codex did not close; explicit restart authorization is required for a forced stop.\n' >&2
+printf 'Codex did not close within 15 seconds; explicit restart authorization is required for a forced stop.\n' >&2
 exit 1
 STUB
 /bin/chmod 755 "$INSTALLED/scripts/restore-dream-skin-macos.sh"
