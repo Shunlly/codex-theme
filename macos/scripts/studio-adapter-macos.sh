@@ -150,12 +150,17 @@ case "$OPERATION" in
   uninstall) progress="uninstalling"; command_root="$status_root"; args=(--restore-base-theme --restart-codex --uninstall) ;;
 esac
 
-if [ "$codex_state" = "running" ] && [ "$RESTART_AUTHORIZED" = "true" ]; then
+if [ "$RESTART_AUTHORIZED" = "true" ]; then
   case "$OPERATION" in
-    install) args+=(--close-running) ;;
-    apply|resume) args+=(--restart-existing) ;;
+    install) [ "$codex_state" != "running" ] || args+=(--close-running) ;;
+    apply|resume) [ "$codex_state" != "running" ] || args+=(--restart-existing) ;;
+    restore|uninstall) args+=(--restart-authorized) ;;
   esac
-  [ "$FORCE_AUTHORIZED" != "true" ] || args+=(--force-stop-authorized)
+fi
+if [ "$FORCE_AUTHORIZED" = "true" ]; then
+  case "$OPERATION" in
+    install|apply|resume|restore|uninstall) args+=(--force-stop-authorized) ;;
+  esac
 fi
 
 case "$OPERATION" in
@@ -177,6 +182,8 @@ set +e
 if [ "$OPERATION" = "uninstall" ]; then
   DREAM_SKIN_STUDIO_ADAPTER=true DREAM_SKIN_DEFER_UNINSTALL_DELETE=true \
     "$command" "${args[@]}" >>"$OPERATION_LOG" 2>&1
+elif [ "$OPERATION" = "pause" ]; then
+  DREAM_SKIN_STUDIO_ADAPTER=true "$command" >>"$OPERATION_LOG" 2>&1
 else
   DREAM_SKIN_STUDIO_ADAPTER=true "$command" "${args[@]}" >>"$OPERATION_LOG" 2>&1
 fi
@@ -204,14 +211,22 @@ if [ "$OPERATION" = "uninstall" ]; then
   [ "$status_exit" -eq 0 ] && [ "$(json_field state.session)" = "official" ] \
     || emit_error OPERATION_FAILED "The Studio restore could not be verified." '["retry","restore","diagnostics","cancel"]'
 
-  /bin/rm -rf "$INSTALL_ROOT"
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin.command"
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Customize.command"
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Verify.command"
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Restore.command"
-  if [ "$DELETE_USER_THEMES" = "true" ]; then
-    /bin/rm -rf "$STATE_ROOT/themes" "$STATE_ROOT/images" "$STATE_ROOT/theme"
-  fi
+  set +e
+  (
+    set -e
+    /bin/rm -rf "$INSTALL_ROOT"
+    /bin/rm -f "$HOME/Desktop/Codex Dream Skin.command"
+    /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Customize.command"
+    /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Verify.command"
+    /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Restore.command"
+    if [ "$DELETE_USER_THEMES" = "true" ]; then
+      /bin/rm -rf "$STATE_ROOT/themes" "$STATE_ROOT/images" "$STATE_ROOT/theme"
+    fi
+  ) >>"$OPERATION_LOG" 2>&1
+  cleanup_exit="$?"
+  set -e
+  [ "$cleanup_exit" -eq 0 ] \
+    || emit_error OPERATION_FAILED "The Studio uninstall cleanup failed." '["retry","diagnostics","cancel"]'
   command_root="$PROJECT_ROOT"
 elif [ "$OPERATION" = "install" ] && engine_complete "$INSTALL_ROOT"; then
   command_root="$INSTALL_ROOT"

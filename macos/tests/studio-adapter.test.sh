@@ -233,6 +233,21 @@ run_fixture_adapter pause --delete-user-themes
 assert_error INVALID_REQUEST 2
 [ ! -s "$MARKER" ] || { printf 'invalid theme deletion invoked a script.\n' >&2; exit 1; }
 
+# Authorization flags are accepted request metadata, but pause and verify
+# must never receive force-stop authority they cannot use.
+write_status ready running active false true
+: > "$MARKER"
+run_fixture_adapter pause --restart-authorized --force-authorized
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'authorized pause failed.\n' >&2; exit 1; }
+/usr/bin/grep -Fx 'pause-dream-skin-macos.sh ' "$MARKER" >/dev/null
+! /usr/bin/grep -q -- '--force-stop-authorized' "$MARKER"
+
+: > "$MARKER"
+run_fixture_adapter verify --restart-authorized --force-authorized
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'authorized verify failed.\n' >&2; exit 1; }
+/usr/bin/grep -Fx 'verify-dream-skin-macos.sh --reload' "$MARKER" >/dev/null
+! /usr/bin/grep -q -- '--force-stop-authorized' "$MARKER"
+
 write_status ready running official true null
 : > "$MARKER"
 run_fixture_adapter install
@@ -287,13 +302,60 @@ make_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh"
 : > "$MARKER"
 run_fixture_adapter restore --restart-authorized
 [ "$ADAPTER_EXIT" -eq 0 ] || { printf 'authorized restore failed.\n' >&2; exit 1; }
-/usr/bin/grep -Fx 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex' "$MARKER" >/dev/null
+/usr/bin/grep -Fx 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex --restart-authorized' "$MARKER" >/dev/null
 ! /usr/bin/grep -q -- '--force-stop-authorized' "$MARKER"
 
 : > "$MARKER"
 run_fixture_adapter restore --restart-authorized --force-authorized
 [ "$ADAPTER_EXIT" -eq 0 ] || { printf 'force-authorized restore failed.\n' >&2; exit 1; }
-/usr/bin/grep -Fx 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex --force-stop-authorized' "$MARKER" >/dev/null
+/usr/bin/grep -Fx 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex --restart-authorized --force-stop-authorized' "$MARKER" >/dev/null
+
+# Restore rechecks authorization after the adapter status snapshot. A Codex
+# process appearing after that snapshot must not be stopped or permit mutation.
+RESTORE_REAL="$TMP/restore-real"
+RESTORE_REAL_HOME="$RESTORE_REAL/home"
+RESTORE_REAL_MARKER="$RESTORE_REAL/marker"
+/bin/mkdir -p "$RESTORE_REAL/scripts" "$RESTORE_REAL_HOME/.codex" "$RESTORE_REAL_HOME/state/theme"
+/bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$RESTORE_REAL/scripts/"
+/usr/bin/printf 'config sentinel\n' > "$RESTORE_REAL_HOME/.codex/config.toml"
+/usr/bin/printf 'state sentinel\n' > "$RESTORE_REAL_HOME/state/state.json"
+/usr/bin/printf 'backup sentinel\n' > "$RESTORE_REAL_HOME/state/theme-backup.json"
+/usr/bin/sed "s|__HOME__|$RESTORE_REAL_HOME|g; s|__SCRIPTS__|$RESTORE_REAL/scripts|g; s|__MARKER__|$RESTORE_REAL_MARKER|g" > "$RESTORE_REAL/scripts/common-macos.sh" <<'STUB'
+SCRIPT_DIR="__SCRIPTS__"
+STATE_ROOT="__HOME__/state"
+STATE_PATH="$STATE_ROOT/state.json"
+THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
+THEME_DIR="$STATE_ROOT/theme"
+CONFIG_PATH="__HOME__/.codex/config.toml"
+INJECTOR="__HOME__/injector.mjs"
+NODE=/usr/bin/true
+fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
+discover_codex_app() { :; }
+require_macos_runtime() { :; }
+ensure_state_root() { printf 'ensure\n' >> "__MARKER__"; }
+state_field() { printf '9341\n'; }
+codex_is_running() { return 0; }
+verified_cdp_endpoint() { return 1; }
+stop_codex() { printf 'stop:%s\n' "$1" >> "__MARKER__"; }
+stop_recorded_injector() { printf 'injector\n' >> "__MARKER__"; }
+release_codex_launchd_job() { printf 'release\n' >> "__MARKER__"; }
+launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
+STUB
+: > "$RESTORE_REAL_MARKER"
+set +e
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex >/dev/null 2>&1
+RESTORE_REAL_EXIT="$?"
+set -e
+[ "$RESTORE_REAL_EXIT" -ne 0 ] || { printf 'Studio restore crossed the restart-authorization race.\n' >&2; exit 1; }
+[ ! -s "$RESTORE_REAL_MARKER" ] || { printf 'unauthorized raced restore stopped or mutated state.\n' >&2; exit 1; }
+[ "$(/bin/cat "$RESTORE_REAL_HOME/.codex/config.toml")" = 'config sentinel' ]
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/state.json")" = 'state sentinel' ]
+
+: > "$RESTORE_REAL_MARKER"
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized >/dev/null
+/usr/bin/grep -Fx 'stop:false' "$RESTORE_REAL_MARKER" >/dev/null
 
 write_status ready stopped paused false false
 : > "$MARKER"
@@ -316,7 +378,7 @@ run_fixture_adapter uninstall --restart-authorized
 [ -e "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/themes/saved" ]
 [ -e "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/images/saved" ]
 [ -e "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/theme/active" ]
-[ "$(/usr/bin/head -n 1 "$MARKER")" = 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex --uninstall' ]
+[ "$(/usr/bin/head -n 1 "$MARKER")" = 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex --uninstall --restart-authorized' ]
 
 # Recreate the installed fixture after uninstall, then prove explicit theme deletion is last.
 /bin/mkdir -p "$INSTALLED/scripts"
@@ -351,6 +413,28 @@ assert_error OPERATION_FAILED
 [ -e "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/themes/saved" ] \
   || { printf 'failed restore deleted saved themes.\n' >&2; exit 1; }
 
+# Cleanup failures stay in the operation log and return one stable JSON line.
+/bin/mkdir -p "$INSTALLED/scripts"
+/bin/cp "$ROOT/VERSION" "$INSTALLED/VERSION"
+for script in start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh common-macos.sh theme-config.mjs injector.mjs; do
+  make_stub "$INSTALLED/scripts/$script"
+done
+write_status ready stopped official false false
+/bin/chmod 500 "$FIXTURE_HOME/.codex"
+CLEANUP_JSON="$TMP/cleanup-failure.json"
+CLEANUP_STDERR="$TMP/cleanup-failure.stderr"
+set +e
+/usr/bin/env HOME="$FIXTURE_HOME" "$BUNDLED/scripts/studio-adapter-macos.sh" uninstall --restart-authorized \
+  >"$CLEANUP_JSON" 2>"$CLEANUP_STDERR"
+CLEANUP_EXIT="$?"
+set -e
+/bin/chmod 700 "$FIXTURE_HOME/.codex"
+[ "$CLEANUP_EXIT" -eq 1 ] || { printf 'cleanup failure did not return a domain error.\n' >&2; exit 1; }
+CLEANUP_VALUE="$(/bin/cat "$CLEANUP_JSON")"
+assert_json_line "$CLEANUP_VALUE"
+"$NODE" -e 'if (JSON.parse(process.argv[1]).error?.code !== "OPERATION_FAILED") process.exit(1)' "$CLEANUP_VALUE"
+! /usr/bin/grep -Eqi 'permission denied|operation not permitted|rm:' "$CLEANUP_STDERR"
+
 # Lifecycle scripts must expose the explicit flags and keep mutations behind safe stops.
 "$NODE" -e '
   const fs = require("node:fs");
@@ -362,13 +446,16 @@ assert_error OPERATION_FAILED
     if (!install.includes(required)) throw new Error(`install missing ${required}`);
   }
   const deployCall = install.indexOf("\n  deploy_project\n");
-  if (install.indexOf("stop_codex") > deployCall) throw new Error("install deploys before stopping Codex");
-  if (install.indexOf("stop_recorded_injector") > deployCall) throw new Error("install deploys before validating the injector");
+  const stopCodex = install.indexOf("stop_codex");
+  const stopInjector = install.indexOf("stop_recorded_injector");
+  if (deployCall === -1 || stopCodex === -1 || stopCodex > deployCall) throw new Error("install deploys before stopping Codex");
+  if (stopInjector === -1 || stopInjector > deployCall) throw new Error("install deploys before validating the injector");
   for (const required of ["--force-stop-authorized", "--studio-strict-verify"]) {
     if (!start.includes(required)) throw new Error(`start missing ${required}`);
   }
   if (!/STUDIO_STRICT_VERIFY[\s\S]*installed.*true/.test(start)) throw new Error("strict verify does not guard soft success");
   if (!pause.includes("verified_cdp_endpoint") || !/fail .*live skin/.test(pause)) throw new Error("pause removal is not verified");
+  if (!restore.includes("--restart-authorized")) throw new Error("restore missing restart authorization");
   if (!restore.includes("--force-stop-authorized")) throw new Error("restore missing force authorization");
 ' "$ROOT/scripts/install-dream-skin-macos.sh" "$ROOT/scripts/start-dream-skin-macos.sh" \
   "$ROOT/scripts/pause-dream-skin-macos.sh" "$ROOT/scripts/restore-dream-skin-macos.sh"

@@ -8,6 +8,7 @@ PORT_EXPLICIT="false"
 RESTORE_BASE_THEME="false"
 RESTART_CODEX="false"
 UNINSTALL="false"
+RESTART_AUTHORIZED="false"
 FORCE_STOP_AUTHORIZED="false"
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -15,6 +16,7 @@ while [ "$#" -gt 0 ]; do
     --restore-base-theme) RESTORE_BASE_THEME="true"; shift ;;
     --restart-codex) RESTART_CODEX="true"; shift ;;
     --uninstall) UNINSTALL="true"; shift ;;
+    --restart-authorized) RESTART_AUTHORIZED="true"; shift ;;
     --force-stop-authorized) FORCE_STOP_AUTHORIZED="true"; shift ;;
     *) fail "Unknown restore argument: $1" ;;
   esac
@@ -22,13 +24,19 @@ done
 
 discover_codex_app
 require_macos_runtime
-ensure_state_root
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
   PORT="$(state_field port)" || fail "Could not read the saved CDP port; state was preserved."
 fi
 
 CODEX_RUNNING="false"
 codex_is_running && CODEX_RUNNING="true"
+if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ] \
+  && [ "$CODEX_RUNNING" = "true" ] \
+  && [ "$RESTART_CODEX" = "true" ] \
+  && [ "$RESTART_AUTHORIZED" != "true" ]; then
+  fail "Explicit restart authorization is required before Studio can close Codex."
+fi
+ensure_state_root
 DEBUG_READY="false"
 verified_cdp_endpoint "$PORT" && DEBUG_READY="true"
 
