@@ -54,6 +54,40 @@ if [ "$MODE" = "notarize" ] && ! command -v spctl >/dev/null 2>&1; then
   exit 1
 fi
 
+release_input_error() {
+  printf 'Studio build inputs must be tracked regular files matching the git index.\n' >&2
+  exit 1
+}
+
+verify_tracked_regular_file() {
+  local source="$1"
+  local absolute="$REPO_ROOT/$source"
+  [ -f "$absolute" ] && [ ! -L "$absolute" ] || release_input_error
+  /usr/bin/git -C "$REPO_ROOT" ls-files --error-unmatch "$source" >/dev/null 2>&1 \
+    || release_input_error
+  /usr/bin/git -C "$REPO_ROOT" cat-file blob ":$source" 2>/dev/null \
+    | /usr/bin/cmp -s - "$absolute" || release_input_error
+}
+
+verify_swift_build_inputs() {
+  local source_root="$PACKAGE/Sources"
+  local entry=""
+  local relative=""
+  verify_tracked_regular_file macos/studio/Package.swift
+  [ -d "$source_root" ] && [ ! -L "$source_root" ] || release_input_error
+  /usr/bin/find "$source_root" -print >/dev/null 2>&1 || release_input_error
+  while IFS= read -r -d '' entry; do
+    [ ! -L "$entry" ] || release_input_error
+    if [ -d "$entry" ]; then continue; fi
+    [ -f "$entry" ] || release_input_error
+    relative="${entry#"$REPO_ROOT/"}"
+    [ "$relative" != "$entry" ] || release_input_error
+    verify_tracked_regular_file "$relative"
+  done < <(/usr/bin/find "$source_root" -mindepth 1 -print0)
+}
+
+verify_swift_build_inputs
+
 TMP="$(/usr/bin/mktemp -d "$MACOS_ROOT/.studio-release.XXXXXX")"
 OLD_RELEASE="$MACOS_ROOT/.release-old.$$"
 cleanup() {
@@ -77,12 +111,12 @@ DMG_ROOT="$TMP/dmg-root"
 copy_tracked_file() {
   local source="$1"
   local destination="$2"
-  /usr/bin/git -C "$REPO_ROOT" ls-files --error-unmatch "$source" >/dev/null 2>&1 || {
-    printf 'Release input is not tracked: %s\n' "$source" >&2
-    exit 1
-  }
+  verify_tracked_regular_file "$source"
   /bin/mkdir -p "$(/usr/bin/dirname "$destination")"
-  /bin/cp "$REPO_ROOT/$source" "$destination"
+  /bin/cp -P "$REPO_ROOT/$source" "$destination"
+  [ -f "$destination" ] && [ ! -L "$destination" ] || release_input_error
+  /usr/bin/git -C "$REPO_ROOT" cat-file blob ":$source" 2>/dev/null \
+    | /usr/bin/cmp -s - "$destination" || release_input_error
   /bin/chmod 644 "$destination"
 }
 

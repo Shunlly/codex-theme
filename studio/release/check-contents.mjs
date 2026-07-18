@@ -1,8 +1,23 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+class ReleaseContentError extends Error {
+  constructor(reason) {
+    super(reason);
+    this.reason = reason;
+  }
+}
+
 function reject(reason) {
-  throw new Error(reason);
+  throw new ReleaseContentError(reason);
+}
+
+async function readFilesystem(operation) {
+  try {
+    return await operation();
+  } catch {
+    reject("filesystem error");
+  }
 }
 
 function parseArguments(args) {
@@ -56,6 +71,7 @@ function forbiddenName(name) {
     || lower === ".git"
     || lower === "screenshots"
     || lower.includes("screenshot")
+    || (lower.startsWith("screen shot ") && lower.endsWith(".png"))
     || lower === "codex dream skin verification.png";
 }
 
@@ -74,32 +90,42 @@ function isNativeExecutable(bytes) {
   );
 }
 
+function containsUserPathText(text) {
+  const withoutRuntimeTemplate = text.replace(/\/Users\/\$CURRENT_USER(?!\/)/g, "");
+  return /\/Users\/[^/\0\r\n]+\//.test(withoutRuntimeTemplate)
+    || /C:\\Users\\[^\\\0\r\n]+\\/i.test(text);
+}
+
 function containsUserPath(bytes) {
-  const text = bytes.toString("latin1");
-  return /\/Users\/[^/\0\r\n"'$\\\s]+\//.test(text)
-    || /C:\\Users\\[^\\\0\r\n"'$]+\\/i.test(text);
+  return containsUserPathText(bytes.toString("latin1"))
+    || containsUserPathText(bytes.toString("utf16le"));
 }
 
 async function scan(root, allowedExecutables) {
-  const rootStat = await fs.lstat(root).catch(() => reject("invalid root"));
+  let rootStat;
+  try {
+    rootStat = await fs.lstat(root);
+  } catch {
+    reject("invalid root");
+  }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) reject("invalid root");
   const foundExecutables = new Set();
 
   async function visit(directory, relativeDirectory = "") {
-    const names = await fs.readdir(directory);
-    names.sort((left, right) => left.localeCompare(right, "en"));
+    const names = await readFilesystem(() => fs.readdir(directory));
+    names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
     for (const name of names) {
       if (forbiddenName(name)) reject("forbidden name");
       const relative = relativeDirectory ? `${relativeDirectory}/${name}` : name;
       const absolute = path.join(directory, name);
-      const stat = await fs.lstat(absolute);
+      const stat = await readFilesystem(() => fs.lstat(absolute));
       if (stat.isSymbolicLink()) reject("symbolic link");
       if (stat.isDirectory()) {
         await visit(absolute, relative);
         continue;
       }
       if (!stat.isFile()) reject("unsupported filesystem entry");
-      const bytes = await fs.readFile(absolute);
+      const bytes = await readFilesystem(() => fs.readFile(absolute));
       if (containsUserPath(bytes)) reject("absolute user path");
       if (isNativeExecutable(bytes)) {
         if (!allowedExecutables.has(relative)) reject("undeclared native executable");
@@ -120,6 +146,7 @@ try {
   await scan(options.root, allowlist);
   console.log("PASS: release contents verified.");
 } catch (error) {
-  console.error(`FAIL: release contents rejected: ${error.message}.`);
+  const reason = error instanceof ReleaseContentError ? error.reason : "filesystem error";
+  console.error(`FAIL: release contents rejected: ${reason}.`);
   process.exitCode = 1;
 }
