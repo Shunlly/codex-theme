@@ -1,19 +1,70 @@
 import Combine
 import Foundation
 
+public enum StudioPresentation: Equatable, Sendable {
+    case restartConfirmation(EngineOperation)
+    case forceStopConfirmation(EngineOperation)
+    case restoreConfirmation
+    case uninstallConfirmation
+}
+
 @MainActor
 public final class StudioModel: ObservableObject {
     @Published public private(set) var envelope: EngineEnvelope?
     @Published public private(set) var progress: EngineProgress?
     @Published public private(set) var isBusy = false
     @Published public private(set) var clientError: EngineClientError?
+    @Published public private(set) var presentation: StudioPresentation?
 
     private let engine: any EngineRunning
     private var nextGeneration: UInt64 = 0
     private var activeGeneration: UInt64?
+    private var hasLaunched = false
 
     public init(engine: any EngineRunning) {
         self.engine = engine
+    }
+
+    public var isVerified: Bool {
+        envelope?.state.verified == true
+    }
+
+    public func launch() async {
+        guard !hasLaunched else { return }
+        hasLaunched = true
+        await refresh(.preflight)
+    }
+
+    public func request(_ operation: EngineOperation) async {
+        guard !isBusy, presentation == nil else { return }
+        switch operation {
+        case .restore:
+            presentation = .restoreConfirmation
+        case .uninstall:
+            presentation = .uninstallConfirmation
+        default:
+            await perform(operation)
+        }
+    }
+
+    public func cancelPresentation() {
+        presentation = nil
+    }
+
+    public func confirmPresentation(deleteUserThemes: Bool = false) async {
+        guard !isBusy, let presentation else { return }
+        self.presentation = nil
+
+        switch presentation {
+        case let .restartConfirmation(operation):
+            await perform(operation, restartAuthorized: true)
+        case let .forceStopConfirmation(operation):
+            await perform(operation, restartAuthorized: true, forceAuthorized: true)
+        case .restoreConfirmation:
+            await perform(.restore)
+        case .uninstallConfirmation:
+            await perform(.uninstall, deleteUserThemes: deleteUserThemes)
+        }
     }
 
     public func refresh(_ operation: EngineOperation = .preflight) async {
@@ -58,7 +109,11 @@ public final class StudioModel: ObservableObject {
             return
         }
 
-        guard mutation.ok, operation != .preflight, operation != .status else { return }
+        guard mutation.ok else {
+            presentRecovery(for: mutation, operation: operation)
+            return
+        }
+        guard operation != .preflight, operation != .status else { return }
         do {
             envelope = try await invoke(.status)
         } catch {
@@ -142,6 +197,17 @@ public final class StudioModel: ObservableObject {
         if Task.isCancelled { return .cancelled }
         if error is CancellationError { return .cancelled }
         return error as? EngineClientError ?? .transportFailed
+    }
+
+    private func presentRecovery(for envelope: EngineEnvelope, operation: EngineOperation) {
+        switch envelope.error?.code {
+        case .restartRequired, .codexCloseRequired:
+            presentation = .restartConfirmation(operation)
+        case .forceStopRequired:
+            presentation = .forceStopConfirmation(operation)
+        default:
+            break
+        }
     }
 }
 

@@ -24,11 +24,16 @@ let package = Package(
     products: [
         .library(name: "DreamSkinConfigRestoreCore", targets: ["DreamSkinConfigRestoreCore"]),
         .library(name: "DreamSkinStudioCore", targets: ["DreamSkinStudioCore"]),
+        .executable(name: "CodexDreamSkinStudio", targets: ["CodexDreamSkinStudio"]),
         .executable(name: "dream-skin-config-restore", targets: ["DreamSkinConfigRestore"]),
     ],
     targets: [
         .target(name: "DreamSkinConfigRestoreCore"),
         .target(name: "DreamSkinStudioCore"),
+        .executableTarget(
+            name: "CodexDreamSkinStudio",
+            dependencies: ["DreamSkinStudioCore"]
+        ),
         .executableTarget(name: "DreamSkinConfigRestore", dependencies: ["DreamSkinConfigRestoreCore"]),
         .testTarget(
             name: "DreamSkinConfigRestoreCoreTests",

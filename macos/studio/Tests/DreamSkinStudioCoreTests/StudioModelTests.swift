@@ -372,6 +372,223 @@ final class StudioModelTests: CoreTestCase {
         XCTAssertNil(model.progress)
     }
 
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testLaunchRunsPreflightOnlyOnce() async {
+        let preflight = makeEnvelope(operation: .preflight)
+        let engine = ScriptedEngine([.envelope(preflight)])
+        let model = StudioModel(engine: engine)
+
+        await model.launch()
+        await model.launch()
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight)])
+        XCTAssertEqual(model.envelope, preflight)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testRestartConfirmationDoesNotRetryUntilConfirmed() async {
+        let restartRequired = makeEnvelope(
+            operation: .apply,
+            ok: false,
+            session: "official",
+            errorCode: "RESTART_REQUIRED",
+            recoveryActions: ["authorize-restart", "cancel"]
+        )
+        let applied = makeEnvelope(operation: .apply)
+        let status = makeEnvelope(operation: .status)
+        let engine = ScriptedEngine([
+            .envelope(restartRequired),
+            .envelope(applied),
+            .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.request(.apply)
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.apply)])
+        XCTAssertEqual(model.presentation, .restartConfirmation(.apply))
+
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.apply),
+            call(.apply, restart: true),
+            call(.status),
+        ])
+        XCTAssertNil(model.presentation)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testInstallCloseRequirementUsesRestartConfirmation() async {
+        let closeRequired = makeEnvelope(
+            operation: .install,
+            ok: false,
+            session: "official",
+            errorCode: "CODEX_CLOSE_REQUIRED",
+            recoveryActions: ["authorize-restart", "cancel"]
+        )
+        let installed = makeEnvelope(operation: .install)
+        let status = makeEnvelope(operation: .status)
+        let engine = ScriptedEngine([
+            .envelope(closeRequired),
+            .envelope(installed),
+            .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.request(.install)
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.install)])
+        XCTAssertEqual(model.presentation, .restartConfirmation(.install))
+
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.install),
+            call(.install, restart: true),
+            call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testForceStopRequiresASecondConfirmation() async {
+        let restartRequired = makeEnvelope(
+            operation: .apply,
+            ok: false,
+            session: "official",
+            errorCode: "RESTART_REQUIRED",
+            recoveryActions: ["authorize-restart", "cancel"]
+        )
+        let forceRequired = makeEnvelope(
+            operation: .apply,
+            ok: false,
+            session: "official",
+            errorCode: "FORCE_STOP_REQUIRED",
+            recoveryActions: ["authorize-force-stop", "cancel"]
+        )
+        let applied = makeEnvelope(operation: .apply)
+        let status = makeEnvelope(operation: .status)
+        let engine = ScriptedEngine([
+            .envelope(restartRequired),
+            .envelope(forceRequired),
+            .envelope(applied),
+            .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.request(.apply)
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.apply),
+            call(.apply, restart: true),
+        ])
+        XCTAssertEqual(model.presentation, .forceStopConfirmation(.apply))
+
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.apply),
+            call(.apply, restart: true),
+            call(.apply, restart: true, force: true),
+            call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testCancellingConfirmationDoesNotCallAdapter() async {
+        let engine = ScriptedEngine([])
+        let model = StudioModel(engine: engine)
+
+        await model.request(.restore)
+        model.cancelPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [])
+        XCTAssertNil(model.presentation)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testRestoreRequiresConfirmationBeforeItRuns() async {
+        let restored = makeEnvelope(operation: .restore, session: "official", verified: false)
+        let status = makeEnvelope(operation: .status, session: "official", verified: false)
+        let engine = ScriptedEngine([.envelope(restored), .envelope(status)])
+        let model = StudioModel(engine: engine)
+
+        await model.request(.restore)
+        XCTAssertEqual(model.presentation, .restoreConfirmation)
+        XCTAssertEqual(await engine.recordedCalls(), [])
+
+        await model.confirmPresentation()
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.restore), call(.status)])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testUninstallKeepsThemesByDefaultAndDeletesOnlyWhenSelected() async {
+        let uninstalled = makeEnvelope(operation: .uninstall, session: "official", verified: false)
+        let status = makeEnvelope(operation: .status, session: "official", verified: false)
+        let engine = ScriptedEngine([
+            .envelope(uninstalled), .envelope(status),
+            .envelope(uninstalled), .envelope(status),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.request(.uninstall)
+        XCTAssertEqual(model.presentation, .uninstallConfirmation)
+        await model.confirmPresentation()
+        await model.request(.uninstall)
+        await model.confirmPresentation(deleteUserThemes: true)
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.uninstall),
+            call(.status),
+            call(.uninstall, delete: true),
+            call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testVerifiedPresentationRequiresExplicitVerifiedState() async {
+        let applied = makeEnvelope(operation: .apply)
+        let unverifiedStatus = makeEnvelope(operation: .status, verified: false)
+        let unverifiedModel = StudioModel(engine: ScriptedEngine([.envelope(applied), .envelope(unverifiedStatus)]))
+
+        await unverifiedModel.request(.apply)
+
+        XCTAssertFalse(unverifiedModel.isVerified)
+
+        let verifiedStatus = makeEnvelope(operation: .status, verified: true)
+        let verifiedModel = StudioModel(engine: ScriptedEngine([.envelope(applied), .envelope(verifiedStatus)]))
+
+        await verifiedModel.request(.apply)
+
+        XCTAssertTrue(verifiedModel.isVerified)
+    }
+
     private func call(
         _ operation: EngineOperation,
         restart: Bool = false,
