@@ -113,6 +113,12 @@ if [ -f "$THEME_DIR/theme.json" ]; then
   [ -n "$THEME_NAME" ] || THEME_NAME="$(read_json_field "$THEME_DIR/theme.json" id)"
 fi
 
+if [ "$DEEP" = "true" ]; then
+  if /usr/bin/curl --noproxy '*' --silent --fail --max-time 1 "http://127.0.0.1:${PORT}/json/version" >/dev/null 2>&1; then
+    CDP_OK="true"
+  fi
+fi
+
 official_codex_bundle_exists() {
   local candidate identifier executable_name
   for candidate in "${CODEX_APP_BUNDLE:-}" \
@@ -129,30 +135,17 @@ official_codex_bundle_exists() {
   return 1
 }
 
-studio_pid_belongs_to_codex() {
-  local current="$1" command_line parent depth=0
-  while [ "$current" -gt 1 ] 2>/dev/null && [ "$depth" -lt 32 ]; do
-    command_line="$(/bin/ps -p "$current" -o command= 2>/dev/null || true)"
-    case "$command_line" in "$OFFICIAL_CODEX_EXE"*) return 0 ;; esac
-    parent="$(/bin/ps -p "$current" -o ppid= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
-    case "$parent" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$parent" -ne "$current" ] || return 1
-    current="$parent"
-    depth=$((depth + 1))
-  done
-  return 1
-}
-
-studio_cdp_verified() {
-  local port="$1" pid
+studio_strict_verify() {
+  local port="$1"
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    studio_pid_belongs_to_codex "$pid" || continue
-    /usr/bin/curl --noproxy '*' --silent --fail --max-time 1 \
-      "http://127.0.0.1:${port}/json/version" >/dev/null 2>&1 && return 0
-  done < <(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | /usr/bin/sort -u)
-  return 1
+  (
+    . "$PROJECT_ROOT/scripts/common-macos.sh"
+    fail() { exit 1; }
+    discover_codex_app
+    require_macos_runtime
+    verified_cdp_endpoint "$port" || exit 1
+    "$NODE" "$INJECTOR" --verify --port "$port" --theme-dir "$THEME_DIR" --timeout-ms 5000 >/dev/null 2>&1
+  )
 }
 
 if [ "$STUDIO_JSON" = "true" ]; then
@@ -166,6 +159,7 @@ if [ "$STUDIO_JSON" = "true" ]; then
   ACTIONS='["install"]'
   OK="true"
   ERROR="null"
+  EXIT_CODE=0
 
   if [ -f "$INSTALL_ROOT/VERSION" ] && /usr/bin/cmp -s "$INSTALL_ROOT/VERSION" "$PROJECT_ROOT/VERSION" \
     && [ -x "$INSTALL_ROOT/scripts/studio-adapter-macos.sh" ] \
@@ -184,7 +178,8 @@ if [ "$STUDIO_JSON" = "true" ]; then
   fi
 
   case "$SESSION" in active|paused|stale) STUDIO_SESSION="$SESSION" ;; esac
-  if [ "$DEEP" = "true" ] && [ -n "${OFFICIAL_CODEX_EXE:-}" ] && studio_cdp_verified "$PORT"; then
+  CDP_OK="false"
+  if [ "$DEEP" = "true" ] && studio_strict_verify "$PORT"; then
     CDP_OK="true"
   fi
   [ "$CDP_OK" = "true" ] && VERIFIED="true"
@@ -210,15 +205,18 @@ if [ "$STUDIO_JSON" = "true" ]; then
   case "$CODEX" in
     not-installed)
       OK="false"
+      EXIT_CODE=1
       ERROR='{"code":"CODEX_NOT_INSTALLED","message":"Codex is not installed.","recoveryActions":["cancel"]}'
       ;;
     needs-first-run)
       OK="false"
+      EXIT_CODE=1
       ERROR='{"code":"CODEX_FIRST_RUN_REQUIRED","message":"Open Codex and complete first-run setup.","recoveryActions":["open-codex","retry","cancel"]}'
       ;;
   esac
   if [ "$STUDIO_SESSION" = "stale" ]; then
     OK="false"
+    EXIT_CODE=1
     ERROR='{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["restore","diagnostics","cancel"]}'
   fi
 
@@ -226,7 +224,7 @@ if [ "$STUDIO_JSON" = "true" ]; then
     "$OK" "$(json_escape "$OPERATION")" "$INSTALL" "$CODEX" "$STUDIO_SESSION" \
     "$(if [ -n "$THEME_NAME" ]; then printf '\"%s\"' "$(json_escape "$THEME_NAME")"; else printf 'null'; fi)" \
     "$REQUIRES_RESTART" "$ACTIONS" "$VERIFIED" "$ERROR"
-  exit 0
+  exit "$EXIT_CODE"
 fi
 
 label="Skin"
