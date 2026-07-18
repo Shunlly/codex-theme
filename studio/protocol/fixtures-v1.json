@@ -1,0 +1,254 @@
+[
+  {
+    "name": "not-installed",
+    "response": {
+      "schemaVersion": 1,
+      "ok": false,
+      "operation": "preflight",
+      "state": {
+        "install": "not-installed",
+        "codex": "not-installed",
+        "session": "official",
+        "operation": "idle",
+        "themeName": null,
+        "requiresRestart": false,
+        "availableActions": ["install"],
+        "verified": null
+      },
+      "error": {
+        "code": "CODEX_NOT_INSTALLED",
+        "message": "Codex is not installed.",
+        "recoveryActions": ["cancel"]
+      }
+    }
+  },
+  {
+    "name": "needs-first-run",
+    "response": {
+      "schemaVersion": 1,
+      "ok": false,
+      "operation": "preflight",
+      "state": {
+        "install": "not-installed",
+        "codex": "needs-first-run",
+        "session": "official",
+        "operation": "idle",
+        "themeName": null,
+        "requiresRestart": false,
+        "availableActions": ["install"],
+        "verified": null
+      },
+      "error": {
+        "code": "CODEX_FIRST_RUN_REQUIRED",
+        "message": "Open Codex and complete first-run setup.",
+        "recoveryActions": ["open-codex", "retry", "cancel"]
+      }
+    }
+  },
+  {
+    "name": "installed-official",
+    "response": {
+      "schemaVersion": 1,
+      "ok": true,
+      "operation": "install",
+      "state": {
+        "install": "ready",
+        "codex": "stopped",
+        "session": "official",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": false,
+        "availableActions": ["apply", "restore", "uninstall"],
+        "verified": null
+      },
+      "error": null
+    }
+  },
+  {
+    "name": "active-verified",
+    "response": {
+      "schemaVersion": 1,
+      "ok": true,
+      "operation": "apply",
+      "state": {
+        "install": "ready",
+        "codex": "running",
+        "session": "active",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": false,
+        "availableActions": ["pause", "resume", "restore", "verify", "uninstall"],
+        "verified": true
+      },
+      "error": null
+    }
+  },
+  {
+    "name": "paused",
+    "response": {
+      "schemaVersion": 1,
+      "ok": true,
+      "operation": "pause",
+      "state": {
+        "install": "ready",
+        "codex": "running",
+        "session": "paused",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": false,
+        "availableActions": ["apply", "resume", "restore", "verify", "uninstall"],
+        "verified": false
+      },
+      "error": null
+    }
+  },
+  {
+    "name": "stale-state",
+    "response": {
+      "schemaVersion": 1,
+      "ok": false,
+      "operation": "status",
+      "state": {
+        "install": "ready",
+        "codex": "running",
+        "session": "stale",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": false,
+        "availableActions": ["apply", "restore", "verify", "uninstall"],
+        "verified": null
+      },
+      "error": {
+        "code": "STATE_UNSAFE",
+        "message": "Theme state needs recovery before it can be used.",
+        "recoveryActions": ["restore", "diagnostics", "cancel"]
+      }
+    }
+  },
+  {
+    "name": "restart-required",
+    "response": {
+      "schemaVersion": 1,
+      "ok": false,
+      "operation": "apply",
+      "state": {
+        "install": "ready",
+        "codex": "running",
+        "session": "official",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": true,
+        "availableActions": ["apply", "restore", "uninstall"],
+        "verified": null
+      },
+      "error": {
+        "code": "RESTART_REQUIRED",
+        "message": "Codex must restart once to apply the theme.",
+        "recoveryActions": ["authorize-restart", "cancel"]
+      }
+    }
+  },
+  {
+    "name": "force-stop-required",
+    "response": {
+      "schemaVersion": 1,
+      "ok": false,
+      "operation": "apply",
+      "state": {
+        "install": "ready",
+        "codex": "running",
+        "session": "official",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": false,
+        "availableActions": ["apply", "restore", "uninstall"],
+        "verified": null
+      },
+      "error": {
+        "code": "FORCE_STOP_REQUIRED",
+        "message": "Codex must close before the theme can be applied.",
+        "recoveryActions": ["authorize-force-stop", "cancel"]
+      }
+    }
+  },
+  {
+    "name": "verify-failed",
+    "response": {
+      "schemaVersion": 1,
+      "ok": false,
+      "operation": "verify",
+      "state": {
+        "install": "ready",
+        "codex": "running",
+        "session": "official",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": false,
+        "availableActions": ["apply", "restore", "verify", "uninstall"],
+        "verified": false
+      },
+      "error": {
+        "code": "VERIFY_FAILED",
+        "message": "Theme verification failed.",
+        "recoveryActions": ["retry", "restore", "diagnostics", "cancel"]
+      }
+    }
+  },
+  {
+    "name": "restored-official",
+    "response": {
+      "schemaVersion": 1,
+      "ok": true,
+      "operation": "restore",
+      "state": {
+        "install": "ready",
+        "codex": "running",
+        "session": "official",
+        "operation": "idle",
+        "themeName": "午夜极光",
+        "requiresRestart": false,
+        "availableActions": ["apply", "uninstall"],
+        "verified": false
+      },
+      "error": null
+    }
+  },
+  {
+    "name": "uninstalled-themes-preserved",
+    "response": {
+      "schemaVersion": 1,
+      "ok": true,
+      "operation": "uninstall",
+      "state": {
+        "install": "not-installed",
+        "codex": "stopped",
+        "session": "official",
+        "operation": "idle",
+        "themeName": null,
+        "requiresRestart": false,
+        "availableActions": ["install"],
+        "verified": null
+      },
+      "error": null
+    }
+  },
+  {
+    "name": "uninstalled-themes-deleted",
+    "response": {
+      "schemaVersion": 1,
+      "ok": true,
+      "operation": "uninstall",
+      "state": {
+        "install": "not-installed",
+        "codex": "stopped",
+        "session": "official",
+        "operation": "idle",
+        "themeName": null,
+        "requiresRestart": false,
+        "availableActions": ["install"],
+        "verified": null
+      },
+      "error": null
+    }
+  }
+]
