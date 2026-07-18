@@ -76,22 +76,31 @@ function Get-DreamSkinProcessExecutablePath {
 }
 
 function Get-DreamSkinNodeRuntime {
-  param([int]$MinimumMajor = 22)
+  param([int]$MinimumMajor = 22, [string]$NodePath)
 
-  $command = Get-Command node.exe -ErrorAction SilentlyContinue
-  if (-not $command) { $command = Get-Command node -ErrorAction SilentlyContinue }
-  if (-not $command) { throw "Node.js $MinimumMajor or newer is required and was not found in PATH." }
-  $version = "$(& $command.Source -p 'process.versions.node' 2>$null)".Trim()
+  if ($NodePath) {
+    try { $runtimePath = [System.IO.Path]::GetFullPath($NodePath) } catch { throw 'The private Node.js runtime is missing.' }
+    if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) { throw 'The private Node.js runtime is missing.' }
+  } else {
+    $command = Get-Command node.exe -ErrorAction SilentlyContinue
+    if (-not $command) { $command = Get-Command node -ErrorAction SilentlyContinue }
+    if (-not $command) { throw "Node.js $MinimumMajor or newer is required and was not found in PATH." }
+    $runtimePath = $command.Source
+  }
+  $version = "$(& $runtimePath -p 'process.versions.node' 2>$null)".Trim()
   if ($LASTEXITCODE -ne 0 -or -not $version) { throw 'The Node.js runtime could not be validated.' }
-  $runtimePath = "$(& $command.Source -p 'process.execPath' 2>$null)".Trim()
-  if ($LASTEXITCODE -ne 0 -or -not $runtimePath -or -not (Test-Path -LiteralPath $runtimePath)) {
+  $realPath = "$(& $runtimePath -p 'process.execPath' 2>$null)".Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $realPath -or -not (Test-Path -LiteralPath $realPath -PathType Leaf)) {
     throw 'The Node.js executable path could not be validated.'
   }
   $major = 0
   if (-not [int]::TryParse(($version -split '\.')[0], [ref]$major) -or $major -lt $MinimumMajor) {
-    throw "Node.js $MinimumMajor or newer is required; found $version at $runtimePath."
+    throw "Node.js $MinimumMajor or newer is required; found $version at $realPath."
   }
-  return [pscustomobject]@{ Path = $runtimePath; Version = $version; Major = $major }
+  if (-not (Test-DreamSkinPathEqual -Left $runtimePath -Right $realPath)) {
+    throw 'The Node.js executable path could not be validated.'
+  }
+  return [pscustomobject]@{ Path = $realPath; Version = $version; Major = $major }
 }
 
 function ConvertTo-DreamSkinCodexInstall {

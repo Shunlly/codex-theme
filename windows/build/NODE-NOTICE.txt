@@ -1,0 +1,4 @@
+This product includes Node.js.
+
+Node.js is licensed under the MIT License. The complete Node.js license from
+the verified archive is installed as LICENSE.node.txt beside node.exe.

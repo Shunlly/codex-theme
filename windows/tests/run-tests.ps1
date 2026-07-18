@@ -512,6 +512,80 @@ try {
     throw 'Mismatched live injector identity does not fail closed with preserved state.'
   }
 
+  $fetchNodeRuntime = Join-Path $Root 'scripts\fetch-node-runtime.ps1'
+  if (-not (Test-Path -LiteralPath $fetchNodeRuntime -PathType Leaf)) {
+    throw 'Verified private Node runtime fetch script is missing.'
+  }
+  $privateNodeBranch = $commonSource.IndexOf('if ($NodePath)', [System.StringComparison]::Ordinal)
+  $pathLookup = $commonSource.IndexOf('Get-Command node.exe', [System.StringComparison]::Ordinal)
+  if ($privateNodeBranch -lt 0 -or $pathLookup -lt 0 -or $privateNodeBranch -gt $pathLookup) {
+    throw 'Explicit NodePath validation can reach PATH lookup.'
+  }
+
+  $fakeNodeSource = @'
+using System;
+using System.Reflection;
+public static class Program {
+  public static int Main(string[] args) {
+    if (args.Length != 2 || args[0] != "-p") return 1;
+    if (args[1] == "process.versions.node") {
+      Console.Write(Environment.GetEnvironmentVariable("DREAM_SKIN_FAKE_NODE_VERSION") ?? "22.23.1");
+      return 0;
+    }
+    if (args[1] == "process.execPath") {
+      Console.Write(Assembly.GetExecutingAssembly().Location);
+      return 0;
+    }
+    return 1;
+  }
+}
+'@
+  $archiveName = 'node-v22.23.1-win-x64.zip'
+  $archiveTop = Join-Path $temporaryRoot ([System.IO.Path]::GetFileNameWithoutExtension($archiveName))
+  New-Item -ItemType Directory -Path $archiveTop | Out-Null
+  $fakeNode = Join-Path $archiveTop 'node.exe'
+  Add-Type -TypeDefinition $fakeNodeSource -OutputAssembly $fakeNode -OutputType ConsoleApplication | Out-Null
+  $licenseText = 'Node test license complete text.'
+  [System.IO.File]::WriteAllText((Join-Path $archiveTop 'LICENSE'), $licenseText, $utf8NoBom)
+  $archivePath = Join-Path $temporaryRoot $archiveName
+  Compress-Archive -LiteralPath $archiveTop -DestinationPath $archivePath
+  $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $runtimeLockPath = Join-Path $temporaryRoot 'node-runtime.lock.json'
+  [pscustomobject]@{
+    schemaVersion = 1
+    version = '22.23.1'
+    minimumMajor = 22
+    archives = [pscustomobject]@{
+      x64 = [pscustomobject]@{
+        file = $archiveName
+        url = "https://nodejs.org/dist/v22.23.1/$archiveName"
+        sha256 = $archiveHash
+      }
+    }
+  } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $runtimeLockPath -Encoding UTF8
+  $runtimeDestination = Join-Path $temporaryRoot 'runtime\x64'
+  & $fetchNodeRuntime -Architecture x64 -Destination $runtimeDestination -ManifestPath $runtimeLockPath -ArchivePath $archivePath
+  $privateNode = Get-DreamSkinNodeRuntime -NodePath (Join-Path $runtimeDestination 'node.exe')
+  if ($privateNode.Version -cne '22.23.1' -or -not (Test-DreamSkinPathEqual -Left $privateNode.Path -Right (Join-Path $runtimeDestination 'node.exe'))) {
+    throw 'The fetched private Node runtime did not pass production self-validation.'
+  }
+  if (([System.IO.File]::ReadAllText((Join-Path $runtimeDestination 'LICENSE.node.txt')) -cne $licenseText) -or
+    -not (Test-Path -LiteralPath (Join-Path $runtimeDestination 'NOTICE.node.txt') -PathType Leaf)) {
+    throw 'Verified private Node runtime did not preserve its license and notice.'
+  }
+  $tamperedLock = Get-Content -LiteralPath $runtimeLockPath -Raw | ConvertFrom-Json
+  $tamperedLock.archives.x64.sha256 = '0' + $archiveHash.Substring(1)
+  $tamperedLock | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $runtimeLockPath -Encoding UTF8
+  $tamperedDestination = Join-Path $temporaryRoot 'runtime\tampered'
+  $tamperedRejected = $false
+  try { & $fetchNodeRuntime -Architecture x64 -Destination $tamperedDestination -ManifestPath $runtimeLockPath -ArchivePath $archivePath } catch { $tamperedRejected = $true }
+  if (-not $tamperedRejected -or (Test-Path -LiteralPath $tamperedDestination)) {
+    throw 'A tampered Node archive hash published a runtime.'
+  }
+  $missingPrivateRuntimeRejected = $false
+  try { $null = Get-DreamSkinNodeRuntime -NodePath (Join-Path $temporaryRoot 'missing-node.exe') } catch { $missingPrivateRuntimeRejected = $true }
+  if (-not $missingPrivateRuntimeRejected) { throw 'A missing private Node path fell back to PATH.' }
+
   $node = Get-DreamSkinNodeRuntime
   & $node.Path (Join-Path $Root 'scripts\injector.mjs') --self-test *> $null
   if ($LASTEXITCODE -ne 0) { throw 'Injector CDP self-test failed.' }
