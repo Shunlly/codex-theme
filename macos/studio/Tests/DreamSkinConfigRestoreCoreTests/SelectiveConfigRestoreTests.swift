@@ -131,6 +131,24 @@ final class SelectiveConfigRestoreTests: TestCase {
 #if !canImport(XCTest)
     @Test
 #endif
+    func testPreservesUTF8BOMWhenDesktopIsFirstTable() throws {
+        let bom = Data([0xef, 0xbb, 0xbf])
+        let fixture = try makeFixture(
+            configBytes: bom + Data("[desktop]\nappearanceTheme = \"dark\"\n".utf8),
+            appearanceTheme: "appearanceTheme = \"system\""
+        )
+
+        try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup)
+
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.config),
+            bom + Data("[desktop]\nappearanceTheme = \"system\"\n".utf8)
+        )
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
     func testRejectsInvalidUTF8WithoutChangingConfigOrBackup() throws {
         try assertRejected(configBytes: Data("model = \"gpt-5\"\n# invalid: ".utf8) + Data([0xff, 0x0a]))
     }
@@ -212,6 +230,20 @@ final class SelectiveConfigRestoreTests: TestCase {
 #endif
     func testRejectsQuotedAppearanceKeyInsteadOfAppendingDuplicate() throws {
         try assertRejected(config: "[desktop]\n\"appearanceTheme\" = \"dark\"\n")
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRejectsEscapedQuotedDesktopTableInsteadOfAppendingDuplicate() throws {
+        try assertRejected(config: "[\"desk\\u0074op\"]\nkeep = true\n")
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRejectsEscapedQuotedAppearanceKeyInsteadOfAppendingDuplicate() throws {
+        try assertRejected(config: "[desktop]\n\"\\u0061ppearanceTheme\" = \"dark\"\n")
     }
 
 #if !canImport(XCTest)

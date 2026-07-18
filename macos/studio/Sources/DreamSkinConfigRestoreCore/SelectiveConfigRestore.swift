@@ -23,7 +23,7 @@ public enum SelectiveConfigRestore {
             throw RestoreError("Refusing to rewrite TOML containing multiline strings.")
         }
         try assertSupportedTOMLLayout(content)
-        try assertNoQuotedDesktopTable(content)
+        try assertNoAmbiguousDesktopTables(content)
         var section = try desktopSection(content)
         let preferredNewline = content.contains("\r\n") ? "\r\n" : "\n"
 
@@ -118,7 +118,7 @@ public enum SelectiveConfigRestore {
     }
 
     private static func desktopSection(_ content: String) throws -> DesktopSection? {
-        let headerPattern = #"(?m)^[\t ]*\[[\t ]*desktop[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#
+        let headerPattern = #"(?m)^(?:\x{FEFF})?[\t ]*\[[\t ]*desktop[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#
         let headerRegex = try NSRegularExpression(pattern: headerPattern)
         let fullRange = NSRange(content.startIndex..<content.endIndex, in: content)
         let headers = headerRegex.matches(in: content, range: fullRange)
@@ -153,12 +153,14 @@ public enum SelectiveConfigRestore {
         }
     }
 
-    private static func assertNoQuotedDesktopTable(_ content: String) throws {
-        let pattern = #"(?m)^[\t ]*\[[\t ]*[\"']desktop[\"'][\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#
-        let regex = try NSRegularExpression(pattern: pattern)
+    private static func assertNoAmbiguousDesktopTables(_ content: String) throws {
+        let patterns = [
+            #"(?m)^(?:\x{FEFF})?[\t ]*\[[\t ]*[\"']desktop[\"'][\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#,
+            #"(?m)^(?:\x{FEFF})?[\t ]*\[[\t ]*\"[^\"\r\n]*\\[^\"\r\n]*\"[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#,
+        ]
         let range = NSRange(content.startIndex..<content.endIndex, in: content)
-        if regex.firstMatch(in: content, range: range) != nil {
-            throw RestoreError("Refusing to rewrite a quoted [desktop] table.")
+        for pattern in patterns where try NSRegularExpression(pattern: pattern).firstMatch(in: content, range: range) != nil {
+            throw RestoreError("Refusing to rewrite a quoted or escaped [desktop] table.")
         }
     }
 
@@ -167,10 +169,11 @@ public enum SelectiveConfigRestore {
         let patterns = [
             "(?m)^[\\t ]+(?:\(keys))[\\t ]*=",
             "(?m)^[\\t ]*[\\\"'](?:\(keys))[\\\"'][\\t ]*=",
+            #"(?m)^[\t ]*\"[^\"\r\n]*\\[^\"\r\n]*\"[\t ]*="#,
         ]
         let range = NSRange(body.startIndex..<body.endIndex, in: body)
         for pattern in patterns where try NSRegularExpression(pattern: pattern).firstMatch(in: body, range: range) != nil {
-            throw RestoreError("Refusing to rewrite quoted or indented appearance settings.")
+            throw RestoreError("Refusing to rewrite quoted, escaped, or indented appearance settings.")
         }
     }
 

@@ -15,7 +15,7 @@ if (!["install", "restore"].includes(mode) || !configPath || !backupPath) {
 }
 
 function desktopSection(content) {
-  const headers = [...content.matchAll(/^[\t ]*\[[\t ]*desktop[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/gm)];
+  const headers = [...content.matchAll(/^(?:\uFEFF)?[\t ]*\[[\t ]*desktop[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/gm)];
   if (headers.length > 1) throw new Error("Refusing to rewrite multiple [desktop] tables.");
   const header = headers[0];
   if (!header) return null;
@@ -24,6 +24,28 @@ function desktopSection(content) {
   const nextHeader = /^[\t ]*\[/m.exec(remainder);
   const bodyEnd = nextHeader ? bodyStart + nextHeader.index : content.length;
   return { bodyStart, bodyEnd, body: content.slice(bodyStart, bodyEnd) };
+}
+
+function assertNoAmbiguousDesktopTables(content) {
+  const patterns = [
+    /^(?:\uFEFF)?[\t ]*\[[\t ]*["']desktop["'][\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/gm,
+    /^(?:\uFEFF)?[\t ]*\[[\t ]*"[^"\r\n]*\\[^"\r\n]*"[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/gm,
+  ];
+  if (patterns.some((pattern) => pattern.test(content))) {
+    throw new Error("Refusing to rewrite a quoted or escaped [desktop] table.");
+  }
+}
+
+function assertNoAmbiguousSettings(body) {
+  const keys = [...settings.keys()].join("|");
+  const patterns = [
+    new RegExp(`^[\\t ]+(?:${keys})[\\t ]*=`, "m"),
+    new RegExp(`^[\\t ]*[\"'](?:${keys})[\"'][\\t ]*=`, "m"),
+    /^[\t ]*"[^"\r\n]*\\[^"\r\n]*"[\t ]*=/m,
+  ];
+  if (patterns.some((pattern) => pattern.test(body))) {
+    throw new Error("Refusing to rewrite quoted, escaped, or indented appearance settings.");
+  }
 }
 
 function tomlStructureForLine(line) {
@@ -175,10 +197,10 @@ function validateBackup(backup) {
   }
 }
 
-function replaceSetting(body, key, line) {
+function replaceSetting(body, key, line, preferredNewline) {
   const { token } = settingLines(body, key);
   const pattern = new RegExp(`^${token}[\\t ]*=.*(?:\\r?\\n)?`, "m");
-  const newline = body.includes("\r\n") ? "\r\n" : "\n";
+  const newline = body.includes("\r\n") ? "\r\n" : preferredNewline;
   if (line === null) return body.replace(pattern, "");
   if (pattern.test(body)) return body.replace(pattern, `${line}${newline}`);
   const separator = body.length && !body.endsWith("\n") ? newline : "";
@@ -294,11 +316,14 @@ async function main() {
     throw new Error("Refusing to rewrite TOML containing multiline strings.");
   }
   assertSupportedTomlLayout(content);
+  assertNoAmbiguousDesktopTables(content);
   let section = desktopSection(content);
+  const preferredNewline = content.includes("\r\n") ? "\r\n" : "\n";
+  if (section) assertNoAmbiguousSettings(section.body);
 
   if (mode === "install") {
     if (!section) {
-      content = `${content.trimEnd()}\n\n[desktop]\n`;
+      content = `${content.trimEnd()}${preferredNewline}${preferredNewline}[desktop]${preferredNewline}`;
       section = desktopSection(content);
     }
     try {
@@ -326,7 +351,7 @@ async function main() {
     let changed = false;
     for (const [key, line] of settings) {
       if (line === null) continue;
-      body = replaceSetting(body, key, line);
+      body = replaceSetting(body, key, line, preferredNewline);
       changed = true;
     }
     if (changed) {
@@ -355,11 +380,13 @@ async function main() {
       console.log("Restored the saved base-theme keys.");
       return;
     }
-    content = `${content.trimEnd()}\n\n[desktop]\n`;
+    content = `${content.trimEnd()}${preferredNewline}${preferredNewline}[desktop]${preferredNewline}`;
     section = desktopSection(content);
   }
   let body = section.body;
-  for (const key of settings.keys()) body = replaceSetting(body, key, backup.values[key] ?? null);
+  for (const key of settings.keys()) {
+    body = replaceSetting(body, key, backup.values[key] ?? null, preferredNewline);
+  }
   const restored = content.slice(0, section.bodyStart) + body + content.slice(section.bodyEnd);
   await assertConfigUnchanged(originalBytes, originalStat);
   await atomicWrite(configPath, restored, originalStat.mode & 0o777, originalBytes, originalStat);

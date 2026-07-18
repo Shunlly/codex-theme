@@ -1049,6 +1049,134 @@ fi
 [ "$(/bin/cat "$UNTRUSTED_HOME/.codex/config.toml")" = 'config sentinel' ]
 [ "$(/bin/cat "$UNTRUSTED_STATE/theme-backup.json")" = 'backup sentinel' ]
 
+# Main app identity must remain independently trustworthy when its nested Node
+# runtime is missing. Replace only the codesign command in a copied common
+# layer so the real discovery and validation functions exercise exact args.
+APP_IDENTITY_HOME="$TMP/app-identity-home"
+APP_IDENTITY_BUNDLE="$TMP/app-identity.app"
+APP_IDENTITY_EXE="$APP_IDENTITY_BUNDLE/Contents/MacOS/Codex"
+APP_IDENTITY_COMMON="$TMP/app-identity-common.sh"
+APP_IDENTITY_CODESIGN="$TMP/app-identity-codesign"
+APP_IDENTITY_LOG="$TMP/app-identity-codesign.log"
+APP_IDENTITY_ERROR="$TMP/app-identity.error"
+/bin/mkdir -p "$APP_IDENTITY_HOME" "$APP_IDENTITY_BUNDLE/Contents/MacOS"
+/usr/bin/plutil -create xml1 "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
+/usr/bin/plutil -insert CFBundleIdentifier -string com.openai.codex \
+  "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
+/usr/bin/plutil -insert CFBundleExecutable -string Codex \
+  "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
+/usr/bin/plutil -insert CFBundleShortVersionString -string 1.0 \
+  "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
+/usr/bin/printf '#!/bin/bash\nexit 0\n' > "$APP_IDENTITY_EXE"
+/bin/chmod 755 "$APP_IDENTITY_EXE"
+/usr/bin/sed \
+  "s|__BUNDLE__|$APP_IDENTITY_BUNDLE|g; s|__EXE__|$APP_IDENTITY_EXE|g" \
+  > "$APP_IDENTITY_CODESIGN" <<'STUB'
+#!/bin/bash
+mode="${CODESIGN_MODE:-valid}"
+if [ "$#" -eq 4 ] && [ "$1" = "--verify" ] && [ "$2" = "--strict" ] \
+  && [ "$3" = "--ignore-resources" ] && [ "$4" = "__BUNDLE__" ]; then
+  printf 'verify-bundle\n' >> "$CODESIGN_LOG"
+  [ "$mode" != "bundle-signature" ]
+  exit
+fi
+if [ "$#" -eq 3 ] && [ "$1" = "--verify" ] && [ "$2" = "--strict" ] \
+  && [ "$3" = "__EXE__" ]; then
+  printf 'verify-executable\n' >> "$CODESIGN_LOG"
+  [ "$mode" != "executable-signature" ]
+  exit
+fi
+if [ "$#" -eq 3 ] && [ "$1" = "-dv" ] && [ "$2" = "--verbose=4" ]; then
+  case "$3" in
+    "__BUNDLE__")
+      printf 'describe-bundle\n' >> "$CODESIGN_LOG"
+      [ "$mode" = "bundle-identifier" ] \
+        && printf 'Identifier=com.example.forged\n' >&2 \
+        || printf 'Identifier=com.openai.codex\n' >&2
+      printf 'TeamIdentifier=2DC432GLL2\n' >&2
+      exit 0
+      ;;
+    "__EXE__")
+      printf 'describe-executable\n' >> "$CODESIGN_LOG"
+      [ "$mode" = "executable-identifier" ] \
+        && printf 'Identifier=com.example.forged\n' >&2 \
+        || printf 'Identifier=com.openai.codex\n' >&2
+      [ "$mode" = "executable-team" ] \
+        && printf 'TeamIdentifier=FORGEDTEAM\n' >&2 \
+        || printf 'TeamIdentifier=2DC432GLL2\n' >&2
+      exit 0
+      ;;
+  esac
+fi
+printf 'unexpected:' >> "$CODESIGN_LOG"
+printf ' %s' "$@" >> "$CODESIGN_LOG"
+printf '\n' >> "$CODESIGN_LOG"
+exit 91
+STUB
+/bin/chmod 755 "$APP_IDENTITY_CODESIGN"
+/usr/bin/sed "s|/usr/bin/codesign|$APP_IDENTITY_CODESIGN|g" \
+  "$ROOT/scripts/common-macos.sh" > "$APP_IDENTITY_COMMON"
+: > "$APP_IDENTITY_LOG"
+if ! /usr/bin/env HOME="$APP_IDENTITY_HOME" CODEX_APP_BUNDLE="$APP_IDENTITY_BUNDLE" \
+  CODESIGN_LOG="$APP_IDENTITY_LOG" CODESIGN_MODE=valid /bin/bash -c '
+    . "$1"
+    try_discover_codex_app
+    try_validate_codex_app_identity
+    [ "$CODEX_APP_VALIDATED" = "true" ]
+    [ ! -e "$CODEX_BUNDLE/Contents/Resources/cua_node/bin/node" ]
+    if try_require_macos_node_runtime 2>"$2"; then exit 1; fi
+    [ "$CODEX_APP_VALIDATED" = "true" ]
+    [ "$NODE_RUNTIME_VALIDATED" = "false" ]
+    /usr/bin/grep -F -q "signed Node.js runtime bundled with Codex was not found" "$2"
+  ' _ "$APP_IDENTITY_COMMON" "$APP_IDENTITY_ERROR"; then
+  printf 'Missing nested Node invalidated the trusted main Codex app identity.\n' >&2
+  exit 1
+fi
+/usr/bin/printf '%s\n' \
+  verify-bundle describe-bundle describe-bundle \
+  verify-executable describe-executable describe-executable \
+  > "$TMP/app-identity-codesign.expected"
+/usr/bin/cmp -s "$APP_IDENTITY_LOG" "$TMP/app-identity-codesign.expected" || {
+  printf 'Main Codex app identity validation used unexpected codesign branches.\n' >&2
+  exit 1
+}
+
+for app_identity_failure in bundle-signature bundle-identifier \
+  executable-signature executable-identifier executable-team; do
+  : > "$APP_IDENTITY_LOG"
+  /usr/bin/env HOME="$APP_IDENTITY_HOME" CODEX_APP_BUNDLE="$APP_IDENTITY_BUNDLE" \
+    CODESIGN_LOG="$APP_IDENTITY_LOG" CODESIGN_MODE="$app_identity_failure" /bin/bash -c '
+      . "$1"
+      try_discover_codex_app
+      if try_validate_codex_app_identity >/dev/null 2>&1; then exit 1; fi
+      [ "$CODEX_APP_VALIDATED" = "false" ]
+    ' _ "$APP_IDENTITY_COMMON" || {
+      printf 'App identity validation accepted %s.\n' "$app_identity_failure" >&2
+      exit 1
+    }
+done
+
+/usr/bin/plutil -replace CFBundleIdentifier -string com.example.forged \
+  "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
+: > "$APP_IDENTITY_LOG"
+/usr/bin/env HOME="$APP_IDENTITY_HOME" CODESIGN_LOG="$APP_IDENTITY_LOG" \
+  CODESIGN_MODE=valid /bin/bash -c '
+    . "$1"
+    CODEX_BUNDLE="$2"
+    CODEX_EXE="$3"
+    if try_validate_codex_app_identity 2>"$4"; then exit 1; fi
+    [ "$CODEX_APP_VALIDATED" = "false" ]
+    /usr/bin/grep -F -q "bundle identifier" "$4"
+  ' _ "$APP_IDENTITY_COMMON" "$APP_IDENTITY_BUNDLE" "$APP_IDENTITY_EXE" \
+  "$APP_IDENTITY_ERROR" || {
+    printf 'App identity validation accepted a forged bundle identifier.\n' >&2
+    exit 1
+  }
+[ ! -s "$APP_IDENTITY_LOG" ] || {
+  printf 'Forged bundle identifier reached codesign validation.\n' >&2
+  exit 1
+}
+
 STATE_FALLBACK_HOME="$TMP/state-fallback-home"
 STATE_FALLBACK_ROOT="$STATE_FALLBACK_HOME/Library/Application Support/CodexDreamSkinStudio"
 /bin/mkdir -p "$STATE_FALLBACK_ROOT"

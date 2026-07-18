@@ -162,7 +162,15 @@ codesign_team_id() {
     | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}'
 }
 
+codesign_identifier() {
+  /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 \
+    | /usr/bin/awk -F= '/^Identifier=/{print $2; exit}'
+}
+
 try_validate_codex_app_identity() {
+  local bundle_identifier=""
+  local executable_identifier=""
+  local executable_team_id=""
   CODEX_APP_VALIDATED="false"
   NODE_RUNTIME_VALIDATED="false"
   if [ "$(/usr/bin/uname -s)" != "Darwin" ]; then
@@ -177,13 +185,36 @@ try_validate_codex_app_identity() {
     runtime_discovery_error "The official Codex executable is not a trusted regular file: ${CODEX_EXE:-missing}"
     return 1
   fi
-  if ! /usr/bin/codesign --verify --deep --strict "$CODEX_BUNDLE" >/dev/null 2>&1; then
+  bundle_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$CODEX_BUNDLE/Contents/Info.plist" 2>/dev/null || true)"
+  if [ "$bundle_identifier" != "com.openai.codex" ]; then
+    runtime_discovery_error "Unexpected Codex bundle identifier: ${bundle_identifier:-missing}."
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --strict --ignore-resources "$CODEX_BUNDLE" >/dev/null 2>&1; then
     runtime_discovery_error "The Codex app signature is not valid. Restore or reinstall the official app before continuing."
+    return 1
+  fi
+  if [ "$(codesign_identifier "$CODEX_BUNDLE")" != "com.openai.codex" ]; then
+    runtime_discovery_error "Unexpected Codex bundle signing identifier."
     return 1
   fi
   CODEX_TEAM_ID="$(codesign_team_id "$CODEX_BUNDLE")"
   if [ "$CODEX_TEAM_ID" != "$EXPECTED_CODEX_TEAM_ID" ]; then
     runtime_discovery_error "Unexpected Codex signing team: ${CODEX_TEAM_ID:-missing}."
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --strict "$CODEX_EXE" >/dev/null 2>&1; then
+    runtime_discovery_error "The Codex executable signature is not valid."
+    return 1
+  fi
+  executable_identifier="$(codesign_identifier "$CODEX_EXE")"
+  if [ "$executable_identifier" != "com.openai.codex" ]; then
+    runtime_discovery_error "Unexpected Codex executable signing identifier: ${executable_identifier:-missing}."
+    return 1
+  fi
+  executable_team_id="$(codesign_team_id "$CODEX_EXE")"
+  if [ "$executable_team_id" != "$CODEX_TEAM_ID" ]; then
+    runtime_discovery_error "The Codex executable signer does not match the app signer."
     return 1
   fi
 

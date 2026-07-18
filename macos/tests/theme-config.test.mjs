@@ -23,12 +23,12 @@ function runRestore(config, backup) {
   });
 }
 
-async function writeFixture(label, assignment) {
+async function writeFixture(label, assignment, configContents = "[desktop]\nkeepMe = true\n") {
   const directory = path.join(tempRoot, label);
   const config = path.join(directory, "config.toml");
   const backup = path.join(directory, "theme-backup.json");
   await fs.mkdir(directory);
-  await fs.writeFile(config, "[desktop]\nkeepMe = true\n");
+  await fs.writeFile(config, configContents);
   await fs.writeFile(backup, `${JSON.stringify({
     schemaVersion: 1,
     platform: "darwin",
@@ -89,6 +89,62 @@ try {
       `[desktop]\nkeepMe = true\n${assignment}\n`,
     );
     await assert.rejects(fs.access(fixture.backup), { code: "ENOENT" });
+  }
+
+  const layoutCases = [
+    {
+      label: "crlf-missing-desktop",
+      config: "model = \"gpt-5\"\r\nkeepMe = true\r\n",
+      expected: "model = \"gpt-5\"\r\nkeepMe = true\r\n\r\n[desktop]\r\nappearanceTheme = \"system\"\r\n",
+    },
+    {
+      label: "crlf-empty-desktop",
+      config: "model = \"gpt-5\"\r\n\r\n[desktop]\r\n",
+      expected: "model = \"gpt-5\"\r\n\r\n[desktop]\r\nappearanceTheme = \"system\"\r\n",
+    },
+  ];
+  for (const { label, config, expected } of layoutCases) {
+    const fixture = await writeFixture(label, `appearanceTheme = "system"`, config);
+    const result = await runRestore(fixture.config, fixture.backup);
+    assert.equal(result.code, 0, `${label}\n${result.stderr}`);
+    assert.equal(await fs.readFile(fixture.config, "utf8"), expected);
+  }
+
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const bomFixture = await writeFixture(
+    "bom-first-desktop",
+    `appearanceTheme = "system"`,
+    Buffer.concat([bom, Buffer.from(`[desktop]\nappearanceTheme = "dark"\n`)]),
+  );
+  const bomResult = await runRestore(bomFixture.config, bomFixture.backup);
+  assert.equal(bomResult.code, 0, bomResult.stderr);
+  assert.deepEqual(
+    await fs.readFile(bomFixture.config),
+    Buffer.concat([bom, Buffer.from(`[desktop]\nappearanceTheme = "system"\n`)]),
+  );
+
+  const ambiguousLayouts = [
+    `["desktop"]\nkeepMe = true\n`,
+    `[desktop]\n  appearanceTheme = "dark"\n`,
+    `[desktop]\n"appearanceTheme" = "dark"\n`,
+    String.raw`["desk\u0074op"]
+keepMe = true
+`,
+    String.raw`[desktop]
+"\u0061ppearanceTheme" = "dark"
+`,
+  ];
+  for (const [index, config] of ambiguousLayouts.entries()) {
+    const fixture = await writeFixture(
+      `ambiguous-layout-${index}`,
+      `appearanceTheme = "system"`,
+      config,
+    );
+    const original = await fs.readFile(fixture.config);
+    const result = await runRestore(fixture.config, fixture.backup);
+    assert.notEqual(result.code, 0, `unexpectedly accepted: ${JSON.stringify(config)}`);
+    assert.deepEqual(await fs.readFile(fixture.config), original);
+    await fs.access(fixture.backup);
   }
 
   for (const [index, assignment] of invalidAssignments.entries()) {
