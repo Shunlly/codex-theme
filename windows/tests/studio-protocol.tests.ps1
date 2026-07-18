@@ -146,6 +146,7 @@ function Start-StudioProcess {
   $savedSignal = $env:DREAM_SKIN_TEST_SIGNAL
   $savedArgv = $env:DREAM_SKIN_TEST_ARGV
   $savedStateTemplate = $env:DREAM_SKIN_TEST_STATE_TEMPLATE
+  $savedRendererTrace = $env:DREAM_SKIN_TEST_RENDERER_TRACE
   try {
     $env:LOCALAPPDATA = $Case.LocalAppData
     $env:USERPROFILE = $Case.UserProfile
@@ -154,6 +155,7 @@ function Start-StudioProcess {
     $env:DREAM_SKIN_TEST_SIGNAL = Join-Path $Case.Root 'probe-entered'
     $env:DREAM_SKIN_TEST_ARGV = $Case.ArgvPath
     $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $Case.StateTemplate
+    $env:DREAM_SKIN_TEST_RENDERER_TRACE = Join-Path $Case.Root 'renderer-trace.txt'
     $argumentLine = "-NoProfile -File `"$adapterPath`" -Operation $Operation"
     if ($ExtraArguments.Count -gt 0) { $argumentLine += ' ' + ($ExtraArguments -join ' ') }
     $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentLine -PassThru `
@@ -166,6 +168,7 @@ function Start-StudioProcess {
     $env:DREAM_SKIN_TEST_SIGNAL = $savedSignal
     $env:DREAM_SKIN_TEST_ARGV = $savedArgv
     $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $savedStateTemplate
+    $env:DREAM_SKIN_TEST_RENDERER_TRACE = $savedRendererTrace
   }
   return [pscustomobject]@{ Process = $process; StdoutPath = $stdoutPath; StderrPath = $stderrPath; Case = $Case }
 }
@@ -374,8 +377,14 @@ foreach ($required in @(
 
 $commonSourceContract = [IO.File]::ReadAllText((Join-Path $Root 'scripts\common-windows.ps1'))
 foreach ($required in @('[string]$ExpectedVersion', '$version -cne $ExpectedVersion',
-  'function Test-DreamSkinAdapterOperationLockOwner', 'DREAM_SKIN_ADAPTER_LOCK_OWNER_PID', 'ParentProcessId')) {
+  'function Get-DreamSkinOperationMutexName', 'function Test-DreamSkinAdapterOperationLockOwner',
+  'DREAM_SKIN_ADAPTER_LOCK_OWNER_PID', 'ParentProcessId', '$mutex.WaitOne(0)')) {
   if (-not $commonSourceContract.Contains($required)) { throw "Shared lifecycle contract is missing: $required" }
+}
+$studioSourceContract = [IO.File]::ReadAllText((Join-Path $Root 'scripts\studio-windows.ps1'))
+if (-not $studioSourceContract.Contains(
+    "Get-DreamSkinNodeRuntime -NodePath (Join-Path `$EngineRoot 'runtime\node.exe') -ExpectedVersion '22.23.1'")) {
+  throw 'Deep Studio status does not require the exact private Node runtime.'
 }
 foreach ($source in @($installSource, $startSourceContract, $pauseSource, $restoreSourceContract,
   [IO.File]::ReadAllText((Join-Path $Root 'scripts\verify-dream-skin.ps1')))) {
@@ -472,8 +481,11 @@ public static class StudioFakeNode {
       args[4] == "--browser-id" && args[5] == "browser-123" &&
       args[6] == "--timeout-ms" && args[7] == expectedTimeout;
     if (!exact) return 8;
+    string rendererTrace = Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_RENDERER_TRACE");
+    if (!String.IsNullOrEmpty(rendererTrace)) File.AppendAllText(rendererTrace, "verify\n");
     return scenario == "renderer-pass" || scenario.StartsWith("lifecycle-") || scenario == "resume-hot" ||
-      scenario == "real-verify" || scenario == "real-lock-owner-valid" ? 0 : 9;
+      scenario == "active-exact-runtime" || scenario == "real-verify" ||
+      scenario == "real-lock-owner-valid" ? 0 : 9;
   }
 }
 '@
@@ -521,7 +533,8 @@ function Get-DreamSkinCodexProcesses {
   }
   $running = $env:DREAM_SKIN_TEST_SCENARIO -in @(
     'running', 'active', 'stale', 'reused', 'damaged', 'renderer-pass', 'browser-mismatch',
-    'renderer-fail', 'mutex-hold', 'lifecycle-install-running', 'lifecycle-install-timeout', 'lifecycle-apply',
+    'renderer-fail', 'active-exact-runtime', 'active-wrong-runtime', 'mutex-hold',
+    'lifecycle-install-running', 'lifecycle-install-timeout', 'lifecycle-apply',
     'lifecycle-apply-timeout', 'lifecycle-pause', 'pause-remove-fail', 'resume-hot', 'resume-cold-paused',
     'lifecycle-resume', 'lifecycle-resume-timeout', 'lifecycle-restore',
     'lifecycle-restore-timeout', 'restore-fail', 'stale-restore-fail', 'lifecycle-verify', 'verify-fail',
@@ -563,7 +576,8 @@ function Get-DreamSkinVerifiedCdpIdentity {
   param([int]$Port, [object]$Codex)
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'browser-mismatch') { return [pscustomobject]@{ BrowserId = 'browser-other' } }
   if ($env:DREAM_SKIN_TEST_SCENARIO -in @(
-    'renderer-pass', 'renderer-fail', 'lifecycle-apply', 'lifecycle-pause', 'pause-remove-fail',
+    'renderer-pass', 'renderer-fail', 'active-exact-runtime', 'active-wrong-runtime',
+    'lifecycle-apply', 'lifecycle-pause', 'pause-remove-fail',
     'resume-hot', 'lifecycle-resume', 'lifecycle-verify', 'verify-fail'
   )) { return [pscustomobject]@{ BrowserId = 'browser-123' } }
   return $null
@@ -573,7 +587,11 @@ function Get-DreamSkinNodeRuntime {
   $expected = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime\node.exe'
   if (-not (Test-DreamSkinPathEqual -Left $NodePath -Right $expected) -or
     -not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw 'Deep status did not use the fixed private runtime.' }
-  $version = if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'wrong-runtime') { '22.22.0' } else { '22.23.1' }
+  $version = if ($env:DREAM_SKIN_TEST_SCENARIO -in @('wrong-runtime', 'active-wrong-runtime')) {
+    '22.22.0'
+  } else {
+    '22.23.1'
+  }
   if ($ExpectedVersion -and $version -cne $ExpectedVersion) { throw 'The private Node.js runtime version is invalid.' }
   return [pscustomobject]@{ Path = $NodePath; Version = $version; Major = 22 }
 }
@@ -647,7 +665,10 @@ function Get-DreamSkinCodexInstallFromState { param([object]$State) return $null
 function Get-DreamSkinCodexProcesses {
   param([object]$Codex)
   Add-RealLifecycleTrace 'codex-process'
-  if ($env:DREAM_SKIN_TEST_SCENARIO -match '^real-(?:install|start|pause)') {
+  if ($env:DREAM_SKIN_TEST_SCENARIO -match '^real-(?:install|start|pause)' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -in @(
+      'real-restore-unauthorized', 'real-restore-timeout', 'real-restore-force', 'real-uninstall-force'
+    )) {
     return @([pscustomobject]@{ ProcessId = 5151 })
   }
   return @()
@@ -798,7 +819,7 @@ function Invoke-RealLifecycle {
     [Parameter(Mandatory = $true)][string]$ScriptName,
     [Parameter(Mandatory = $true)][string]$Scenario,
     [string[]]$Arguments = @(),
-    [ValidateSet('none', 'valid', 'invalid')][string]$LockOwner = 'none'
+    [ValidateSet('none', 'self', 'valid', 'invalid')][string]$LockOwner = 'none'
   )
   $stdoutPath = Join-Path $Case.Root "stdout-$([guid]::NewGuid().ToString('N')).txt"
   $stderrPath = Join-Path $Case.Root "stderr-$([guid]::NewGuid().ToString('N')).txt"
@@ -809,38 +830,52 @@ function Invoke-RealLifecycle {
     'DREAM_SKIN_REAL_TRACE', 'DREAM_SKIN_REAL_NODE', 'DREAM_SKIN_REAL_CASE_ROOT',
     'DREAM_SKIN_REAL_PARENT_PID', 'DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'
   )) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
+  $operationMutex = $null
   try {
-    $env:LOCALAPPDATA = $Case.LocalAppData
-    $env:USERPROFILE = $Case.UserProfile
-    $env:HOME = $Case.UserProfile
-    $env:APPDATA = $Case.AppData
-    $env:DREAM_SKIN_TEST_SCENARIO = $Scenario
-    $env:DREAM_SKIN_TEST_NODE_VERSION = '22.23.1'
-    $env:DREAM_SKIN_TEST_INJECTOR = Join-Path $realScripts 'injector.mjs'
-    $env:DREAM_SKIN_REAL_COMMON = Join-Path $Root 'scripts\common-windows.ps1'
-    $env:DREAM_SKIN_REAL_TRACE = $Case.TracePath
-    $env:DREAM_SKIN_REAL_NODE = $nodePath
-    $env:DREAM_SKIN_REAL_CASE_ROOT = $Case.Root
-    $env:DREAM_SKIN_REAL_PARENT_PID = "$PID"
-    if ($LockOwner -eq 'valid') { $env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID = "$PID" }
-    elseif ($LockOwner -eq 'invalid') { $env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID = '1' }
-    else { Remove-Item Env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID -ErrorAction SilentlyContinue }
+    try {
+      $env:LOCALAPPDATA = $Case.LocalAppData
+      $env:USERPROFILE = $Case.UserProfile
+      $env:HOME = $Case.UserProfile
+      $env:APPDATA = $Case.AppData
+      $env:DREAM_SKIN_TEST_SCENARIO = $Scenario
+      $env:DREAM_SKIN_TEST_NODE_VERSION = '22.23.1'
+      $env:DREAM_SKIN_TEST_INJECTOR = Join-Path $realScripts 'injector.mjs'
+      $env:DREAM_SKIN_REAL_COMMON = Join-Path $Root 'scripts\common-windows.ps1'
+      $env:DREAM_SKIN_REAL_TRACE = $Case.TracePath
+      $env:DREAM_SKIN_REAL_NODE = $nodePath
+      $env:DREAM_SKIN_REAL_CASE_ROOT = $Case.Root
+      $env:DREAM_SKIN_REAL_PARENT_PID = "$PID"
+      if ($LockOwner -in @('self', 'valid')) { $env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID = "$PID" }
+      elseif ($LockOwner -eq 'invalid') { $env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID = '1' }
+      else { Remove-Item Env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID -ErrorAction SilentlyContinue }
 
-    $tokens = @('-NoProfile', '-File', (Join-Path $realScripts $ScriptName)) + $Arguments
-    $argumentLine = (@($tokens | ForEach-Object { '"' + "$_" + '"' })) -join ' '
-    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentLine -PassThru `
-      -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-  } finally {
-    foreach ($name in $savedEnvironment.Keys) {
-      [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name])
+      if ($LockOwner -eq 'valid') {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $operationMutex = [Threading.Mutex]::new($false, "Local\CodexDreamSkin.$sid.Operation")
+        try { $acquired = $operationMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired = $true }
+        if (-not $acquired) { throw 'The test parent could not acquire the operation mutex.' }
+      }
+
+      $tokens = @('-NoProfile', '-File', (Join-Path $realScripts $ScriptName)) + $Arguments
+      $argumentLine = (@($tokens | ForEach-Object { '"' + "$_" + '"' })) -join ' '
+      $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentLine -PassThru `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    } finally {
+      foreach ($name in $savedEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name])
+      }
     }
-  }
-  $process.WaitForExit()
-  return [pscustomobject]@{
-    ExitCode = $process.ExitCode
-    Stdout = if (Test-Path -LiteralPath $stdoutPath) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
-    Stderr = if (Test-Path -LiteralPath $stderrPath) { [IO.File]::ReadAllText($stderrPath) } else { '' }
-    Trace = if (Test-Path -LiteralPath $Case.TracePath) { @([IO.File]::ReadAllLines($Case.TracePath)) } else { @() }
+    $process.WaitForExit()
+    return [pscustomobject]@{
+      ExitCode = $process.ExitCode
+      Stdout = if (Test-Path -LiteralPath $stdoutPath) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
+      Stderr = if (Test-Path -LiteralPath $stderrPath) { [IO.File]::ReadAllText($stderrPath) } else { '' }
+      Trace = if (Test-Path -LiteralPath $Case.TracePath) { @([IO.File]::ReadAllLines($Case.TracePath)) } else { @() }
+    }
+  } finally {
+    if ($null -ne $operationMutex) {
+      try { $operationMutex.ReleaseMutex() } finally { $operationMutex.Dispose() }
+    }
   }
 }
 
@@ -909,6 +944,29 @@ try {
     Assert-StudioResult -Result $deepResult -ExitCode 0 -Ok $true -Install 'ready' -Codex 'running' -Session 'active' `
       -ThemeName '午夜极光' -RequiresRestart $false -Verified $deepDefinition.Verified `
       -AvailableActions @('pause', 'resume', 'restore', 'verify', 'uninstall') -ErrorCode $null
+  }
+
+  $exactRuntime = New-CaseRoot -Name 'active-exact-runtime'
+  $before = Get-StateSnapshot -Root $exactRuntime.StateRoot
+  $result = Invoke-Studio -Case $exactRuntime -Scenario 'active-exact-runtime' -ExtraArguments @('-Deep')
+  Assert-Equal (Get-StateSnapshot -Root $exactRuntime.StateRoot) $before 'Exact-runtime deep status mutated state.'
+  Assert-StudioResult -Result $result -ExitCode 0 -Ok $true -Install 'ready' -Codex 'running' -Session 'active' `
+    -ThemeName '午夜极光' -RequiresRestart $false -Verified $true `
+    -AvailableActions @('pause', 'resume', 'restore', 'verify', 'uninstall') -ErrorCode $null
+  if (-not (Test-Path -LiteralPath (Join-Path $exactRuntime.Root 'renderer-trace.txt') -PathType Leaf)) {
+    throw 'Exact private Node did not execute deep renderer verification.'
+  }
+
+  $wrongDeepRuntime = New-CaseRoot -Name 'active-wrong-runtime'
+  $before = Get-StateSnapshot -Root $wrongDeepRuntime.StateRoot
+  $result = Invoke-Studio -Case $wrongDeepRuntime -Scenario 'active-wrong-runtime' -ExtraArguments @('-Deep')
+  Assert-Equal (Get-StateSnapshot -Root $wrongDeepRuntime.StateRoot) $before 'Wrong-runtime deep status mutated state.'
+  Assert-StudioResult -Result $result -ExitCode 1 -Ok $false -Install 'ready' -Codex 'running' -Session 'active' `
+    -ThemeName '午夜极光' -RequiresRestart $false -Verified $false `
+    -AvailableActions @('pause', 'resume', 'restore', 'verify', 'uninstall') -ErrorCode 'RUNTIME_INVALID' `
+    -RecoveryActions @('diagnostics', 'cancel')
+  if (Test-Path -LiteralPath (Join-Path $wrongDeepRuntime.Root 'renderer-trace.txt')) {
+    throw 'Wrong private Node version executed deep renderer verification.'
   }
 
   foreach ($probeScenario in @('probe-error', 'process-error')) {
@@ -1276,6 +1334,13 @@ try {
     throw 'A direct lifecycle caller bypassed the operation lock without the adapter-owned marker.'
   }
 
+  $realLockSelfClaimed = New-RealLifecycleCase -Name 'lock-bypass-self-claimed'
+  $realResult = Invoke-RealLifecycle -Case $realLockSelfClaimed -ScriptName 'verify-dream-skin.ps1' `
+    -Scenario 'real-lock-owner-valid' -Arguments @('-NodePath', $nodePath, '-AdapterLockHeld') -LockOwner self
+  if ($realResult.ExitCode -eq 0) {
+    throw 'A direct lifecycle wrapper bypassed the operation lock by supplying its own parent PID.'
+  }
+
   $realLockWrongOwner = New-RealLifecycleCase -Name 'lock-bypass-wrong-owner'
   $realResult = Invoke-RealLifecycle -Case $realLockWrongOwner -ScriptName 'verify-dream-skin.ps1' `
     -Scenario 'real-lock-owner-valid' -Arguments @('-NodePath', $nodePath, '-AdapterLockHeld') -LockOwner invalid
@@ -1359,6 +1424,45 @@ try {
     throw 'Production pause wrote its marker after live removal failed.'
   }
 
+  $realRestoreUnauthorized = New-RealLifecycleCase -Name 'restore-unauthorized'
+  $realConfig = Join-Path $realRestoreUnauthorized.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realRestoreUnauthorized.StateRoot 'config.before-dream-skin.toml'
+  $realState = Join-Path $realRestoreUnauthorized.StateRoot 'state.json'
+  $realResult = Invoke-RealLifecycle -Case $realRestoreUnauthorized -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-unauthorized' -Arguments @('-RestoreBaseTheme', '-NoRelaunch')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'stop:False' -or
+    $realResult.Trace -contains 'restore-config' -or [IO.File]::ReadAllText($realConfig) -cne 'original' -or
+    [IO.File]::ReadAllText($realBackup) -cne 'backup' -or [IO.File]::ReadAllText($realState) -cne 'preserve-state') {
+    throw 'Production restore crossed its close-authorization boundary.'
+  }
+
+  $realRestoreTimeout = New-RealLifecycleCase -Name 'restore-timeout'
+  $realConfig = Join-Path $realRestoreTimeout.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realRestoreTimeout.StateRoot 'config.before-dream-skin.toml'
+  $realState = Join-Path $realRestoreTimeout.StateRoot 'state.json'
+  $realResult = Invoke-RealLifecycle -Case $realRestoreTimeout -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-timeout' -Arguments @('-RestoreBaseTheme', '-NoRelaunch', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -notcontains 'stop:False' -or
+    $realResult.Trace -contains 'ensure' -or $realResult.Trace -contains 'restore-config' -or
+    [IO.File]::ReadAllText($realConfig) -cne 'original' -or [IO.File]::ReadAllText($realBackup) -cne 'backup' -or
+    [IO.File]::ReadAllText($realState) -cne 'preserve-state') {
+    throw 'Production restore normal-close timeout changed config, state, or backup.'
+  }
+
+  $realRestoreForce = New-RealLifecycleCase -Name 'restore-force'
+  $realConfig = Join-Path $realRestoreForce.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realRestoreForce.StateRoot 'config.before-dream-skin.toml'
+  $realState = Join-Path $realRestoreForce.StateRoot 'state.json'
+  $realResult = Invoke-RealLifecycle -Case $realRestoreForce -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-force' `
+    -Arguments @('-RestoreBaseTheme', '-NoRelaunch', '-CloseRunning', '-ForceRestart')
+  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or
+    (Test-Path -LiteralPath $realBackup) -or (Test-Path -LiteralPath $realState)) {
+    throw 'Production restore did not complete after both close authorization levels.'
+  }
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @('stop:True', 'ensure', 'restore-config', 'archive-backup') `
+    -Message 'Production restore did not propagate force before restore writes.'
+
   $realRestoreFailure = New-RealLifecycleCase -Name 'restore-rollback'
   $realConfig = Join-Path $realRestoreFailure.UserProfile '.codex\config.toml'
   $realBackup = Join-Path $realRestoreFailure.StateRoot 'config.before-dream-skin.toml'
@@ -1387,6 +1491,17 @@ try {
   if ($restoreIndex -lt 0 -or $archiveIndex -le $restoreIndex -or $shortcutIndex -le $archiveIndex) {
     throw 'Production uninstall removed shortcuts before restore and backup completion.'
   }
+
+  $realUninstallForce = New-RealLifecycleCase -Name 'uninstall-force'
+  $realResult = Invoke-RealLifecycle -Case $realUninstallForce -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-uninstall-force' `
+    -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch', '-CloseRunning', '-ForceRestart')
+  if ($realResult.ExitCode -ne 0 -or $realResult.Trace -contains 'start-process') {
+    throw 'Production uninstall rejected authorized force or relaunched Codex.'
+  }
+  Assert-TraceOrder -Trace $realResult.Trace `
+    -Expected @('stop:True', 'restore-config', 'archive-backup', "remove:$([Environment]::GetFolderPath('Desktop'))\Codex Dream Skin.lnk") `
+    -Message 'Production uninstall did not stop Codex before restore and shortcut cleanup.'
 
   Write-Host 'PASS: Windows Studio status and lifecycle protocol.'
 } finally {

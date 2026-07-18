@@ -1,8 +1,12 @@
 . (Join-Path $PSScriptRoot 'config-utf8.ps1')
 
-function Enter-DreamSkinOperationLock {
+function Get-DreamSkinOperationMutexName {
   $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  $mutex = [System.Threading.Mutex]::new($false, "Local\CodexDreamSkin.$sid.Operation")
+  return "Local\CodexDreamSkin.$sid.Operation"
+}
+
+function Enter-DreamSkinOperationLock {
+  $mutex = [System.Threading.Mutex]::new($false, (Get-DreamSkinOperationMutexName))
   $acquired = $false
   try {
     $acquired = $mutex.WaitOne(0)
@@ -32,6 +36,22 @@ function Test-DreamSkinAdapterOperationLockOwner {
   $currentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue
   if ($null -eq $currentProcess -or [int]$currentProcess.ParentProcessId -ne $ownerPid) {
     throw 'The Studio adapter operation lock owner could not be verified.'
+  }
+
+  $mutex = [System.Threading.Mutex]::new($false, (Get-DreamSkinOperationMutexName))
+  $acquired = $false
+  try {
+    try {
+      $acquired = $mutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+      $acquired = $true
+    }
+    if ($acquired) {
+      $mutex.ReleaseMutex()
+      throw 'The Studio adapter operation lock is not held.'
+    }
+  } finally {
+    $mutex.Dispose()
   }
   return $true
 }

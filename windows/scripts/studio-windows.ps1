@@ -204,6 +204,7 @@ function Get-DreamSkinStudioStatus {
   $session = 'official'
   $themeName = $null
   $verified = $null
+  $runtimeInvalid = $false
   try { $pausedMarker = Test-DreamSkinPaused -StateRoot $stateRoot } catch { $pausedMarker = $false }
   if ($stateDamaged) {
     $session = 'stale'
@@ -232,10 +233,16 @@ function Get-DreamSkinStudioStatus {
       $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $port -Codex $codex
       if ($null -ne $cdpIdentity -and $cdpIdentity.BrowserId -is [string] -and
         "$($cdpIdentity.BrowserId)" -ceq "$($savedState.browserId)") {
-        $node = Get-DreamSkinNodeRuntime -NodePath (Join-Path $EngineRoot 'runtime\node.exe')
-        & $node.Path (Join-Path $PSScriptRoot 'injector.mjs') --verify --port "$port" `
-          --browser-id "$($cdpIdentity.BrowserId)" --timeout-ms 5000 *> $null
-        $verified = $LASTEXITCODE -eq 0
+        try {
+          $node = Get-DreamSkinNodeRuntime -NodePath (Join-Path $EngineRoot 'runtime\node.exe') -ExpectedVersion '22.23.1'
+        } catch {
+          $runtimeInvalid = $true
+        }
+        if (-not $runtimeInvalid) {
+          & $node.Path (Join-Path $PSScriptRoot 'injector.mjs') --verify --port "$port" `
+            --browser-id "$($cdpIdentity.BrowserId)" --timeout-ms 5000 *> $null
+          $verified = $LASTEXITCODE -eq 0
+        }
       }
     } catch {}
   } elseif ($Deep -and $session -eq 'paused') {
@@ -267,6 +274,9 @@ function Get-DreamSkinStudioStatus {
   }
   if ($session -eq 'stale') {
     $error = New-DreamSkinStudioError -Code 'STATE_UNSAFE' -Message 'Theme state needs recovery before it can be used.' -RecoveryActions @('restore', 'diagnostics', 'cancel')
+  }
+  if ($runtimeInvalid) {
+    $error = New-DreamSkinStudioError -Code 'RUNTIME_INVALID' -Message 'The Studio runtime is unavailable.' -RecoveryActions @('diagnostics', 'cancel')
   }
 
   $studioState = New-DreamSkinStudioState -Install $install -Codex $codexState -Session $session `
