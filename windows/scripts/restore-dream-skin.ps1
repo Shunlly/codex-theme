@@ -5,6 +5,7 @@ param(
   [switch]$RestoreBaseTheme,
   [switch]$RecoverConfigBackup,
   [switch]$PromptRestart,
+  [switch]$CloseRunning,
   [switch]$ForceRestart,
   [switch]$NoRelaunch
 )
@@ -35,11 +36,13 @@ try {
   if ($RestoreBaseTheme -and $RecoverConfigBackup) {
     throw 'Choose either -RestoreBaseTheme or -RecoverConfigBackup, not both.'
   }
+  if ($ForceRestart -and -not $CloseRunning) {
+    throw '-ForceRestart requires -CloseRunning.'
+  }
   Assert-DreamSkinPort -Port $Port
 
   $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   $themePaths = Get-DreamSkinThemePaths -StateRoot $StateRoot
-  Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root
   $StatePath = Join-Path $StateRoot 'state.json'
   $state = Read-DreamSkinState -Path $StatePath
   if (-not $PortExplicit -and $null -ne $state -and $state.port) {
@@ -90,41 +93,50 @@ try {
   }
 
   $shouldCloseCodex = $codexRunning
-  $forceAuthorized = [bool]$ForceRestart
+  $restartAuthorized = [bool]$CloseRunning
   if ($shouldCloseCodex -and $PromptRestart) {
     $restartMessage = if ($NoRelaunch) {
       'Restore will close Codex and remove Dream Skin plus its CDP session. Continue?'
     } else {
       'Restore will close Codex, remove Dream Skin and its CDP session, then reopen the official app. Continue?'
     }
-    $forceAuthorized = Confirm-DreamSkinRestart -Message $restartMessage
-    if (-not $forceAuthorized) {
+    $restartAuthorized = Confirm-DreamSkinRestart -Message $restartMessage
+    if (-not $restartAuthorized) {
       Write-Host 'Restore was cancelled; no state or configuration was changed.'
       exit 0
     }
   }
+  if ($shouldCloseCodex -and -not $restartAuthorized) {
+    throw 'Codex is running. Close it first or explicitly use -CloseRunning.'
+  }
 
   $backup = Join-Path $StateRoot 'config.before-dream-skin.toml'
   $config = Join-Path $HOME '.codex\config.toml'
+  $configBeforeRestoreBytes = $null
   if ($RecoverConfigBackup) {
     if (-not (Test-Path -LiteralPath $backup)) { throw 'No pre-install config backup is available.' }
     $null = Read-DreamSkinUtf8File -Path $backup
+    $configBeforeRestoreBytes = [IO.File]::ReadAllBytes($config)
+    $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBeforeRestoreBytes -Path $config
   } elseif ($RestoreBaseTheme) {
     if (-not (Test-Path -LiteralPath $backup)) { throw 'No pre-install config backup is available.' }
     $null = Read-DreamSkinUtf8File -Path $backup
     $null = Read-DreamSkinUtf8File -Path $config
+    $configBeforeRestoreBytes = [IO.File]::ReadAllBytes($config)
   }
 
   $restoreError = $null
+  $configChanged = $false
   try {
-    Stop-DreamSkinTrayProcess
     if ($shouldCloseCodex) {
-      Stop-DreamSkinCodex -Codex $codex -AllowForce:$forceAuthorized
+      Stop-DreamSkinCodex -Codex $codex -AllowForce:$ForceRestart
       if ($portOwnedByCodex -and -not (Wait-DreamSkinPortAvailable -Port $Port -TimeoutSeconds 5)) {
         throw "Port $Port is still listening after Codex closed; state was preserved for inspection."
       }
     }
 
+    Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root
+    Stop-DreamSkinTrayProcess
     $recordedInjectorStopped = Stop-DreamSkinRecordedInjector -State $state
     if (-not $recordedInjectorStopped) {
       $staleStatePath = Archive-DreamSkinStateFile -Path $StatePath
@@ -135,17 +147,26 @@ try {
       $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N')
       $recoveryBackup = Join-Path $StateRoot "config.before-recovery-$stamp.toml"
       Restore-DreamSkinConfigBackup -ConfigPath $config -BackupPath $backup -RecoveryBackupPath $recoveryBackup
+      $configChanged = $true
       Write-Host "Recovered the exact pre-install config; previous current config saved at $recoveryBackup"
     } elseif ($RestoreBaseTheme) {
       Restore-DreamSkinBaseTheme -ConfigPath $config -BackupPath $backup
+      $configChanged = $true
     }
+
+    if ($shouldCloseCodex -and -not $NoRelaunch) {
+      if ($null -eq $relaunchCodex -or -not (Test-Path -LiteralPath $relaunchCodex.Executable)) {
+        throw 'Codex cannot be reopened because its current executable is unavailable.'
+      }
+      Start-Process -FilePath $relaunchCodex.Executable | Out-Null
+    }
+
     if ($RecoverConfigBackup -or $RestoreBaseTheme) {
       $archiveStamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N')
       $archivePath = Join-Path $StateRoot "config.restored-$archiveStamp.toml"
       Archive-DreamSkinConfigBackup -BackupPath $backup -ArchivePath $archivePath
       Write-Host "Archived the completed pre-install backup at $archivePath"
     }
-
     Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $StateRoot 'paused') -Force -ErrorAction SilentlyContinue
     if ($Uninstall) {
@@ -159,15 +180,16 @@ try {
         (Join-Path $startMenu 'Codex Dream Skin - Tray.lnk')
       ) | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }
     }
-
-    if ($shouldCloseCodex -and -not $NoRelaunch) {
-      if ($null -eq $relaunchCodex -or -not (Test-Path -LiteralPath $relaunchCodex.Executable)) {
-        throw 'Codex cannot be reopened because its current executable is unavailable.'
-      }
-      Start-Process -FilePath $relaunchCodex.Executable | Out-Null
-    }
   } catch {
     $restoreError = $_
+    if ($configChanged -and $null -ne $configBeforeRestoreBytes) {
+      try {
+        $currentConfigBytes = [IO.File]::ReadAllBytes($config)
+        Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreBytes -ExpectedBytes $currentConfigBytes
+      } catch {
+        Write-Warning 'Restore failed and the original config could not be rolled back automatically.'
+      }
+    }
     if ($shouldCloseCodex -and -not $NoRelaunch -and $null -ne $relaunchCodex -and
       (Get-DreamSkinCodexProcesses -Codex $codex).Count -eq 0 -and (Test-Path -LiteralPath $relaunchCodex.Executable)) {
       try { Start-Process -FilePath $relaunchCodex.Executable | Out-Null } catch {

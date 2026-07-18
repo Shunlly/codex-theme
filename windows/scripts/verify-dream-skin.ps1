@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
   [int]$Port = 9335,
-  [string]$ScreenshotPath
+  [string]$ScreenshotPath,
+  [string]$NodePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,7 +17,7 @@ try {
   $state = Read-DreamSkinState -Path $StatePath
   if (-not $PortExplicit -and $null -ne $state -and $state.port) { $Port = [int]$state.port }
   Assert-DreamSkinPort -Port $Port
-  $node = Get-DreamSkinNodeRuntime
+  $node = Get-DreamSkinNodeRuntime -NodePath $NodePath
   $currentCodex = Get-DreamSkinCodexInstall
   $codex = $currentCodex
   $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $Port -Codex $codex

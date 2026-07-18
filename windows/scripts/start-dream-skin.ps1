@@ -4,7 +4,9 @@ param(
   [switch]$RestartExisting,
   [switch]$PromptRestart,
   [string]$ProfilePath,
-  [switch]$ForegroundInjector
+  [switch]$ForegroundInjector,
+  [string]$NodePath,
+  [switch]$ForceRestart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,17 +19,15 @@ $operationLock = Enter-DreamSkinOperationLock
 try {
   Assert-DreamSkinPort -Port $Port
   if ($ProfilePath) { $ProfilePath = [System.IO.Path]::GetFullPath($ProfilePath) }
-  $node = Get-DreamSkinNodeRuntime
+  $node = Get-DreamSkinNodeRuntime -NodePath $NodePath
   $currentCodex = Get-DreamSkinCodexInstall
   $codex = $currentCodex
   $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   $themePaths = Get-DreamSkinThemePaths -StateRoot $StateRoot
-  Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root
   $StatePath = Join-Path $StateRoot 'state.json'
   $StdoutPath = Join-Path $StateRoot 'injector.log'
   $StderrPath = Join-Path $StateRoot 'injector-error.log'
   $VerifyPath = Join-Path $StateRoot 'verify.log'
-  $themePaths = Initialize-DreamSkinThemeStore -SkillRoot (Split-Path -Parent $PSScriptRoot) -StateRoot $StateRoot
   $pauseWasSet = Test-DreamSkinPaused -StateRoot $StateRoot
 
   $previousState = Read-DreamSkinState -Path $StatePath
@@ -95,10 +95,14 @@ try {
     if (-not $restartAuthorized) {
       throw 'Codex is open without a verified Dream Skin CDP endpoint. Close it first or explicitly use -RestartExisting.'
     }
-    Stop-DreamSkinCodex -Codex $codexToStop -AllowForce
+    Stop-DreamSkinCodex -Codex $codexToStop -AllowForce:$ForceRestart
     $closedExistingCodex = $true
     $codex = $currentCodex
   }
+
+  Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root
+  $themePaths = Initialize-DreamSkinThemeStore -SkillRoot (Split-Path -Parent $PSScriptRoot) `
+    -StateRoot $StateRoot -NodePath $node.Path
 
   $launchedWithCdp = $false
   try {

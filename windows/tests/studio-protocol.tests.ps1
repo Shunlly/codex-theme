@@ -104,7 +104,30 @@ function New-CaseRoot {
       [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Compress), $utf8NoBom)
     }
   }
-  return [pscustomobject]@{ Root = $caseRoot; LocalAppData = $localAppData; UserProfile = $userProfile; StateRoot = $stateRoot }
+  $stateTemplate = Join-Path $caseRoot 'valid-state.json'
+  $templateState = [ordered]@{
+    schemaVersion = 3
+    platform = 'windows'
+    port = 9335
+    injectorPid = 4242
+    injectorStartedAt = '2026-01-01T00:00:00.0000000Z'
+    injectorPath = $injectorPath
+    nodePath = $nodePath
+    codexExe = 'C:\Program Files\WindowsApps\OpenAI.Codex.Primary\app\ChatGPT.exe'
+    codexPackageRoot = 'C:\Program Files\WindowsApps\OpenAI.Codex.Primary'
+    codexPackageFullName = 'OpenAI.Codex_2.0.0.0_x64__test'
+    codexPackageFamilyName = 'OpenAI.Codex_test'
+    browserId = 'browser-123'
+  }
+  [IO.File]::WriteAllText($stateTemplate, ($templateState | ConvertTo-Json -Compress), $utf8NoBom)
+  return [pscustomobject]@{
+    Root = $caseRoot
+    LocalAppData = $localAppData
+    UserProfile = $userProfile
+    StateRoot = $stateRoot
+    StateTemplate = $stateTemplate
+    ArgvPath = Join-Path $caseRoot 'child-argv.txt'
+  }
 }
 
 function Start-StudioProcess {
@@ -121,12 +144,16 @@ function Start-StudioProcess {
   $savedScenario = $env:DREAM_SKIN_TEST_SCENARIO
   $savedInjector = $env:DREAM_SKIN_TEST_INJECTOR
   $savedSignal = $env:DREAM_SKIN_TEST_SIGNAL
+  $savedArgv = $env:DREAM_SKIN_TEST_ARGV
+  $savedStateTemplate = $env:DREAM_SKIN_TEST_STATE_TEMPLATE
   try {
     $env:LOCALAPPDATA = $Case.LocalAppData
     $env:USERPROFILE = $Case.UserProfile
     $env:DREAM_SKIN_TEST_SCENARIO = $Scenario
     $env:DREAM_SKIN_TEST_INJECTOR = $injectorPath
     $env:DREAM_SKIN_TEST_SIGNAL = Join-Path $Case.Root 'probe-entered'
+    $env:DREAM_SKIN_TEST_ARGV = $Case.ArgvPath
+    $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $Case.StateTemplate
     $argumentLine = "-NoProfile -File `"$adapterPath`" -Operation $Operation"
     if ($ExtraArguments.Count -gt 0) { $argumentLine += ' ' + ($ExtraArguments -join ' ') }
     $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentLine -PassThru `
@@ -137,6 +164,8 @@ function Start-StudioProcess {
     $env:DREAM_SKIN_TEST_SCENARIO = $savedScenario
     $env:DREAM_SKIN_TEST_INJECTOR = $savedInjector
     $env:DREAM_SKIN_TEST_SIGNAL = $savedSignal
+    $env:DREAM_SKIN_TEST_ARGV = $savedArgv
+    $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $savedStateTemplate
   }
   return [pscustomobject]@{ Process = $process; StdoutPath = $stdoutPath; StderrPath = $stderrPath; Case = $Case }
 }
@@ -155,11 +184,20 @@ function Complete-StudioProcess {
   if ($reencoded -cne $stdout) { throw 'Studio stdout is not the canonical compact JSON envelope.' }
   Assert-NoPrivateStudioData -Value $envelope -UserProfile $Invocation.Case.UserProfile
   $stderr = [IO.File]::ReadAllText($Invocation.StderrPath).TrimEnd([char[]]@("`r", "`n"))
-  if ($stderr -and $stderr -cne 'DREAM_SKIN_PROGRESS checking') { throw "Unexpected Studio stderr: $stderr" }
-  if (-not $stderr -and ($null -eq $envelope.error -or $envelope.error.code -cne 'INVALID_REQUEST')) {
-    throw 'Studio status omitted its progress marker.'
+  $progressByOperation = @{
+    preflight = 'checking'; status = 'checking'; install = 'installing'; apply = 'applying'
+    pause = 'pausing'; resume = 'applying'; restore = 'restoring'; verify = 'verifying'; uninstall = 'uninstalling'
   }
-  return [pscustomobject]@{ ExitCode = $Invocation.Process.ExitCode; Envelope = $envelope; Raw = $stdout }
+  $progress = $progressByOperation["$($envelope.operation)"]
+  if ($stderr -and $stderr -cne "DREAM_SKIN_PROGRESS $progress") { throw "Unexpected Studio stderr: $stderr" }
+  $preflightError = $null -ne $envelope.error -and $envelope.error.code -in @(
+    'INVALID_REQUEST', 'CODEX_CLOSE_REQUIRED', 'RESTART_REQUIRED', 'STATE_UNSAFE',
+    'CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED', 'RUNTIME_INVALID', 'OPERATION_BUSY'
+  )
+  if (-not $stderr -and -not $preflightError) {
+    throw 'Studio operation omitted its progress marker.'
+  }
+  return [pscustomobject]@{ ExitCode = $Invocation.Process.ExitCode; Envelope = $envelope; Raw = $stdout; Stderr = $stderr }
 }
 
 function Invoke-Studio {
@@ -210,15 +248,167 @@ function Assert-StudioResult {
   }
 }
 
+function Assert-ChildInvocation {
+  param(
+    [Parameter(Mandatory = $true)][object]$Case,
+    [Parameter(Mandatory = $true)][string]$Expected
+  )
+  if (-not (Test-Path -LiteralPath $Case.ArgvPath -PathType Leaf)) { throw 'Lifecycle child was not invoked.' }
+  $actual = [IO.File]::ReadAllText($Case.ArgvPath, [Text.UTF8Encoding]::new($false, $true)).Trim()
+  if ($actual -cne $Expected) { throw "Unexpected lifecycle argv. Expected '$Expected', got '$actual'." }
+}
+
+function Assert-NoChildOrLog {
+  param([Parameter(Mandatory = $true)][object]$Case)
+  if (Test-Path -LiteralPath $Case.ArgvPath) { throw 'Rejected lifecycle request invoked a child script.' }
+  if (Test-Path -LiteralPath (Join-Path $Case.StateRoot 'studio-operation.log')) {
+    throw 'Rejected lifecycle request created an operation log.'
+  }
+}
+
+function Assert-OperationLog {
+  param([Parameter(Mandatory = $true)][object]$Case, [Parameter(Mandatory = $true)][string]$ScriptName)
+  $logPath = Join-Path $Case.StateRoot 'studio-operation.log'
+  if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { throw 'Lifecycle operation log is missing.' }
+  $log = [IO.File]::ReadAllText($logPath)
+  if (-not $log.Contains("child stdout $ScriptName") -or -not $log.Contains("child stderr $ScriptName")) {
+    throw 'Lifecycle child stdout/stderr did not stay in the operation log.'
+  }
+}
+
+function Get-ProtectedSnapshot {
+  param([Parameter(Mandatory = $true)][object]$Case)
+  return @(Get-StateSnapshot -Root $Case.StateRoot | Where-Object { $_ -notlike 'studio-operation.log|*' })
+}
+
+$adapterSource = [IO.File]::ReadAllText((Join-Path $Root 'scripts\studio-adapter.ps1'))
+foreach ($required in @(
+  '$EngineRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))',
+  '$PrivateNodePath = Join-Path $EngineRoot ''runtime\node.exe''',
+  '$powershellPath = Join-Path $PSHOME ''powershell.exe''',
+  "'install-dream-skin.ps1'", "@('-NoShortcuts', '-NodePath', `$PrivateNodePath)",
+  "'pause-dream-skin.ps1'", "@('-RestoreBaseTheme', '-Uninstall')",
+  "[Console]::Error.WriteLine(\"DREAM_SKIN_PROGRESS `$progress\")"
+)) {
+  if (-not $adapterSource.Contains($required)) { throw "Studio adapter contract is missing: $required" }
+}
+$invalidIndex = $adapterSource.IndexOf('if ($ForceAuthorized -and -not $RestartAuthorized)', [StringComparison]::Ordinal)
+$logIndex = $adapterSource.IndexOf("'studio-operation.log'", [StringComparison]::Ordinal)
+$childIndex = $adapterSource.IndexOf('Invoke-DreamSkinLifecycleChild -ScriptPath', [StringComparison]::Ordinal)
+if ($invalidIndex -lt 0 -or $logIndex -le $invalidIndex -or $childIndex -le $logIndex) {
+  throw 'Adapter validates flags after creating its log or invoking a lifecycle child.'
+}
+if ($adapterSource -match '(?m)^\s*(Copy|Move|Remove)-Item\b.*(?:EngineRoot|PSScriptRoot)') {
+  throw 'A running adapter mutates its versioned engine.'
+}
+
+$installSource = [IO.File]::ReadAllText((Join-Path $Root 'scripts\install-dream-skin.ps1'))
+foreach ($required in @('[string]$NodePath', '[switch]$CloseRunning', '[switch]$ForceRestart',
+  'if ($ForceRestart -and -not $CloseRunning)',
+  'Get-DreamSkinNodeRuntime -NodePath $NodePath', 'Stop-DreamSkinCodex -Codex $registeredCodex -AllowForce:$ForceRestart',
+  'Initialize-DreamSkinThemeStore -SkillRoot $SkillRoot -StateRoot $StateRoot -NodePath $node.Path')) {
+  if (-not $installSource.Contains($required)) { throw "Install lifecycle contract is missing: $required" }
+}
+$installStop = $installSource.IndexOf('Stop-DreamSkinCodex -Codex $registeredCodex', [StringComparison]::Ordinal)
+$installWrite = $installSource.IndexOf('Ensure-DreamSkinManagedDirectory', [StringComparison]::Ordinal)
+if ($installStop -lt 0 -or $installWrite -le $installStop) { throw 'Install writes theme/config state before Codex closes.' }
+
+$startSourceContract = [IO.File]::ReadAllText((Join-Path $Root 'scripts\start-dream-skin.ps1'))
+foreach ($required in @('[string]$NodePath', '[switch]$ForceRestart', 'Get-DreamSkinNodeRuntime -NodePath $NodePath',
+  'Stop-DreamSkinCodex -Codex $codexToStop -AllowForce:$ForceRestart', '-StateRoot $StateRoot -NodePath $node.Path')) {
+  if (-not $startSourceContract.Contains($required)) { throw "Start lifecycle contract is missing: $required" }
+}
+$restartFailure = $startSourceContract.IndexOf("throw 'Codex is open without a verified Dream Skin CDP endpoint", [StringComparison]::Ordinal)
+$startWrite = $startSourceContract.IndexOf('Ensure-DreamSkinManagedDirectory', [StringComparison]::Ordinal)
+if ($restartFailure -lt 0 -or $startWrite -le $restartFailure) { throw 'Start writes theme state before restart authorization.' }
+
+$pauseSource = [IO.File]::ReadAllText((Join-Path $Root 'scripts\pause-dream-skin.ps1'))
+$pauseState = $pauseSource.IndexOf('$state = Read-DreamSkinState', [StringComparison]::Ordinal)
+$pauseCdp = $pauseSource.IndexOf('$cdpIdentity = Get-DreamSkinVerifiedCdpIdentity', [StringComparison]::Ordinal)
+$pauseWatcher = $pauseSource.IndexOf('Stop-DreamSkinRecordedInjector -State $state', [StringComparison]::Ordinal)
+$pauseRemove = $pauseSource.IndexOf('--remove --port $Port --browser-id $cdpIdentity.BrowserId --timeout-ms 8000', [StringComparison]::Ordinal)
+$pauseMarker = $pauseSource.IndexOf('Set-DreamSkinPaused -Paused $true', [StringComparison]::Ordinal)
+if ($pauseState -lt 0 -or $pauseCdp -le $pauseState -or $pauseWatcher -le $pauseCdp -or
+  $pauseRemove -le $pauseWatcher -or $pauseMarker -le $pauseRemove) {
+  throw 'Pause does not validate identity, stop the watcher, verify removal, then write the marker.'
+}
+
+$restoreSourceContract = [IO.File]::ReadAllText((Join-Path $Root 'scripts\restore-dream-skin.ps1'))
+foreach ($required in @('[switch]$CloseRunning', 'if ($ForceRestart -and -not $CloseRunning)',
+  'Stop-DreamSkinCodex -Codex $codex -AllowForce:$ForceRestart')) {
+  if (-not $restoreSourceContract.Contains($required)) { throw "Restore lifecycle contract is missing: $required" }
+}
+$restoreStop = $restoreSourceContract.IndexOf('Stop-DreamSkinCodex -Codex $codex', [StringComparison]::Ordinal)
+$restoreWrite = $restoreSourceContract.IndexOf('Ensure-DreamSkinManagedDirectory', [StringComparison]::Ordinal)
+if ($restoreStop -lt 0 -or $restoreWrite -le $restoreStop) { throw 'Restore mutates managed state before Codex closes.' }
+$restoreRelaunch = $restoreSourceContract.IndexOf('Start-Process -FilePath $relaunchCodex.Executable', [StringComparison]::Ordinal)
+$restoreArchive = $restoreSourceContract.IndexOf('Archive-DreamSkinConfigBackup -BackupPath $backup', [StringComparison]::Ordinal)
+$shortcutCleanup = $restoreSourceContract.IndexOf("(Join-Path `$desktop 'Codex Dream Skin.lnk')", [StringComparison]::Ordinal)
+if ($restoreRelaunch -lt 0 -or $restoreArchive -le $restoreRelaunch -or $shortcutCleanup -le $restoreArchive -or
+  -not $restoreSourceContract.Contains('Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreBytes')) {
+  throw 'Restore does not preserve config, backup, state, and shortcuts until relaunch succeeds.'
+}
+
+$themeSourceContract = [IO.File]::ReadAllText((Join-Path $Root 'scripts\theme-windows.ps1'))
+foreach ($required in @(
+  'Get-DreamSkinNodeRuntime -NodePath $NodePath',
+  'Get-DreamSkinValidatedImageMetadata -Path $fullPath -NodePath $NodePath',
+  'Read-DreamSkinTheme -ThemeDirectory $paths.Active -NodePath $NodePath',
+  'Set-DreamSkinActiveTheme -ImagePath $saved.ImagePath -Theme $theme -StateRoot $StateRoot -NodePath $NodePath'
+)) {
+  if (-not $themeSourceContract.Contains($required)) { throw "Theme NodePath chain is missing: $required" }
+}
+
 New-Item -ItemType Directory -Path (Join-Path $engineRoot 'runtime') -Force | Out-Null
 New-Item -ItemType Directory -Path $scriptsRoot -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\studio-windows.ps1') -Destination $scriptsRoot
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\status-dream-skin.ps1') -Destination $scriptsRoot
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\studio-adapter.ps1') -Destination $scriptsRoot
 [IO.File]::WriteAllText((Join-Path $engineRoot 'VERSION'), '1.3.0', $utf8NoBom)
-[IO.File]::WriteAllText((Join-Path $scriptsRoot 'start-dream-skin.ps1'), '# staged readable start', $utf8NoBom)
-[IO.File]::WriteAllText((Join-Path $scriptsRoot 'restore-dream-skin.ps1'), '# staged readable restore', $utf8NoBom)
 [IO.File]::WriteAllText($injectorPath, '// staged injector', $utf8NoBom)
+
+function Write-LifecycleStub {
+  param([Parameter(Mandatory = $true)][string]$Name)
+  $source = @'
+param()
+$ErrorActionPreference = 'Stop'
+$name = '__NAME__'
+[IO.File]::AppendAllText($env:DREAM_SKIN_TEST_ARGV, $name + ' ' + ($args -join '|') + "`r`n", [Text.UTF8Encoding]::new($false))
+Write-Output "child stdout $name"
+[Console]::Error.WriteLine("child stderr $name")
+$scenario = $env:DREAM_SKIN_TEST_SCENARIO
+if ($scenario -like '*-timeout') {
+  throw 'Codex did not close within 15 seconds. Close it manually or explicitly authorize a forced restart.'
+}
+if ($scenario -eq 'pause-remove-fail') { throw 'LIVE_REMOVE_FAILED: The live theme could not be removed safely.' }
+if ($scenario -eq 'verify-fail') { exit 9 }
+if ($scenario -in @('restore-fail', 'stale-restore-fail', 'uninstall-fail')) { throw 'The restore operation failed.' }
+$stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
+switch ($name) {
+  'start-dream-skin.ps1' {
+    Copy-Item -LiteralPath $env:DREAM_SKIN_TEST_STATE_TEMPLATE -Destination (Join-Path $stateRoot 'state.json') -Force
+    Remove-Item -LiteralPath (Join-Path $stateRoot 'paused') -Force -ErrorAction SilentlyContinue
+  }
+  'pause-dream-skin.ps1' {
+    [IO.File]::WriteAllText((Join-Path $stateRoot 'paused'), "paused`r`n", [Text.UTF8Encoding]::new($false))
+  }
+  'restore-dream-skin.ps1' {
+    Remove-Item -LiteralPath (Join-Path $stateRoot 'state.json') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $stateRoot 'paused') -Force -ErrorAction SilentlyContinue
+    Move-Item -LiteralPath (Join-Path $stateRoot 'config.before-dream-skin.toml') `
+      -Destination (Join-Path $stateRoot 'config.restored-test.toml') -Force
+  }
+}
+'@
+  [IO.File]::WriteAllText((Join-Path $scriptsRoot $Name), $source.Replace('__NAME__', $Name), $utf8NoBom)
+}
+
+foreach ($scriptName in @(
+  'install-dream-skin.ps1', 'start-dream-skin.ps1', 'pause-dream-skin.ps1',
+  'restore-dream-skin.ps1', 'verify-dream-skin.ps1'
+)) {
+  Write-LifecycleStub -Name $scriptName
+}
 
 $fakeNodeSource = @'
 using System;
@@ -226,6 +416,14 @@ using System.IO;
 
 public static class StudioFakeNode {
   public static int Main(string[] args) {
+    if (args.Length == 2 && args[0] == "-p" && args[1] == "process.versions.node") {
+      Console.Write("22.23.1");
+      return 0;
+    }
+    if (args.Length == 2 && args[0] == "-p" && args[1] == "process.execPath") {
+      Console.Write(System.Reflection.Assembly.GetExecutingAssembly().Location);
+      return 0;
+    }
     string expectedInjector = Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_INJECTOR");
     bool exact = args.Length == 8 &&
       String.Equals(Path.GetFullPath(args[0]), Path.GetFullPath(expectedInjector), StringComparison.OrdinalIgnoreCase) &&
@@ -233,7 +431,8 @@ public static class StudioFakeNode {
       args[4] == "--browser-id" && args[5] == "browser-123" &&
       args[6] == "--timeout-ms" && args[7] == "5000";
     if (!exact) return 8;
-    return Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_SCENARIO") == "renderer-pass" ? 0 : 9;
+    string scenario = Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_SCENARIO");
+    return scenario == "renderer-pass" || scenario.StartsWith("lifecycle-") || scenario == "resume-hot" ? 0 : 9;
   }
 }
 '@
@@ -278,7 +477,14 @@ function Get-DreamSkinCodexProcesses {
     [IO.File]::WriteAllText($env:DREAM_SKIN_TEST_SIGNAL, 'entered')
     Start-Sleep -Milliseconds 1500
   }
-  $running = $env:DREAM_SKIN_TEST_SCENARIO -in @('running', 'active', 'stale', 'reused', 'damaged', 'renderer-pass', 'browser-mismatch', 'renderer-fail', 'mutex-hold')
+  $running = $env:DREAM_SKIN_TEST_SCENARIO -in @(
+    'running', 'active', 'stale', 'reused', 'damaged', 'renderer-pass', 'browser-mismatch',
+    'renderer-fail', 'mutex-hold', 'lifecycle-install-running', 'lifecycle-install-timeout', 'lifecycle-apply',
+    'lifecycle-apply-timeout', 'lifecycle-pause', 'pause-remove-fail', 'resume-hot', 'resume-cold-paused',
+    'lifecycle-resume', 'lifecycle-resume-timeout', 'lifecycle-restore',
+    'lifecycle-restore-timeout', 'restore-fail', 'stale-restore-fail', 'lifecycle-verify', 'verify-fail',
+    'lifecycle-uninstall', 'lifecycle-uninstall-timeout', 'uninstall-fail'
+  )
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'secondary-install') { $running = $Codex.PackageRoot -like '*Secondary' }
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'saved-stopped') { $running = $Codex.PackageRoot -like '*Primary' }
   if ($running) { return @([pscustomobject]@{ ProcessId = 5151 }) }
@@ -291,7 +497,7 @@ function Read-DreamSkinState {
 }
 function Get-CimInstance {
   param([string]$ClassName, [string]$Filter, [object]$ErrorAction)
-  if ($ClassName -ne 'Win32_Process' -or $env:DREAM_SKIN_TEST_SCENARIO -eq 'stale') { return $null }
+  if ($ClassName -ne 'Win32_Process' -or $env:DREAM_SKIN_TEST_SCENARIO -in @('stale', 'stale-restore-fail')) { return $null }
   $node = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime\node.exe'
   $injector = Join-Path $PSScriptRoot 'injector.mjs'
   return [pscustomobject]@{ ProcessId = 4242; ExecutablePath = $node; CommandLine = "`"$node`" `"$injector`" --watch --port 9335 --browser-id browser-123" }
@@ -305,22 +511,38 @@ function Get-DreamSkinProcessStartedAt {
 function Test-DreamSkinPathEqual { param([string]$Left, [string]$Right) try { return [IO.Path]::GetFullPath($Left) -ieq [IO.Path]::GetFullPath($Right) } catch { return $false } }
 function Test-DreamSkinCommandLineToken { param([string]$CommandLine, [string]$Token) return $CommandLine.Contains($Token) }
 function Test-DreamSkinBrowserId { param([string]$Value) return $Value -cmatch '^[A-Za-z0-9._-]+$' }
+function ConvertTo-DreamSkinProcessArgument {
+  param([string]$Value)
+  if ($Value.Contains('"')) { throw 'quotes are unsupported' }
+  if ($Value -notmatch '\s') { return $Value }
+  return '"' + $Value + '"'
+}
 function Get-DreamSkinVerifiedCdpIdentity {
   param([int]$Port, [object]$Codex)
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'browser-mismatch') { return [pscustomobject]@{ BrowserId = 'browser-other' } }
-  if ($env:DREAM_SKIN_TEST_SCENARIO -in @('renderer-pass', 'renderer-fail')) { return [pscustomobject]@{ BrowserId = 'browser-123' } }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -in @(
+    'renderer-pass', 'renderer-fail', 'lifecycle-apply', 'lifecycle-pause', 'pause-remove-fail',
+    'resume-hot', 'lifecycle-resume', 'lifecycle-verify', 'verify-fail'
+  )) { return [pscustomobject]@{ BrowserId = 'browser-123' } }
   return $null
 }
 function Get-DreamSkinNodeRuntime {
   param([int]$MinimumMajor = 22, [string]$NodePath)
   $expected = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime\node.exe'
-  if (-not (Test-DreamSkinPathEqual -Left $NodePath -Right $expected)) { throw 'Deep status did not use the fixed private runtime.' }
+  if (-not (Test-DreamSkinPathEqual -Left $NodePath -Right $expected) -or
+    -not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw 'Deep status did not use the fixed private runtime.' }
   return [pscustomobject]@{ Path = $NodePath; Version = '22.0.0'; Major = 22 }
 }
 '@
 $themeStub = @'
+function Ensure-DreamSkinManagedDirectory { param([string]$Path, [string]$Root) New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+function Assert-DreamSkinNoReparseComponents { param([string]$Path) }
+function Test-DreamSkinThemePathWithin {
+  param([string]$Path, [string]$Root)
+  try { return [IO.Path]::GetFullPath($Path).StartsWith([IO.Path]::GetFullPath($Root).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) } catch { return $false }
+}
 function Read-DreamSkinTheme {
-  param([string]$ThemeDirectory, [switch]$SkipImageMetadata)
+  param([string]$ThemeDirectory, [switch]$SkipImageMetadata, [string]$NodePath)
   $theme = [IO.File]::ReadAllText((Join-Path $ThemeDirectory 'theme.json'), [Text.UTF8Encoding]::new($false, $true)) | ConvertFrom-Json -ErrorAction Stop
   return [pscustomobject]@{ Theme = $theme }
 }
@@ -472,17 +694,16 @@ try {
     -ErrorCode 'OPERATION_BUSY' -RecoveryActions @('retry', 'cancel')
 
   $invalid = New-CaseRoot -Name 'invalid' -NoState
-  foreach ($operation in @('install', 'apply', 'pause', 'resume', 'restore', 'verify', 'uninstall')) {
-    $before = Get-StateSnapshot -Root $invalid.StateRoot
-    $result = Invoke-Studio -Case $invalid -Scenario 'stopped' -Operation $operation
-    Assert-Equal (Get-StateSnapshot -Root $invalid.StateRoot) $before "$operation mutated state before Task 7."
-    Assert-StudioResult -Result $result -Operation $operation -ExitCode 2 -Ok $false -Install 'not-installed' -Codex 'not-installed' -Session 'official' `
-      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @() -ErrorCode 'INVALID_REQUEST' -RecoveryActions @('cancel')
-  }
   foreach ($invalidRequest in @(
     @{ Operation = 'status'; Arguments = @('-DeleteUserThemes') },
     @{ Operation = 'status'; Arguments = @('-ForceAuthorized') },
-    @{ Operation = 'preflight'; Arguments = @('-RestartAuthorized') }
+    @{ Operation = 'preflight'; Arguments = @('-RestartAuthorized') },
+    @{ Operation = 'pause'; Arguments = @('-RestartAuthorized') },
+    @{ Operation = 'verify'; Arguments = @('-RestartAuthorized') },
+    @{ Operation = 'install'; Arguments = @('-ForceAuthorized') },
+    @{ Operation = 'apply'; Arguments = @('-DeleteUserThemes') },
+    @{ Operation = 'install'; Arguments = @('-Deep') },
+    @{ Operation = 'status'; Arguments = @('-BogusFlag') }
   )) {
     $before = Get-StateSnapshot -Root $invalid.StateRoot
     $result = Invoke-Studio -Case $invalid -Scenario 'stopped' -Operation $invalidRequest.Operation -ExtraArguments $invalidRequest.Arguments
@@ -491,7 +712,223 @@ try {
       -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @() -ErrorCode 'INVALID_REQUEST' -RecoveryActions @('cancel')
   }
 
-  Write-Host 'PASS: Windows Studio status protocol.'
+  $installUnauthorized = New-CaseRoot -Name 'install-unauthorized' -NoState
+  $before = Get-StateSnapshot -Root $installUnauthorized.StateRoot
+  $result = Invoke-Studio -Case $installUnauthorized -Scenario 'lifecycle-install-running' -Operation 'install'
+  Assert-Equal (Get-StateSnapshot -Root $installUnauthorized.StateRoot) $before 'Unauthorized install changed protected state.'
+  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'CODEX_CLOSE_REQUIRED') { throw 'Unauthorized install was not rejected.' }
+  Assert-NoChildOrLog -Case $installUnauthorized
+
+  $install = New-CaseRoot -Name 'install' -NoState
+  $result = Invoke-Studio -Case $install -Scenario 'lifecycle-install-running' -Operation 'install' -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or -not $result.Envelope.ok) { throw 'Restart-authorized install failed.' }
+  Assert-ChildInvocation -Case $install -Expected "install-dream-skin.ps1 -NoShortcuts|-NodePath|$nodePath|-CloseRunning"
+  Assert-OperationLog -Case $install -ScriptName 'install-dream-skin.ps1'
+
+  $installStopped = New-CaseRoot -Name 'install-stopped' -NoState
+  $result = Invoke-Studio -Case $installStopped -Scenario 'stopped' -Operation 'install'
+  if ($result.ExitCode -ne 0) { throw 'Install with stopped Codex failed.' }
+  Assert-ChildInvocation -Case $installStopped -Expected "install-dream-skin.ps1 -NoShortcuts|-NodePath|$nodePath"
+
+  $installForce = New-CaseRoot -Name 'install-force' -NoState
+  $result = Invoke-Studio -Case $installForce -Scenario 'lifecycle-install-running' -Operation 'install' `
+    -ExtraArguments @('-RestartAuthorized', '-ForceAuthorized')
+  if ($result.ExitCode -ne 0) { throw 'Force-authorized install failed.' }
+  Assert-ChildInvocation -Case $installForce -Expected "install-dream-skin.ps1 -NoShortcuts|-NodePath|$nodePath|-CloseRunning|-ForceRestart"
+
+  $installTimeout = New-CaseRoot -Name 'install-timeout' -NoState
+  $protectedBefore = Get-ProtectedSnapshot -Case $installTimeout
+  $engineBefore = Get-StateSnapshot -Root $engineRoot
+  $result = Invoke-Studio -Case $installTimeout -Scenario 'lifecycle-install-timeout' -Operation 'install' -ExtraArguments @('-RestartAuthorized')
+  Assert-Equal (Get-ProtectedSnapshot -Case $installTimeout) $protectedBefore 'Install normal-close timeout changed protected state.'
+  Assert-Equal (Get-StateSnapshot -Root $engineRoot) $engineBefore 'Install normal-close timeout changed the running engine.'
+  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'FORCE_STOP_REQUIRED') { throw 'Install timeout was not mapped to force authorization.' }
+
+  $applyUnauthorized = New-CaseRoot -Name 'apply-unauthorized' -NoState
+  $before = Get-StateSnapshot -Root $applyUnauthorized.StateRoot
+  $result = Invoke-Studio -Case $applyUnauthorized -Scenario 'lifecycle-apply' -Operation 'apply'
+  Assert-Equal (Get-StateSnapshot -Root $applyUnauthorized.StateRoot) $before 'Unauthorized apply changed protected state.'
+  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'RESTART_REQUIRED') { throw 'Unauthorized apply was not rejected.' }
+  Assert-NoChildOrLog -Case $applyUnauthorized
+
+  $apply = New-CaseRoot -Name 'apply' -NoState
+  $result = Invoke-Studio -Case $apply -Scenario 'lifecycle-apply' -Operation 'apply' -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.verified -ne $true) { throw 'Authorized apply was not strictly verified.' }
+  Assert-ChildInvocation -Case $apply -Expected "start-dream-skin.ps1 -NodePath|$nodePath|-RestartExisting"
+  Assert-OperationLog -Case $apply -ScriptName 'start-dream-skin.ps1'
+
+  $applyForce = New-CaseRoot -Name 'apply-force' -NoState
+  $result = Invoke-Studio -Case $applyForce -Scenario 'lifecycle-apply' -Operation 'apply' `
+    -ExtraArguments @('-RestartAuthorized', '-ForceAuthorized')
+  if ($result.ExitCode -ne 0) { throw 'Force-authorized apply failed.' }
+  Assert-ChildInvocation -Case $applyForce -Expected "start-dream-skin.ps1 -NodePath|$nodePath|-RestartExisting|-ForceRestart"
+
+  $applyTimeout = New-CaseRoot -Name 'apply-timeout' -NoState
+  $protectedBefore = Get-ProtectedSnapshot -Case $applyTimeout
+  $result = Invoke-Studio -Case $applyTimeout -Scenario 'lifecycle-apply-timeout' -Operation 'apply' -ExtraArguments @('-RestartAuthorized')
+  Assert-Equal (Get-ProtectedSnapshot -Case $applyTimeout) $protectedBefore 'Apply normal-close timeout changed protected state.'
+  if ($result.Envelope.error.code -cne 'FORCE_STOP_REQUIRED') { throw 'Apply timeout was not mapped to force authorization.' }
+
+  $pause = New-CaseRoot -Name 'pause'
+  $result = Invoke-Studio -Case $pause -Scenario 'lifecycle-pause' -Operation 'pause'
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'paused') { throw 'Pause did not verify live removal before marking paused.' }
+  Assert-ChildInvocation -Case $pause -Expected "pause-dream-skin.ps1 -NodePath|$nodePath"
+  Assert-OperationLog -Case $pause -ScriptName 'pause-dream-skin.ps1'
+
+  $pauseFailure = New-CaseRoot -Name 'pause-remove-fail'
+  $stateBefore = Get-StateSnapshot -Root $pauseFailure.StateRoot
+  $result = Invoke-Studio -Case $pauseFailure -Scenario 'pause-remove-fail' -Operation 'pause'
+  if ($result.Envelope.error.code -cne 'LIVE_REMOVE_FAILED' -or (Test-Path -LiteralPath (Join-Path $pauseFailure.StateRoot 'paused'))) {
+    throw 'Failed live removal wrote the pause marker or mapped incorrectly.'
+  }
+  Assert-Equal (Get-ProtectedSnapshot -Case $pauseFailure) @($stateBefore | Where-Object { $_ -notlike 'studio-operation.log|*' }) 'Failed pause did not preserve state.'
+
+  $resumeHot = New-CaseRoot -Name 'resume-hot'
+  [IO.File]::WriteAllText((Join-Path $resumeHot.StateRoot 'paused'), "paused`r`n", $utf8NoBom)
+  $result = Invoke-Studio -Case $resumeHot -Scenario 'resume-hot' -Operation 'resume'
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.verified -ne $true) { throw 'Resume hot path was not strictly verified.' }
+  Assert-ChildInvocation -Case $resumeHot -Expected "start-dream-skin.ps1 -NodePath|$nodePath"
+  Assert-OperationLog -Case $resumeHot -ScriptName 'start-dream-skin.ps1'
+
+  $resumePausedCold = New-CaseRoot -Name 'resume-cold-paused'
+  [IO.File]::WriteAllText((Join-Path $resumePausedCold.StateRoot 'paused'), "paused`r`n", $utf8NoBom)
+  $before = Get-StateSnapshot -Root $resumePausedCold.StateRoot
+  $result = Invoke-Studio -Case $resumePausedCold -Scenario 'resume-cold-paused' -Operation 'resume'
+  Assert-Equal (Get-StateSnapshot -Root $resumePausedCold.StateRoot) $before 'Cold paused resume changed protected state.'
+  if ($result.Envelope.error.code -cne 'RESTART_REQUIRED') { throw 'Cold paused resume did not require restart authorization.' }
+  Assert-NoChildOrLog -Case $resumePausedCold
+
+  $resumeCold = New-CaseRoot -Name 'resume-cold' -NoState
+  $result = Invoke-Studio -Case $resumeCold -Scenario 'lifecycle-resume' -Operation 'resume'
+  if ($result.Envelope.error.code -cne 'RESTART_REQUIRED') { throw 'Resume cold path did not require restart authorization.' }
+  Assert-NoChildOrLog -Case $resumeCold
+
+  $resumeAuthorized = New-CaseRoot -Name 'resume-authorized' -NoState
+  $result = Invoke-Studio -Case $resumeAuthorized -Scenario 'lifecycle-resume' -Operation 'resume' -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.verified -ne $true) { throw 'Authorized cold resume failed strict verification.' }
+  Assert-ChildInvocation -Case $resumeAuthorized -Expected "start-dream-skin.ps1 -NodePath|$nodePath|-RestartExisting"
+
+  $resumeForce = New-CaseRoot -Name 'resume-force' -NoState
+  $result = Invoke-Studio -Case $resumeForce -Scenario 'lifecycle-resume' -Operation 'resume' `
+    -ExtraArguments @('-RestartAuthorized', '-ForceAuthorized')
+  if ($result.ExitCode -ne 0) { throw 'Force-authorized cold resume failed.' }
+  Assert-ChildInvocation -Case $resumeForce -Expected "start-dream-skin.ps1 -NodePath|$nodePath|-RestartExisting|-ForceRestart"
+
+  $restoreUnauthorized = New-CaseRoot -Name 'restore-unauthorized' -NoState
+  $before = Get-StateSnapshot -Root $restoreUnauthorized.StateRoot
+  $result = Invoke-Studio -Case $restoreUnauthorized -Scenario 'lifecycle-restore' -Operation 'restore'
+  Assert-Equal (Get-StateSnapshot -Root $restoreUnauthorized.StateRoot) $before 'Unauthorized restore changed protected state.'
+  if ($result.Envelope.error.code -cne 'RESTART_REQUIRED') { throw 'Unauthorized restore was not rejected.' }
+  Assert-NoChildOrLog -Case $restoreUnauthorized
+
+  $restore = New-CaseRoot -Name 'restore' -NoState
+  $result = Invoke-Studio -Case $restore -Scenario 'lifecycle-restore' -Operation 'restore' -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'official') { throw 'Authorized restore did not return official state.' }
+  Assert-ChildInvocation -Case $restore -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning'
+  Assert-OperationLog -Case $restore -ScriptName 'restore-dream-skin.ps1'
+
+  $restoreStopped = New-CaseRoot -Name 'restore-stopped' -NoState
+  $result = Invoke-Studio -Case $restoreStopped -Scenario 'stopped' -Operation 'restore'
+  if ($result.ExitCode -ne 0) { throw 'Restore with stopped Codex failed.' }
+  Assert-ChildInvocation -Case $restoreStopped -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme'
+
+  $restoreForce = New-CaseRoot -Name 'restore-force' -NoState
+  $result = Invoke-Studio -Case $restoreForce -Scenario 'lifecycle-restore' -Operation 'restore' `
+    -ExtraArguments @('-RestartAuthorized', '-ForceAuthorized')
+  if ($result.ExitCode -ne 0) { throw 'Force-authorized restore failed.' }
+  Assert-ChildInvocation -Case $restoreForce -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning|-ForceRestart'
+
+  foreach ($failureName in @('lifecycle-restore-timeout', 'restore-fail')) {
+    $restoreFailure = New-CaseRoot -Name $failureName -NoState
+    $protectedBefore = Get-ProtectedSnapshot -Case $restoreFailure
+    $engineBefore = Get-StateSnapshot -Root $engineRoot
+    $result = Invoke-Studio -Case $restoreFailure -Scenario $failureName -Operation 'restore' -ExtraArguments @('-RestartAuthorized')
+    Assert-Equal (Get-ProtectedSnapshot -Case $restoreFailure) $protectedBefore 'Restore failure changed state, backup, config, or theme.'
+    Assert-Equal (Get-StateSnapshot -Root $engineRoot) $engineBefore 'Restore failure changed the running engine.'
+  }
+
+  $staleRestoreUnauthorized = New-CaseRoot -Name 'stale-restore-unauthorized'
+  $before = Get-StateSnapshot -Root $staleRestoreUnauthorized.StateRoot
+  $result = Invoke-Studio -Case $staleRestoreUnauthorized -Scenario 'stale' -Operation 'restore'
+  Assert-Equal (Get-StateSnapshot -Root $staleRestoreUnauthorized.StateRoot) $before 'Unauthorized stale restore changed protected state.'
+  if ($result.Envelope.error.code -cne 'RESTART_REQUIRED') { throw 'Stale restore bypassed restart authorization.' }
+  Assert-NoChildOrLog -Case $staleRestoreUnauthorized
+
+  $staleRestore = New-CaseRoot -Name 'stale-restore'
+  $result = Invoke-Studio -Case $staleRestore -Scenario 'stale' -Operation 'restore' -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'official') { throw 'STATE_UNSAFE blocked authorized restore recovery.' }
+  Assert-ChildInvocation -Case $staleRestore -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning'
+
+  $staleRestoreFailure = New-CaseRoot -Name 'stale-restore-fail'
+  $protectedBefore = Get-ProtectedSnapshot -Case $staleRestoreFailure
+  $result = Invoke-Studio -Case $staleRestoreFailure -Scenario 'stale-restore-fail' -Operation 'restore' `
+    -ExtraArguments @('-RestartAuthorized')
+  Assert-Equal (Get-ProtectedSnapshot -Case $staleRestoreFailure) $protectedBefore 'Failed stale restore did not preserve state and backup.'
+  if ($result.Envelope.error.code -cne 'OPERATION_FAILED') { throw 'Failed stale restore mapped incorrectly.' }
+
+  $verify = New-CaseRoot -Name 'verify'
+  $result = Invoke-Studio -Case $verify -Scenario 'lifecycle-verify' -Operation 'verify'
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.verified -ne $true) { throw 'Verify accepted a non-strict renderer result.' }
+  Assert-ChildInvocation -Case $verify -Expected "verify-dream-skin.ps1 -NodePath|$nodePath"
+  Assert-OperationLog -Case $verify -ScriptName 'verify-dream-skin.ps1'
+
+  $verifyFailure = New-CaseRoot -Name 'verify-fail'
+  $result = Invoke-Studio -Case $verifyFailure -Scenario 'verify-fail' -Operation 'verify'
+  if ($result.Envelope.error.code -cne 'VERIFY_FAILED') { throw 'Verify failure was not mapped safely.' }
+
+  $uninstall = New-CaseRoot -Name 'uninstall' -NoState
+  New-Item -ItemType Directory -Path (Join-Path $uninstall.StateRoot 'themes\saved') -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $uninstall.StateRoot 'images') -Force | Out-Null
+  [IO.File]::WriteAllText((Join-Path $uninstall.StateRoot 'themes\saved\theme.json'), '{}', $utf8NoBom)
+  [IO.File]::WriteAllText((Join-Path $uninstall.StateRoot 'images\saved.jpg'), 'image', $utf8NoBom)
+  $engineBefore = Get-StateSnapshot -Root $engineRoot
+  $result = Invoke-Studio -Case $uninstall -Scenario 'lifecycle-uninstall' -Operation 'uninstall' -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'official') { throw 'Uninstall did not verify restore first.' }
+  Assert-ChildInvocation -Case $uninstall -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-CloseRunning'
+  Assert-OperationLog -Case $uninstall -ScriptName 'restore-dream-skin.ps1'
+  foreach ($preserved in @('themes', 'images', 'active-theme')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $uninstall.StateRoot $preserved) -PathType Container)) { throw "Default uninstall deleted $preserved." }
+  }
+  Assert-Equal (Get-StateSnapshot -Root $engineRoot) $engineBefore 'Uninstall deleted its running versioned engine.'
+
+  $uninstallForce = New-CaseRoot -Name 'uninstall-force' -NoState
+  $result = Invoke-Studio -Case $uninstallForce -Scenario 'lifecycle-uninstall' -Operation 'uninstall' `
+    -ExtraArguments @('-RestartAuthorized', '-ForceAuthorized')
+  if ($result.ExitCode -ne 0) { throw 'Force-authorized uninstall failed.' }
+  Assert-ChildInvocation -Case $uninstallForce `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-CloseRunning|-ForceRestart'
+
+  $deleteThemes = New-CaseRoot -Name 'uninstall-delete' -NoState
+  New-Item -ItemType Directory -Path (Join-Path $deleteThemes.StateRoot 'themes') -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $deleteThemes.StateRoot 'images') -Force | Out-Null
+  $result = Invoke-Studio -Case $deleteThemes -Scenario 'lifecycle-uninstall' -Operation 'uninstall' `
+    -ExtraArguments @('-RestartAuthorized', '-DeleteUserThemes')
+  if ($result.ExitCode -ne 0) { throw 'Explicit user-theme deletion failed.' }
+  foreach ($deleted in @('themes', 'images', 'active-theme')) {
+    if (Test-Path -LiteralPath (Join-Path $deleteThemes.StateRoot $deleted)) { throw "Explicit uninstall retained $deleted." }
+  }
+
+  $uninstallFailure = New-CaseRoot -Name 'uninstall-fail' -NoState
+  $protectedBefore = Get-ProtectedSnapshot -Case $uninstallFailure
+  $engineBefore = Get-StateSnapshot -Root $engineRoot
+  $result = Invoke-Studio -Case $uninstallFailure -Scenario 'uninstall-fail' -Operation 'uninstall' -ExtraArguments @('-RestartAuthorized')
+  Assert-Equal (Get-ProtectedSnapshot -Case $uninstallFailure) $protectedBefore 'Failed uninstall changed protected state.'
+  Assert-Equal (Get-StateSnapshot -Root $engineRoot) $engineBefore 'Failed uninstall changed engine/runtime.'
+
+  $missingNode = New-CaseRoot -Name 'missing-node' -NoState
+  $nodeBackup = "$nodePath.missing"
+  Move-Item -LiteralPath $nodePath -Destination $nodeBackup
+  try {
+    $before = Get-StateSnapshot -Root $missingNode.StateRoot
+    $result = Invoke-Studio -Case $missingNode -Scenario 'stopped' -Operation 'install'
+    Assert-Equal (Get-StateSnapshot -Root $missingNode.StateRoot) $before 'Missing private Node changed protected state.'
+    if ($result.Envelope.error.code -cne 'RUNTIME_INVALID') { throw 'Missing private Node fell back to PATH.' }
+    Assert-NoChildOrLog -Case $missingNode
+  } finally {
+    Move-Item -LiteralPath $nodeBackup -Destination $nodePath
+  }
+
+  Write-Host 'PASS: Windows Studio status and lifecycle protocol.'
 } finally {
   Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

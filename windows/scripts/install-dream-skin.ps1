@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
   [int]$Port = 9335,
-  [switch]$NoShortcuts
+  [switch]$NoShortcuts,
+  [string]$NodePath,
+  [switch]$CloseRunning,
+  [switch]$ForceRestart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,20 +16,17 @@ $SkillRoot = Split-Path -Parent $PSScriptRoot
 $operationLock = Enter-DreamSkinOperationLock
 try {
   Assert-DreamSkinPort -Port $Port
-  $null = Get-DreamSkinNodeRuntime
+  $node = Get-DreamSkinNodeRuntime -NodePath $NodePath
+  if ($ForceRestart -and -not $CloseRunning) {
+    throw '-ForceRestart requires -CloseRunning.'
+  }
   $registeredInstalls = @(Get-DreamSkinRegisteredCodexInstalls)
   if ($registeredInstalls.Count -eq 0) {
     throw 'The official OpenAI.Codex Store package is not installed or its identity cannot be validated.'
   }
-  foreach ($registeredCodex in $registeredInstalls) {
-    if ((Get-DreamSkinCodexProcesses -Codex $registeredCodex).Count -gt 0) {
-      throw 'Close Codex before installing Dream Skin so config.toml cannot change during the transaction.'
-    }
-  }
 
   $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   $themePaths = Get-DreamSkinThemePaths -StateRoot $StateRoot
-  Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root
   $StatePath = Join-Path $StateRoot 'state.json'
   $existingState = Read-DreamSkinState -Path $StatePath
   $savedPathCandidate = Get-DreamSkinCodexStatePathCandidate -State $existingState
@@ -35,9 +35,36 @@ try {
     (Get-DreamSkinCodexProcesses -Codex $savedPathCandidate).Count -gt 0) {
     throw 'The saved Codex path is still running but no longer matches a registered Store package. Close it manually before installing.'
   }
-  $null = Initialize-DreamSkinThemeStore -SkillRoot $SkillRoot -StateRoot $StateRoot
   $ConfigPath = Join-Path $HOME '.codex\config.toml'
   $BackupPath = Join-Path $StateRoot 'config.before-dream-skin.toml'
+  $configBytes = [IO.File]::ReadAllBytes($ConfigPath)
+  $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBytes -Path $ConfigPath
+  if (Test-Path -LiteralPath $BackupPath -PathType Leaf) {
+    $null = Read-DreamSkinUtf8File -Path $BackupPath
+  }
+  Assert-DreamSkinImageFile -Path (Join-Path $SkillRoot 'assets\dream-reference.jpg') -NodePath $node.Path
+  $activeThemePath = Join-Path $themePaths.Active 'theme.json'
+  if (Test-Path -LiteralPath $activeThemePath -PathType Leaf) {
+    $null = Read-DreamSkinTheme -ThemeDirectory $themePaths.Active -NodePath $node.Path
+  }
+
+  $runningInstalls = @($registeredInstalls | Where-Object {
+    (Get-DreamSkinCodexProcesses -Codex $_).Count -gt 0
+  })
+  if ($runningInstalls.Count -gt 0 -and -not $CloseRunning) {
+    throw 'Close Codex before installing Dream Skin so config.toml cannot change during the transaction.'
+  }
+  foreach ($registeredCodex in $registeredInstalls) {
+    if ((Get-DreamSkinCodexProcesses -Codex $registeredCodex).Count -gt 0) {
+      if (-not $CloseRunning) {
+        throw 'Close Codex before installing Dream Skin so config.toml cannot change during the transaction.'
+      }
+      Stop-DreamSkinCodex -Codex $registeredCodex -AllowForce:$ForceRestart
+    }
+  }
+
+  Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root
+  $null = Initialize-DreamSkinThemeStore -SkillRoot $SkillRoot -StateRoot $StateRoot -NodePath $node.Path
   Install-DreamSkinBaseTheme -ConfigPath $ConfigPath -BackupPath $BackupPath
 
   if (-not $NoShortcuts) {
