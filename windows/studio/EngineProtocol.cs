@@ -91,7 +91,6 @@ internal static class EngineProtocol
       ValidateStringArray(Get(state, "availableActions"), Actions);
       if (envelope.State.Operation == "busy" && envelope.State.AvailableActions.Length != 0) Invalid();
       if (envelope.State.Session == "active" && (envelope.State.Install != "ready" || envelope.State.Codex != "running")) Invalid();
-      if (envelope.State.Install == "not-installed" && envelope.State.ThemeName is not null) Invalid();
       if (envelope.State.Verified == true && envelope.State.Session != "active") Invalid();
       if (envelope.Ok && requestedOperation is EngineOperation.Apply or EngineOperation.Resume or EngineOperation.Verify && envelope.State.Verified != true) Invalid();
       ValidateSemantics(envelope, requestedOperation);
@@ -150,8 +149,15 @@ internal static class EngineProtocol
   {
     var state = envelope.State;
     var actions = state.AvailableActions;
+    var safeUnavailableStatusFailure = !envelope.Ok && requestedOperation is EngineOperation.Preflight or EngineOperation.Status &&
+      envelope.Error?.Code == "INTERNAL_ERROR" && envelope.Error.RecoveryActions.SequenceEqual(["retry", "diagnostics", "cancel"]) &&
+      state.Install == "not-installed" && state.Codex == "not-installed" && state.Session == "stale" &&
+      state.Operation == "idle" && state.ThemeName is null && !state.RequiresRestart && actions.Length == 0 && state.Verified is null;
+    var safeUnavailableStatus = requestedOperation is EngineOperation.Preflight or EngineOperation.Status &&
+      state.Install == "not-installed" && state.Session == "official" && state.Operation == "idle" &&
+      actions.SequenceEqual(["install"]) && state.Verified is null;
     if (state.RequiresRestart && (state.Codex != "running" || state.Session != "official")) Invalid();
-    if (state.Session != "official" && state.Install != "ready") Invalid();
+    if (state.Session != "official" && state.Install != "ready" && !safeUnavailableStatusFailure) Invalid();
     if (state.Operation == "busy")
     {
       if (envelope.Ok || envelope.Error?.Code != "OPERATION_BUSY" || actions.Length != 0) Invalid();
@@ -167,13 +173,15 @@ internal static class EngineProtocol
     }
     else
     {
-      if (actions.Any(action => action != "install") || state.ThemeName is not null || state.Verified is not null) Invalid();
+      if (actions.Any(action => action != "install") || state.Verified is not null ||
+          state.ThemeName is not null && !safeUnavailableStatus) Invalid();
     }
     if (actions.Contains("pause") && state.Session != "active") Invalid();
     if (actions.Contains("resume") && state.Session is not ("active" or "paused")) Invalid();
     if (actions.Contains("apply") && state.Session == "active") Invalid();
 
     if (!envelope.Ok) return;
+    if (state.Install == "not-installed" && requestedOperation is not EngineOperation.Uninstall && !safeUnavailableStatus) Invalid();
     if (state.Operation != "idle") Invalid();
     switch (requestedOperation)
     {
