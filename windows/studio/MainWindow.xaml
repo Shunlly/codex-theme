@@ -1,0 +1,75 @@
+<Window x:Class="CodexDreamSkinStudio.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
+        Title="Codex 梦幻皮肤" Width="580" Height="720" MinWidth="500" MinHeight="540"
+        WindowStartupLocation="CenterScreen">
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="32,24,32,28">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+
+      <StackPanel Grid.Row="0" Margin="0,0,0,18">
+        <TextBlock Text="Codex 梦幻皮肤" FontSize="25" FontWeight="SemiBold" />
+        <TextBlock x:Name="StatusText" Text="正在检查当前状态…" Margin="0,8,0,0" TextWrapping="Wrap"
+                   automation:AutomationProperties.Name="当前状态" />
+        <TextBlock x:Name="ThemeText" Text="主题：尚未选择" Margin="0,4,0,0" TextWrapping="Wrap"
+                   automation:AutomationProperties.Name="当前主题" />
+      </StackPanel>
+
+      <Border Grid.Row="1" x:Name="VerificationLine" Height="3" Margin="0,0,0,18"
+              Background="{DynamicResource {x:Static SystemColors.ControlDarkBrushKey}}"
+              automation:AutomationProperties.Name="验证状态线" ToolTip="主题验证状态" />
+
+      <StackPanel Grid.Row="2">
+        <TextBlock Text="主题控制" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,10" />
+        <WrapPanel>
+          <Button x:Name="PrimaryButton" Content="应用主题" Click="PrimaryButton_Click"
+                  automation:AutomationProperties.Name="主要操作" ToolTip="安装、应用或继续使用主题" />
+          <Button x:Name="PauseButton" Content="暂停" Click="PauseButton_Click"
+                  automation:AutomationProperties.Name="暂停主题" ToolTip="暂停显示主题，保留可继续使用的会话" />
+        </WrapPanel>
+      </StackPanel>
+
+      <Border Grid.Row="3" BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}"
+              BorderThickness="0,1,0,0" Margin="0,12,0,0" Padding="0,20,0,0">
+        <StackPanel>
+          <TextBlock Text="恢复与诊断" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+          <TextBlock Text="完全恢复会关闭梦幻皮肤会话，让 Codex 回到标准外观。" TextWrapping="Wrap" Margin="0,0,0,12" />
+          <WrapPanel>
+            <Button x:Name="RestoreButton" Content="完全恢复" Click="RestoreButton_Click"
+                    automation:AutomationProperties.Name="完全恢复 Codex" ToolTip="关闭主题会话并恢复标准外观" />
+            <Button x:Name="DiagnosticsButton" Content="打开诊断" Click="DiagnosticsButton_Click"
+                    automation:AutomationProperties.Name="打开诊断文件夹" ToolTip="在文件资源管理器中打开诊断文件夹" />
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="4" BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}"
+              BorderThickness="0,1,0,0" Margin="0,12,0,0" Padding="0,20,0,0">
+        <StackPanel>
+          <TextBlock Text="卸载" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+          <TextBlock Text="卸载前会先恢复标准外观。删除个人主题后无法撤销。" TextWrapping="Wrap" Margin="0,0,0,12" />
+          <Button x:Name="UninstallButton" Content="卸载梦幻皮肤" HorizontalAlignment="Left" Click="UninstallButton_Click"
+                  Foreground="#C42B1C" automation:AutomationProperties.Name="卸载梦幻皮肤" ToolTip="恢复标准外观并卸载梦幻皮肤" />
+        </StackPanel>
+      </Border>
+
+      <Border Grid.Row="5" BorderBrush="{DynamicResource {x:Static SystemColors.ControlLightBrushKey}}"
+              BorderThickness="0,1,0,0" Margin="0,12,0,0" Padding="0,16,0,0" MinHeight="64">
+        <StackPanel>
+          <ProgressBar x:Name="OperationProgress" Height="4" IsIndeterminate="True" Visibility="Hidden"
+                       automation:AutomationProperties.Name="操作进度" />
+          <TextBlock x:Name="ProgressText" Text="就绪" MinHeight="24" Margin="0,8,0,0" TextWrapping="Wrap"
+                     automation:AutomationProperties.Name="操作进度说明" />
+        </StackPanel>
+      </Border>
+    </Grid>
+  </ScrollViewer>
+</Window>
