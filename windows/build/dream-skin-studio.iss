@@ -18,13 +18,18 @@
 #endif
 
 [Setup]
+#ifdef TestAppId
+AppId={#TestAppId}
+#else
 AppId=com.feiaway.codex-dream-skin-studio
+#endif
 AppName=Codex Dream Skin Studio
 AppVersion={#AppVersion}
 AppPublisher=Codex Dream Skin Studio contributors
 DefaultDirName={localappdata}\Programs\CodexDreamSkinStudio\versions\{#AppVersion}
 DefaultGroupName=Codex Dream Skin Studio
 DisableProgramGroupPage=yes
+DisableDirPage=yes
 PrivilegesRequired=lowest
 UsePreviousAppDir=no
 OutputDir={#OutputDir}
@@ -38,9 +43,11 @@ CloseApplications=no
 #if Architecture == "x64"
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-#else
+#elif Architecture == "arm64"
 ArchitecturesAllowed=arm64
 ArchitecturesInstallIn64BitMode=arm64
+#else
+  #error Unsupported Architecture
 #endif
 
 [Files]

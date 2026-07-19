@@ -11,6 +11,11 @@ $RepoRoot = Split-Path -Parent $WindowsRoot
 $ReleaseRoot = Join-Path $WindowsRoot 'release'
 $Version = [IO.File]::ReadAllText((Join-Path $WindowsRoot 'VERSION')).Trim()
 if ($Version -cne '1.3.0') { throw 'The Windows release version is invalid.' }
+$hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$requiredHostArchitecture = if ($Architecture -eq 'x64') { 'X64' } else { 'Arm64' }
+if ($hostArchitecture -cne $requiredHostArchitecture) {
+  throw 'Windows Studio releases require a matching X64 or Arm64 build host.'
+}
 
 $DotNet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
 $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'

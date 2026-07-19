@@ -41,7 +41,8 @@ public partial class MainWindow : Window
     var success = await DispatchAsync(EngineOperation.Preflight);
     if (_prepareUninstall)
     {
-      if (success) success = await DispatchAsync(EngineOperation.Uninstall);
+      if (success && ConfirmPrepareUninstall()) success = await DispatchAsync(EngineOperation.Uninstall);
+      else success = false;
       FinishPrepareUninstall(success ? 0 : 1);
     }
   }
@@ -158,6 +159,18 @@ public partial class MainWindow : Window
     try
     {
       return System.Windows.MessageBox.Show(this, "需要先关闭并重新打开 Codex 才能继续。要继续吗？", "需要重新打开 Codex",
+        MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
+    }
+    finally { _confirming = false; UpdateView(); }
+  }
+
+  private bool ConfirmPrepareUninstall()
+  {
+    _confirming = true;
+    UpdateView();
+    try
+    {
+      return System.Windows.MessageBox.Show(this, "卸载前必须先恢复 Codex 的标准外观。要继续吗？", "卸载梦幻皮肤",
         MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
     }
     finally { _confirming = false; UpdateView(); }

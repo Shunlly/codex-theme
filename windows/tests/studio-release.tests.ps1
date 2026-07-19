@@ -4,86 +4,208 @@ param()
 $ErrorActionPreference = 'Stop'
 $WindowsRoot = Split-Path -Parent $PSScriptRoot
 $RepoRoot = Split-Path -Parent $WindowsRoot
-$version = [IO.File]::ReadAllText((Join-Path $WindowsRoot 'VERSION')).Trim()
-$innoPath = Join-Path $WindowsRoot 'build\dream-skin-studio.iss'
-$builderPath = Join-Path $WindowsRoot 'scripts\build-studio-release.ps1'
-$appPath = Join-Path $WindowsRoot 'studio\App.xaml.cs'
-$windowPath = Join-Path $WindowsRoot 'studio\MainWindow.xaml.cs'
+$Builder = Join-Path $WindowsRoot 'scripts\build-studio-release.ps1'
+$InnoSource = Join-Path $WindowsRoot 'build\dream-skin-studio.iss'
+$PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$DotNet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+$InnoSetup = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+$Version = [IO.File]::ReadAllText((Join-Path $WindowsRoot 'VERSION')).Trim()
+. (Join-Path $WindowsRoot 'scripts\common-windows.ps1')
 
-function Assert-Contains {
-  param([string]$Text, [string]$Expected, [string]$Message)
-  if ($Text.IndexOf($Expected, [StringComparison]::Ordinal) -lt 0) { throw $Message }
-}
-
-function Assert-NotContains {
-  param([string]$Text, [string]$Unexpected, [string]$Message)
-  if ($Text.IndexOf($Unexpected, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw $Message }
-}
-
-foreach ($required in @($innoPath, $builderPath, $appPath, $windowPath)) {
-  if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-    throw "Required Studio release source is missing: $required"
+function Invoke-TestProcess {
+  param([string]$FilePath, [string[]]$Arguments)
+  $startInfo = [Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = $FilePath
+  $startInfo.Arguments = (@($Arguments | ForEach-Object { ConvertTo-DreamSkinProcessArgument -Value "$_" })) -join ' '
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  try {
+    if (-not $process.Start()) { throw 'Test process could not start.' }
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $stdout.Result + $stderr.Result }
+  } finally {
+    $process.Dispose()
   }
 }
 
-$inno = [IO.File]::ReadAllText($innoPath)
-$builder = [IO.File]::ReadAllText($builderPath)
-$app = [IO.File]::ReadAllText($appPath)
-$window = [IO.File]::ReadAllText($windowPath)
+function Get-FileSnapshot {
+  param([string]$Root)
+  return @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
+    "$($_.FullName.Substring($Root.Length))|$($_.Length)|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+  })
+}
 
-Assert-Contains $inno 'AppId=com.feiaway.codex-dream-skin-studio' 'Installer AppId is not fixed.'
-Assert-Contains $inno 'PrivilegesRequired=lowest' 'Installer is not per-user.'
-Assert-Contains $inno 'DefaultDirName={localappdata}\Programs\CodexDreamSkinStudio\versions\{#AppVersion}' 'Installer path is not versioned under LocalAppData.'
-Assert-Contains $inno 'UsePreviousAppDir=no' 'Upgrade can overwrite an older version directory.'
-Assert-Contains $inno "ExpandConstant('{app}\CodexDreamSkinStudio.exe')" 'Uninstall does not launch the installed Studio.'
-Assert-Contains $inno "'--prepare-uninstall'" 'Uninstall does not pass the exact restore-guard argument.'
-Assert-Contains $inno 'ewWaitUntilTerminated' 'Uninstall does not wait for the restore guard.'
-Assert-Contains $inno 'ResultCode = 0' 'Uninstall does not require successful restore.'
-Assert-Contains $inno 'postinstall' 'Finish-page launch is missing.'
-Assert-NotContains $inno 'PrivilegesRequiredOverridesAllowed' 'Installer permits an elevation override.'
-Assert-NotContains $inno 'deleteUserThemes' 'Installer can delete user themes.'
-Assert-NotContains $inno '\CodexDreamSkin\themes' 'Installer owns user themes.'
-Assert-NotContains $inno '\CodexDreamSkin\images' 'Installer owns user images.'
-Assert-NotContains $inno '\CodexDreamSkin\active-theme' 'Installer owns the active user theme.'
+function Assert-SnapshotEqual {
+  param([object[]]$Actual, [object[]]$Expected, [string]$Message)
+  if ((ConvertTo-Json -InputObject @($Actual) -Compress) -cne
+    (ConvertTo-Json -InputObject @($Expected) -Compress)) { throw $Message }
+}
 
-Assert-Contains $builder "[ValidateSet('x64', 'arm64')]" 'Builder does not constrain architectures.'
-Assert-Contains $builder '[switch]$SkipSign' 'Builder has no development signing mode.'
-Assert-Contains $builder '[switch]$SkipTests' 'Builder cannot skip only test execution.'
-Assert-Contains $builder 'fetch-node-runtime.ps1' 'Builder duplicates or omits private Node fetching.'
-Assert-Contains $builder "studio\release\check-contents.mjs" 'Builder does not use the shared scanner.'
-Assert-Contains $builder "studio\release\allowlist-windows.json" 'Builder does not use the Windows executable allowlist.'
-Assert-Contains $builder '--self-contained' 'Builder does not publish self-contained Studio.'
-Assert-Contains $builder 'WINDOWS_SIGN_CERT_THUMBPRINT' 'Formal signing does not require a certificate thumbprint.'
-Assert-Contains $builder 'Get-AuthenticodeSignature' 'Builder does not verify Authenticode.'
-Assert-Contains $builder 'UNSIGNED' 'Development output is not visibly unsigned.'
-Assert-Contains $builder 'SHA256SUMS.txt' 'Builder does not publish SHA-256 metadata.'
-Assert-Contains $builder '[IO.Directory]::Move' 'Release publication is not an atomic directory move.'
+foreach ($tool in @($PowerShell, $DotNet, $InnoSetup)) {
+  if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw 'A required Windows release test tool is unavailable.' }
+}
 
-Assert-Contains $app 'e.Args.Length == 1' 'Prepare-uninstall argument matching is not exact.'
-Assert-Contains $app '"--prepare-uninstall"' 'Prepare-uninstall entry is missing.'
-Assert-Contains $app 'Shutdown(1)' 'Unknown arguments or mutex contention do not fail closed.'
-Assert-Contains $window 'EngineOperation.Uninstall' 'Prepare-uninstall does not reuse the Studio uninstall operation.'
-Assert-Contains $window 'DispatchAsync' 'Prepare-uninstall bypasses the existing dispatcher.'
-Assert-Contains $window 'Shutdown(exitCode)' 'Prepare-uninstall does not report its result to Inno.'
-Assert-NotContains $app 'DeleteUserThemes' 'Installer startup forwards theme deletion.'
+$osArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$Architecture = switch ($osArchitecture) {
+  'X64' { 'x64' }
+  'Arm64' { 'arm64' }
+  default { throw 'Windows Studio release tests require an X64 or Arm64 host.' }
+}
+$mismatchArchitecture = if ($Architecture -eq 'x64') { 'arm64' } else { 'x64' }
+$mismatch = Invoke-TestProcess $PowerShell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+  $Builder, '-Architecture', $mismatchArchitecture, '-SkipSign', '-SkipTests')
+if ($mismatch.ExitCode -eq 0 -or
+  $mismatch.Output -notmatch 'Windows Studio releases require a matching X64 or Arm64 build host\.') {
+  throw 'Release builder did not reject a mismatched build host before staging.'
+}
 
-if ($version -cne '1.3.0') { throw 'Windows VERSION must be 1.3.0 for this installer.' }
+$build = Invoke-TestProcess $PowerShell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+  $Builder, '-Architecture', $Architecture, '-SkipSign', '-SkipTests')
+if ($build.ExitCode -ne 0) { throw "Unsigned Studio release build failed.`n$($build.Output)" }
 
-$stageRoot = Join-Path $WindowsRoot "release\stage-$version"
-if (Test-Path -LiteralPath $stageRoot -PathType Container) {
-  foreach ($required in @(
-    'CodexDreamSkinStudio.exe', 'engine\scripts\studio-adapter.ps1', 'engine\assets\theme.json',
-    'engine\runtime\node.exe', 'engine\runtime\LICENSE.node.txt', 'engine\runtime\NOTICE.node.txt',
-    'engine\protocol\README.md', 'engine\protocol\fixtures-v1.json', 'engine\LICENSE',
-    'engine\NOTICE.md', 'engine\VERSION'
-  )) {
-    if (-not (Test-Path -LiteralPath (Join-Path $stageRoot $required) -PathType Leaf)) {
-      throw "Staged release file is missing: $required"
+$ReleaseRoot = Join-Path $WindowsRoot 'release'
+$StageRoot = Join-Path $ReleaseRoot "stage-$Version"
+$PrivateNode = Join-Path $StageRoot 'engine\runtime\node.exe'
+$Setup = Join-Path $ReleaseRoot "CodexDreamSkinStudio-$Version-win-$Architecture-UNSIGNED.exe"
+foreach ($required in @($StageRoot, $PrivateNode, $Setup, (Join-Path $ReleaseRoot 'SHA256SUMS.txt'),
+  (Join-Path $ReleaseRoot 'release-manifest.json'))) {
+  if (-not (Test-Path -LiteralPath $required)) { throw "Required release output is missing: $required" }
+}
+
+$contract = Invoke-TestProcess $PrivateNode @((Join-Path $PSScriptRoot 'studio-release-contract.test.mjs'))
+if ($contract.ExitCode -ne 0) { throw "Portable Studio release contract failed.`n$($contract.Output)" }
+
+$token = [guid]::NewGuid().ToString('N')
+$TemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "codex-dream-skin-release-$token"
+$InstallRoot = Join-Path $TemporaryRoot 'installed'
+$TestOutput = Join-Path $TemporaryRoot 'setup'
+$TestAppId = "com.feiaway.codex-dream-skin-studio.test.$token"
+$TestBaseName = "CodexDreamSkinStudio-test-$token"
+$ThemeSentinel = Join-Path $env:LOCALAPPDATA "CodexDreamSkin\themes\task12-$token.keep"
+$ReleaseSentinel = Join-Path $ReleaseRoot "prior-output-$token.keep"
+$stub = Join-Path $TemporaryRoot 'prepare-uninstall-stub.exe'
+$firstInstance = $null
+$previousGuardExit = $env:DREAM_SKIN_TEST_PREPARE_EXIT
+$previousThumbprint = $env:WINDOWS_SIGN_CERT_THUMBPRINT
+
+try {
+  New-Item -ItemType Directory -Path $TestOutput -Force | Out-Null
+  $stubSource = @'
+using System;
+public static class Program {
+  public static int Main(string[] args) {
+    if (args.Length != 1 || args[0] != "--prepare-uninstall") return 97;
+    int code;
+    return int.TryParse(Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_PREPARE_EXIT"), out code) ? code : 98;
+  }
+}
+'@
+  Add-Type -TypeDefinition $stubSource -OutputAssembly $stub -OutputType ConsoleApplication | Out-Null
+
+  $compileArguments = @(
+    "/DAppVersion=`"$Version`"", "/DArchitecture=`"$Architecture`"", "/DStageRoot=`"$StageRoot`"",
+    "/DOutputDir=`"$TestOutput`"", "/DOutputBaseFilename=`"$TestBaseName`"",
+    '/DIconPath="compiler:SetupClassicIcon.ico"', "/DTestAppId=`"$TestAppId`"", $InnoSource
+  )
+  $compileOutput = "$(& $InnoSetup $compileArguments 2>&1)"
+  if ($LASTEXITCODE -ne 0) { throw "Isolated Inno test installer compilation failed.`n$compileOutput" }
+  $TestSetup = Join-Path $TestOutput "$TestBaseName.exe"
+  if (-not (Test-Path -LiteralPath $TestSetup -PathType Leaf)) { throw 'Isolated Inno test installer is missing.' }
+
+  $install = Invoke-TestProcess $TestSetup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', "/DIR=$InstallRoot")
+  if ($install.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $InstallRoot -PathType Container)) {
+    throw "Isolated Studio installation failed.`n$($install.Output)"
+  }
+
+  $InstalledPayload = Join-Path $TemporaryRoot 'installed-payload'
+  New-Item -ItemType Directory -Path $InstalledPayload | Out-Null
+  $expectedFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($stagedFile in Get-ChildItem -LiteralPath $StageRoot -Recurse -File -Force) {
+    $relative = $stagedFile.FullName.Substring($StageRoot.Length).TrimStart('\')
+    $null = $expectedFiles.Add($relative)
+    $installedFile = Join-Path $InstallRoot $relative
+    if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf) -or
+      (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash -cne
+        (Get-FileHash -LiteralPath $stagedFile.FullName -Algorithm SHA256).Hash) {
+      throw "Installed payload does not match its staged file: $relative"
+    }
+    $payloadFile = Join-Path $InstalledPayload $relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $payloadFile) -Force | Out-Null
+    Copy-Item -LiteralPath $installedFile -Destination $payloadFile
+  }
+  foreach ($installedFile in Get-ChildItem -LiteralPath $InstallRoot -Recurse -File -Force) {
+    $relative = $installedFile.FullName.Substring($InstallRoot.Length).TrimStart('\')
+    if (-not $expectedFiles.Contains($relative) -and $relative -notmatch '^unins\d+\.(?:dat|exe|msg)$') {
+      throw "Installer added an unexpected payload file: $relative"
     }
   }
-  & (Join-Path $stageRoot 'engine\runtime\node.exe') (Join-Path $RepoRoot 'studio\release\check-contents.mjs') `
-    --root $stageRoot --allowlist (Join-Path $RepoRoot 'studio\release\allowlist-windows.json')
-  if ($LASTEXITCODE -ne 0) { throw 'Staged release content scan failed.' }
-}
+  & (Join-Path $InstalledPayload 'engine\runtime\node.exe') (Join-Path $RepoRoot 'studio\release\check-contents.mjs') `
+    --root $InstalledPayload --allowlist (Join-Path $RepoRoot 'studio\release\allowlist-windows.json')
+  if ($LASTEXITCODE -ne 0) { throw 'Installed release content scan failed.' }
 
-Write-Host 'PASS: Windows Studio release source and staged-content contracts.'
+  if ([Environment]::UserInteractive) {
+    $firstInstance = Start-Process -FilePath (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') -PassThru
+    Start-Sleep -Milliseconds 1000
+    if ($firstInstance.HasExited) { throw 'Studio mutex fixture exited before acquiring the instance mutex.' }
+    $contended = Invoke-TestProcess (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') @('--prepare-uninstall')
+    if ($contended.ExitCode -eq 0) { throw 'Prepare-uninstall succeeded while another Studio instance owned the mutex.' }
+    $firstInstance.Kill()
+    $firstInstance.WaitForExit()
+    $firstInstance.Dispose()
+    $firstInstance = $null
+  } else {
+    Write-Warning 'Studio mutex execution is unavailable in a non-interactive Windows session.'
+  }
+
+  Copy-Item -LiteralPath $stub -Destination (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') -Force
+  New-Item -ItemType Directory -Path (Split-Path -Parent $ThemeSentinel) -Force | Out-Null
+  [IO.File]::WriteAllText($ThemeSentinel, 'preserve', [Text.UTF8Encoding]::new($false))
+
+  $Uninstaller = Get-ChildItem -LiteralPath $InstallRoot -Filter 'unins*.exe' -File | Select-Object -First 1
+  if ($null -eq $Uninstaller) { throw 'Isolated Studio uninstaller is missing.' }
+  $beforeGuardFailure = @(Get-FileSnapshot $InstallRoot)
+  $env:DREAM_SKIN_TEST_PREPARE_EXIT = '1'
+  $null = Invoke-TestProcess $Uninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+  Assert-SnapshotEqual @(Get-FileSnapshot $InstallRoot) $beforeGuardFailure 'Nonzero prepare guard changed installed files.'
+
+  $env:DREAM_SKIN_TEST_PREPARE_EXIT = '0'
+  $successfulUninstall = Invoke-TestProcess $Uninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+  if ($successfulUninstall.ExitCode -ne 0) { throw "Successful guarded uninstall failed.`n$($successfulUninstall.Output)" }
+  for ($attempt = 0; $attempt -lt 50 -and (Test-Path -LiteralPath $InstallRoot); $attempt++) { Start-Sleep -Milliseconds 100 }
+  if (Test-Path -LiteralPath $InstallRoot) { throw 'Successful guarded uninstall preserved installed files.' }
+  if (-not (Test-Path -LiteralPath $ThemeSentinel -PathType Leaf)) { throw 'Successful installer uninstall deleted a user theme.' }
+
+  [IO.File]::WriteAllText($ReleaseSentinel, 'prior-output', [Text.UTF8Encoding]::new($false))
+  $setupHash = (Get-FileHash -LiteralPath $Setup -Algorithm SHA256).Hash
+  $env:WINDOWS_SIGN_CERT_THUMBPRINT = ''
+  $failedBuild = Invoke-TestProcess $PowerShell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+    $Builder, '-Architecture', $Architecture, '-SkipTests')
+  if ($failedBuild.ExitCode -eq 0 -or -not (Test-Path -LiteralPath $ReleaseSentinel -PathType Leaf) -or
+    (Get-FileHash -LiteralPath $Setup -Algorithm SHA256).Hash -cne $setupHash) {
+    throw 'An ordinary builder failure replaced prior release output.'
+  }
+
+  Write-Host 'PASS: Windows Studio release build, install scan, mutex, uninstall guard, and publication behavior.'
+} finally {
+  if ($firstInstance -and -not $firstInstance.HasExited) { $firstInstance.Kill(); $firstInstance.WaitForExit() }
+  if ($firstInstance) { $firstInstance.Dispose() }
+  if (Test-Path -LiteralPath $InstallRoot -PathType Container) {
+    $cleanupUninstaller = Get-ChildItem -LiteralPath $InstallRoot -Filter 'unins*.exe' -File | Select-Object -First 1
+    if ($cleanupUninstaller -and (Test-Path -LiteralPath $stub -PathType Leaf)) {
+      Copy-Item -LiteralPath $stub -Destination (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') -Force
+      $env:DREAM_SKIN_TEST_PREPARE_EXIT = '0'
+      $null = Invoke-TestProcess $cleanupUninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+    }
+  }
+  if (Test-Path -LiteralPath $ThemeSentinel) { Remove-Item -LiteralPath $ThemeSentinel -Force }
+  if (Test-Path -LiteralPath $ReleaseSentinel) { Remove-Item -LiteralPath $ReleaseSentinel -Force }
+  if (Test-Path -LiteralPath $TemporaryRoot) { Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force }
+  $env:DREAM_SKIN_TEST_PREPARE_EXIT = $previousGuardExit
+  $env:WINDOWS_SIGN_CERT_THUMBPRINT = $previousThumbprint
+}
