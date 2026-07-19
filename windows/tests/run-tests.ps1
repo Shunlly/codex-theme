@@ -4,6 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 & (Join-Path $PSScriptRoot 'studio-protocol.tests.ps1')
+& (Join-Path $PSScriptRoot 'studio-release.tests.ps1')
 . (Join-Path $Root 'scripts\common-windows.ps1')
 . (Join-Path $Root 'scripts\theme-windows.ps1')
 

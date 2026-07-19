@@ -14,15 +14,18 @@ public partial class MainWindow : Window
   private readonly EngineClient _client = new();
   private readonly CancellationTokenSource _operationCancellation = new();
   private readonly Forms.NotifyIcon _tray;
+  private readonly bool _prepareUninstall;
   private EngineEnvelope? _envelope;
   private Task<EngineEnvelope>? _activeEngineCall;
   private bool _busy;
   private bool _confirming;
   private bool _preflightStarted;
   private bool _explicitExit;
+  private bool _resourcesDisposed;
 
-  public MainWindow()
+  public MainWindow(bool prepareUninstall = false)
   {
+    _prepareUninstall = prepareUninstall;
     InitializeComponent();
     BoundToWorkArea(this, 580, 720);
     _tray = CreateTray();
@@ -35,7 +38,12 @@ public partial class MainWindow : Window
   {
     if (_preflightStarted) return;
     _preflightStarted = true;
-    await DispatchAsync(EngineOperation.Preflight);
+    var success = await DispatchAsync(EngineOperation.Preflight);
+    if (_prepareUninstall)
+    {
+      if (success) success = await DispatchAsync(EngineOperation.Uninstall);
+      FinishPrepareUninstall(success ? 0 : 1);
+    }
   }
 
   private Forms.NotifyIcon CreateTray()
@@ -72,9 +80,9 @@ public partial class MainWindow : Window
       operation == EngineOperation.Restore && _envelope.Error?.RecoveryActions.Contains("restore") == true;
   }
 
-  private async Task DispatchAsync(EngineOperation operation, bool deleteUserThemes = false)
+  private async Task<bool> DispatchAsync(EngineOperation operation, bool deleteUserThemes = false)
   {
-    if (!CanRun(operation)) return;
+    if (!CanRun(operation)) return false;
     var restartAuthorized = false;
     var forceAuthorized = false;
     try
@@ -87,11 +95,11 @@ public partial class MainWindow : Window
         if (result.Ok)
         {
           ProgressText.Text = ResultText(operation);
-          return;
+          return true;
         }
         if (result.Error?.Code is "CODEX_CLOSE_REQUIRED" or "RESTART_REQUIRED" && !restartAuthorized)
         {
-          if (!ConfirmRestart()) return;
+          if (!ConfirmRestart()) return false;
           restartAuthorized = true;
           continue;
         }
@@ -99,26 +107,27 @@ public partial class MainWindow : Window
         {
           if (!restartAuthorized)
           {
-            if (!ConfirmRestart()) return;
+            if (!ConfirmRestart()) return false;
             restartAuthorized = true;
             continue;
           }
           if (!forceAuthorized)
           {
-            if (!ConfirmForce()) return;
+            if (!ConfirmForce()) return false;
             forceAuthorized = true;
             continue;
           }
         }
         ProgressText.Text = DomainErrorText(result.Error?.Code);
-        return;
+        return false;
       }
     }
-    catch (OperationCanceledException) { ProgressText.Text = "操作已取消。"; }
+    catch (OperationCanceledException) { ProgressText.Text = "操作已取消。"; return false; }
     catch
     {
       ProgressText.Text = "操作未能完成。请打开诊断信息后重试。";
       System.Windows.MessageBox.Show(this, "操作未能完成。请打开诊断信息后重试。", "Codex 梦幻皮肤", MessageBoxButton.OK, MessageBoxImage.Warning);
+      return false;
     }
     finally
     {
@@ -280,20 +289,45 @@ public partial class MainWindow : Window
     {
       try { await _activeEngineCall; } catch { }
     }
+    DisposeResources();
+    System.Windows.Application.Current.Shutdown(_prepareUninstall ? 1 : 0);
+  }
+
+  private void FinishPrepareUninstall(int exitCode)
+  {
+    _explicitExit = true;
+    DisposeResources();
+    System.Windows.Application.Current.Shutdown(exitCode);
+  }
+
+  private void DisposeResources()
+  {
+    if (_resourcesDisposed) return;
+    _resourcesDisposed = true;
     _tray.Visible = false;
     _tray.Dispose();
     _operationCancellation.Dispose();
-    System.Windows.Application.Current.Shutdown();
   }
 
   protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
   {
-    if (!_explicitExit)
+    if (_prepareUninstall && !_explicitExit)
+    {
+      _operationCancellation.Cancel();
+    }
+    else if (!_explicitExit)
     {
       e.Cancel = true;
       Hide();
     }
     base.OnClosing(e);
+  }
+
+  protected override void OnClosed(EventArgs e)
+  {
+    DisposeResources();
+    base.OnClosed(e);
+    if (_prepareUninstall && !_explicitExit) System.Windows.Application.Current.Shutdown(1);
   }
 
   private async void PrimaryButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(PrimaryOperation());

@@ -10,17 +10,23 @@ public partial class App : System.Windows.Application
   protected override void OnStartup(StartupEventArgs e)
   {
     base.OnStartup(e);
+    var prepareUninstall = e.Args.Length == 1 && e.Args[0].Equals("--prepare-uninstall", StringComparison.Ordinal);
+    if (e.Args.Length != 0 && !prepareUninstall)
+    {
+      Shutdown(1);
+      return;
+    }
     var user = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
     _instanceMutex = new Mutex(true, $"Local\\CodexDreamSkinStudio.{user}", out var ownsInstance);
     if (!ownsInstance)
     {
       _instanceMutex.Dispose();
       _instanceMutex = null;
-      Shutdown();
+      if (prepareUninstall) Shutdown(1); else Shutdown();
       return;
     }
 
-    var window = new MainWindow();
+    var window = new MainWindow(prepareUninstall);
     MainWindow = window;
     window.Show();
   }
