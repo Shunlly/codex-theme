@@ -3,6 +3,33 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
+$ExpectedStudioVersion = '1.3.0'
+if (([IO.File]::ReadAllText((Join-Path $Root 'VERSION')).Trim()) -cne $ExpectedStudioVersion) {
+  throw "Windows VERSION must be $ExpectedStudioVersion."
+}
+foreach ($runtimeFile in @('scripts\injector.mjs', 'assets\renderer-inject.js')) {
+  $content = [IO.File]::ReadAllText((Join-Path $Root $runtimeFile))
+  if ($content -notmatch 'VERSION|__DREAM_SKIN_VERSION_JSON__') {
+    throw "Windows runtime must load or receive VERSION: $runtimeFile"
+  }
+}
+if ([IO.File]::ReadAllText((Join-Path $Root 'assets\renderer-inject.js')) -notmatch '__DREAM_SKIN_VERSION_JSON__') {
+  throw 'Windows renderer must receive its version through the payload.'
+}
+if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\studio-adapter.ps1')) -notmatch "'preflight', 'install', 'apply', 'status', 'pause', 'resume', 'restore', 'verify', 'uninstall'") {
+  throw 'Windows Studio adapter must expose all Protocol v1 operations.'
+}
+if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\build-studio-release.ps1')) -notmatch 'check-contents\.mjs') {
+  throw 'Windows Studio release builder must invoke the content scanner.'
+}
+foreach ($readme in @(
+  (Join-Path $Root '..\README.md'),
+  (Join-Path $Root '..\README.en.md'),
+  (Join-Path $Root '..\docs\platforms.md'),
+  (Join-Path $Root 'SKILL.md')
+)) {
+  if ([IO.File]::ReadAllText($readme) -notmatch 'Studio') { throw "Studio-first quick start is missing from $readme" }
+}
 & (Join-Path $PSScriptRoot 'studio-protocol.tests.ps1')
 & (Join-Path $PSScriptRoot 'studio-release.tests.ps1')
 . (Join-Path $Root 'scripts\common-windows.ps1')

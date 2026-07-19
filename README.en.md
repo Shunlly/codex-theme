@@ -61,26 +61,8 @@ shown below are native Codex controls.
   <sub>Dark · real injected screenshot; unsent input hidden during capture (preview only)</sub>
 </p>
 
-Install from the repo and switch in one command on macOS:
-
-```bash
-cd macos
-./scripts/install-dream-skin-macos.sh --no-launch
-~/.codex/codex-dream-skin-studio/scripts/switch-theme-macos.sh \
-  --id preset-romantic-rose
-```
-
-Windows has a persistent local theme store and system-tray controls, and seeds
-the same Arina Hashimoto preset. For the first repo-based setup:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\windows\scripts\install-dream-skin.ps1
-powershell -ExecutionPolicy Bypass -File .\windows\scripts\start-dream-skin.ps1
-```
-
-After launch, switch directly through **已保存主题 → 桥本有菜**; no cross-folder
-manual import is required. **更换背景图** still imports your own UI-free
-wallpaper, which can then be saved for one-click switching.
+Studio seeds the Arina Hashimoto preset on first install. Switch themes or import
+your own UI-free wallpaper from Studio after verified success.
 
 > The downloadable user source is [`docs/images/presets/romantic-rose-source.png`](./docs/images/presets/romantic-rose-source.png) (`1672 × 941`); the macOS one-click preset uses the normalized derived [`background.jpg`](./macos/presets/preset-romantic-rose/background.jpg) (`2560 × 1440`). Do not import either screenshot above: they contain real UI and are previews only. The background is a user-provided AI-generated example, not an official OpenAI/Codex visual or endorsement; confirm likeness and asset rights before redistributing it.
 
@@ -143,12 +125,26 @@ for the eight individual styles.
 
 ## Quick start
 
-Platform scripts are ready — different plumbing, same goal: theme Codex.
+1. Download the signed Studio artifact for your platform, then open or install it.
+2. Complete preflight and authorize one Codex restart only when Studio asks.
+3. Wait for strict verified success. Use **Pause** for reversible soft-off and
+   **Complete Restore** to remove the live skin and close managed CDP.
 
-| Platform | Dir | Entry |
+Ordinary macOS use needs no Terminal, SwiftBar, Homebrew, or separate Node.
+Ordinary Windows use needs no PowerShell, PATH Node, administrator elevation, or manual commands.
+
+| Platform | Studio artifact | Advanced recovery |
 |------|------|------|
-| Apple Silicon / Intel Mac | [`macos/`](./macos/) | Double-click `Install Codex Dream Skin.command` |
-| Windows | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
+| Apple Silicon / Intel Mac | `CodexDreamSkinStudio.dmg` | [`macos/README.md`](./macos/README.md) |
+| Windows | `CodexDreamSkinStudio-Setup.exe` | [`windows/SKILL.md`](./windows/SKILL.md) |
+
+### Advanced recovery
+
+Repository shell launchers, SwiftBar, PowerShell scripts, diagnostics, and manual
+restore commands remain supported maintainer/recovery paths, not the normal install story.
+
+Milestone 1 does not include theme-package sharing, workspace scenes/bindings,
+context profiles, or motion/video.
 
 This repository also includes four [optional user themes](./user-themes/) that are not installed automatically: `IU Ivory Bridal`, `Gojo Satoru`, `Sakura Spring Festival`, and `Yuzuriha Inori`.
 

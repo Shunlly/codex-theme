@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 — 2026-07-18
+
+### Changed
+
+- Studio is now the documented ordinary-user flow: signed artifact, preflight, one authorized restart, strict verify, Pause, and Complete Restore.
+- `VERSION` is authoritative for the macOS engine, injector payload, renderer verification, package metadata, and client release text.
+- Shell launchers and SwiftBar remain available as advanced recovery paths. Milestone 1 does not add theme package sharing, workspace scenes/bindings, context profiles, or motion/video.
+
+### Verification
+
+- Automated version, Protocol v1 wiring, and release-scanner contracts were added. Clean-VM, live Codex, signing/notarization, Gatekeeper, and macOS 12 acceptance are recorded only when actually run.
+
+---
+
 ## 1.2.0 — 2026-07-17
 
 ### 新增

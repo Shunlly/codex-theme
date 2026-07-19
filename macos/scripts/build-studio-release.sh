@@ -9,6 +9,11 @@ PACKAGE="$MACOS_ROOT/studio"
 RELEASE_DIR="$MACOS_ROOT/release"
 APP_NAME="CodexDreamSkinStudio.app"
 DMG_NAME="CodexDreamSkinStudio.dmg"
+VERSION="$(/usr/bin/tr -d '[:space:]' < "$MACOS_ROOT/VERSION")"
+[ "$VERSION" = "1.3.0" ] || {
+  printf 'The macOS release version is invalid.\n' >&2
+  exit 1
+}
 
 if [ "$#" -ne 1 ]; then
   printf 'Usage: %s --adhoc|--notarize\n' "$0" >&2
@@ -225,6 +230,8 @@ do
 done
 
 copy_snapshot_file macos/studio/Resources/Info.plist "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS/Info.plist"
 copy_snapshot_file studio/assets/app-icon-source.png "$TMP/app-icon-source.png"
 if /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$CONTENTS/Info.plist" >/dev/null 2>&1; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$CONTENTS/Info.plist"

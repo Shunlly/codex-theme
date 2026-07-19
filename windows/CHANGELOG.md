@@ -1,5 +1,19 @@
 # Windows Changelog
 
+## 1.3.0 — 2026-07-18
+
+### Changed
+
+- Studio is the documented ordinary-user flow: signed setup, preflight, one authorized restart, strict verify, Pause, and Complete Restore.
+- `VERSION` now drives the injector payload and renderer verification; PowerShell remains advanced recovery.
+- Milestone 1 does not add theme package sharing, workspace scenes/bindings, context profiles, or motion/video.
+
+### Verification
+
+- Automated version, Protocol v1 wiring, and release-scanner contracts were added. Windows VM, Store, SmartScreen, signing, and live interaction results are recorded only when actually run.
+
+---
+
 ## 1.2.0 — 2026-07-17
 
 ### 新增

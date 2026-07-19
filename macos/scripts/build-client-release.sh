@@ -6,6 +6,7 @@ OUTPUT="${1:-$HOME/Desktop/Codex 主题编辑器.zip}"
 TMP="$(/usr/bin/mktemp -d /tmp/codex-dream-client.XXXXXX)"
 CLIENT_ROOT="$TMP/Codex 主题编辑器"
 ENGINE="$CLIENT_ROOT/.codex-dream-skin-studio"
+VERSION="$(/bin/cat "$ROOT/VERSION")"
 trap '/bin/rm -rf "$TMP"' EXIT
 
 "$ROOT/tests/run-tests.sh"
@@ -44,7 +45,7 @@ fi
   > "$CLIENT_ROOT/安装 Codex 主题编辑器.command"
 
 /usr/bin/printf '%s\n' \
-  'Codex 主题编辑器 1.2.0' \
+  "Codex 主题编辑器 $VERSION" \
   '' \
   '推荐方式：把这个完整 ZIP、你喜欢的图片和“给 Codex 的部署提示词.md”一起发给自己的 Codex。' \
   '' \

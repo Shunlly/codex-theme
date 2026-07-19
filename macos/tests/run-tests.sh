@@ -5,6 +5,48 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 NODE="${NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 [ -x "$NODE" ] || { printf 'Codex bundled Node.js was not found: %s\n' "$NODE" >&2; exit 1; }
 
+EXPECTED_STUDIO_VERSION="1.3.0"
+[ "$(/bin/cat "$ROOT/VERSION")" = "$EXPECTED_STUDIO_VERSION" ] || {
+  printf 'macOS VERSION must be %s.\n' "$EXPECTED_STUDIO_VERSION" >&2
+  exit 1
+}
+[ "$("$NODE" -p "require(process.argv[1]).version" "$ROOT/package.json")" = "$EXPECTED_STUDIO_VERSION" ] || {
+  printf 'macOS package version must match VERSION.\n' >&2
+  exit 1
+}
+for runtime_file in "$ROOT/scripts/common-macos.sh" "$ROOT/scripts/injector.mjs"; do
+  /usr/bin/grep -F -q 'VERSION' "$runtime_file" || {
+    printf 'macOS runtime must load VERSION: %s\n' "$runtime_file" >&2
+    exit 1
+  }
+done
+/usr/bin/grep -F -q '"$ROOT/VERSION"' "$ROOT/scripts/build-client-release.sh" || {
+  printf 'Client release instructions must derive their version from VERSION.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q '__DREAM_SKIN_VERSION_JSON__' "$ROOT/assets/renderer-inject.js" || {
+  printf 'macOS renderer must receive its version through the payload.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q 'preflight|install|apply|status|pause|resume|restore|verify|uninstall' "$ROOT/scripts/studio-adapter-macos.sh" || {
+  printf 'macOS Studio adapter must expose all Protocol v1 operations.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q 'check-contents.mjs' "$ROOT/scripts/build-studio-release.sh" || {
+  printf 'macOS Studio release builder must invoke the content scanner.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q 'CFBundleShortVersionString $VERSION' "$ROOT/scripts/build-studio-release.sh" || {
+  printf 'macOS Studio bundle metadata must derive its version from VERSION.\n' >&2
+  exit 1
+}
+for readme in "$ROOT/../README.md" "$ROOT/../README.en.md" "$ROOT/README.md"; do
+  /usr/bin/grep -F -q 'Studio' "$readme" || {
+    printf 'Studio-first quick start is missing from %s.\n' "$readme" >&2
+    exit 1
+  }
+done
+
 while IFS= read -r file; do /bin/bash -n "$file"; done < <(
   /usr/bin/find "$ROOT" -type f \( -name '*.sh' -o -name '*.command' \) \
     ! -path '*/release/*' -print
@@ -1272,7 +1314,7 @@ STUB
   [ "$(state_field port)" = "9341" ]
 ' _ "$ROOT"
 
-/usr/bin/env -u HOME /bin/bash -c '. "$1/scripts/common-macos.sh"; [ -n "$HOME" ] && [ "$SKIN_VERSION" = "1.2.0" ]' _ "$ROOT"
+/usr/bin/env -u HOME /bin/bash -c '. "$1/scripts/common-macos.sh"; [ -n "$HOME" ] && [ "$SKIN_VERSION" = "1.3.0" ]' _ "$ROOT"
 "$ROOT/scripts/doctor-macos.sh" >/dev/null
 
 printf 'PASS: syntax, payload, bundled presets, preset seeding, runtime-state safety, custom-theme, config round-trips, HOME recovery, signature, and doctor checks.\n'

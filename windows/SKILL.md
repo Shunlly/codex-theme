@@ -7,9 +7,17 @@ description: Apply, launch, verify, repair, update, or restore a full decorative
 
 Apply a reversible renderer skin through Chromium DevTools Protocol while launching the official Store-installed Codex executable. Never replace or take ownership of files under `WindowsApps`.
 
-## Workflow
+## Ordinary-user workflow (Studio)
 
-1. Install Node.js 22 or newer, close Codex, then run `scripts/install-dream-skin.ps1` once to preserve the user's native appearance settings, seed the Arina Hashimoto theme, and create launch/restore/tray shortcuts.
+1. Download and install the signed `CodexDreamSkinStudio-Setup.exe`; no PowerShell, PATH Node, or administrator elevation is required.
+2. Complete Studio preflight and authorize a single restart only when requested.
+3. Wait for strict verified success. Use **Pause** for soft-off and **Complete Restore** to remove the live skin and close CDP.
+
+CDP is loopback-only but has no same-user authentication. Pause keeps CDP open; Complete Restore closes it. Official WindowsApps files and signatures stay unchanged.
+
+## Advanced recovery
+
+1. Use the bundled private Node runtime, close Codex, then run `scripts/install-dream-skin.ps1` once to preserve the user's native appearance settings, seed the Arina Hashimoto theme, and create launch/restore/tray shortcuts.
 2. Run `scripts/start-dream-skin.ps1`. The shortcut asks before restarting an already-open Codex app; CLI callers must explicitly add `-RestartExisting`.
 3. Run `scripts/verify-dream-skin.ps1 -ScreenshotPath <absolute-path>` after launch. Treat a missing continuous wallpaper, home shell, native composer, sidebar layer, or injection marker as failure. The native suggestion count is responsive and may be two to four.
 4. Inspect the screenshot against `references/qa-inventory.md`. Verify both the home screen and a normal task before signing off.

@@ -1,5 +1,6 @@
 # Runtime notes
 
+- Studio is the ordinary-user entry point for 1.3.0: preflight, one authorized restart, strict verify, Pause, then Complete Restore. PowerShell scripts and diagnostics are advanced recovery only. Pause leaves CDP open; Complete Restore closes it.
 - The skin discovers the current `OpenAI.Codex` package on every run, requires a non-development `Store` signature kind, and launches its `ChatGPT.exe` with an explicit `--remote-debugging-address=127.0.0.1` and selected port.
 - Node.js 22 or newer is required for the built-in WebSocket client. The runtime's real `process.execPath` and version are recorded in state, even when PATH points at a shim.
 - The preferred port is `9335`; the default launcher scans up to 100 ports when it is occupied. An explicit occupied port is rejected.

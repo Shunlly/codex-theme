@@ -50,6 +50,13 @@ Check what you actually ran. Skip items that do not apply and say so under Notes
 - [ ] Relevant `install` / `start` / `verify` / `restore` scripts exercised / 已按改动跑过对应脚本
 - [ ] Environment noted below (OS build, Codex source) / 下方注明环境
 
+### Studio release evidence / Studio 发版证据
+
+- [ ] Automated gates listed with actual output / 已列出自动化门禁和实际输出
+- [ ] Live Codex home/task interaction result recorded, or `NOT RUN` with blocker / 已记录实机首页/任务结果，或标为未运行并说明阻塞
+- [ ] Clean-VM result recorded, or `NOT RUN` with blocker / 已记录干净虚拟机结果，或标为未运行并说明阻塞
+- [ ] Signing / Gatekeeper / SmartScreen result recorded, or `NOT RUN` with blocker / 已记录签名与信任结果，或标为未运行并说明阻塞
+
 ### User-facing / 用户可见变更
 
 - [ ] Updated `macos/CHANGELOG.md` (and `macos/VERSION` if release-worthy) / 已更新 changelog（发版时再 bump VERSION）

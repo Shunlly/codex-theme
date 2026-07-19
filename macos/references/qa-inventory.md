@@ -8,7 +8,7 @@
 4. Decorative layers have `pointer-events: none`; no screenshot or raster UI is used as an overlay.
 5. Route changes, renderer reloads, and ordinary refreshes reapply the current theme while the verified injector runs.
 6. Official application signature and `app.asar` remain unchanged.
-7. Restore removes live DOM/CSS, restores the two saved base-theme values, closes the CDP session after restart, and supports later reinstallation.
+7. Complete Restore removes live DOM/CSS, restores the two saved base-theme values, closes the CDP session after restart, and supports later reinstallation; Pause verifies live removal without closing CDP.
 
 ## Automated checks
 
@@ -20,7 +20,9 @@
 - Official app and internal Node signature, Team ID, architecture, and version validation.
 - Port collision selection and saved-port reuse.
 - PID reuse protection through PID, start time, executable, script path, and command-line matching.
-- Live verification after `Page.reload` returns version `1.2.0` and `pass: true`.
+- Version contracts keep `VERSION`, package metadata, injector payload, renderer, client release text, and Studio release metadata at `1.3.0`.
+- Studio Protocol v1 retains `preflight`, `install`, `apply`, `status`, `pause`, `resume`, `restore`, `verify`, and `uninstall`; release assembly invokes the content scanner.
+- Live verification after `Page.reload` returns version `1.3.0` and `pass: true`.
 - Strict home verification requires a visible wallpaper composition region of at least 320×160, composer, sidebar, non-interactive decoration, and no horizontal overflow. Suggestion cards and the standalone project button are optional only when the current Codex host does not render them.
 
 ## Visual checks
@@ -35,7 +37,8 @@
 
 - Run `tests/run-tests.sh` successfully.
 - Install from a clean extracted copy with no global Node.js.
-- Complete install → live verify → reload verify → restore → reinstall.
+- On a clean VM, complete `preflight → install → apply → status → pause → resume → verify → restore → reinstall/apply → uninstall`, including restart consent, occupied ports, stale/foreign PIDs, Chinese/space paths, Codex updates, and unavailable Node during restore.
 - Capture a real CDP screenshot and retain the verifier JSON.
 - Confirm `codesign --verify --deep --strict` still succeeds for the official Codex app.
 - Build ZIP and record SHA-256.
+- Record actual clean-VM, live home/task interaction, signature, Gatekeeper, and macOS 12 results separately; do not claim them from automated checks.

@@ -55,23 +55,7 @@
   <sub>暗色 · 真实注入截图（未发送输入已在截图时遮蔽，仅预览）</sub>
 </p>
 
-从仓库安装并一键切换（macOS）：
-
-```bash
-cd macos
-./scripts/install-dream-skin-macos.sh --no-launch
-~/.codex/codex-dream-skin-studio/scripts/switch-theme-macos.sh \
-  --id preset-romantic-rose
-```
-
-Windows 使用本地主题仓库与系统托盘，并会预置同一套「桥本有菜」。首次从仓库使用：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\windows\scripts\install-dream-skin.ps1
-powershell -ExecutionPolicy Bypass -File .\windows\scripts\start-dream-skin.ps1
-```
-
-启动后可直接从「已保存主题 → 桥本有菜」切换；不需要跨目录手动导入。托盘里的「更换背景图」仍可导入你自己的纯背景，保存后继续一键切换。
+Studio 首次安装会预置「桥本有菜」主题；成功后在 Studio 中选择主题或导入自己的纯背景即可。
 
 > 可下载的用户源图是 [`docs/images/presets/romantic-rose-source.png`](./docs/images/presets/romantic-rose-source.png)（`1672 × 941`）；macOS 一键预设使用 [`macos/presets/preset-romantic-rose/background.jpg`](./macos/presets/preset-romantic-rose/background.jpg)（规范化派生 `2560 × 1440`）。上面两个效果图包含真实 UI，**只作预览，绝不能当背景导入**。背景为用户提供的 AI 生成示例，不代表 OpenAI/Codex 官方视觉或背书；公开再分发前请确认人物与素材权利。
 
@@ -130,12 +114,22 @@ powershell -ExecutionPolicy Bypass -File .\windows\scripts\start-dream-skin.ps1
 
 ## 快速开始
 
-仓库内按平台放了现成脚本（实现细节不同，效果都是「主题化 Codex」）：
+1. 下载对应平台的**已签名 Studio artifact**，打开或安装它。
+2. 完成 Studio 的 preflight；仅在 Studio 请求时授权一次 Codex 重启。
+3. 等待严格验证的成功状态；用 **Pause** 暂时关闭，用 **Complete Restore** 移除实时皮肤并关闭受管 CDP。
 
-| 平台 | 目录 | 入口 |
+日常 macOS 不需要 Terminal、SwiftBar、Homebrew 或单独安装 Node；日常 Windows 不需要 PowerShell、PATH Node、管理员权限或手动命令。
+
+| 平台 | Studio artifact | 高级恢复 |
 |------|------|------|
-| Apple Silicon / Intel Mac | [`macos/`](./macos/) | 双击 `Install Codex Dream Skin.command` |
-| Windows | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
+| Apple Silicon / Intel Mac | `CodexDreamSkinStudio.dmg` | [`macos/README.md`](./macos/README.md) |
+| Windows | `CodexDreamSkinStudio-Setup.exe` | [`windows/SKILL.md`](./windows/SKILL.md) |
+
+### 高级恢复
+
+仓库脚本、SwiftBar、PowerShell、诊断和手动 Restore 仍是维护/恢复入口，不是普通安装路径。按平台文档执行。
+
+Milestone 1 不包含主题包分享、工作区场景/绑定、上下文配置档或动态/视频效果。
 
 本仓库另带四套不自动安装的[可选用户主题](./user-themes/)：`IU 象牙婚礼`、`五条悟`、`木之本樱 春日祭`、`楪祈`。
 

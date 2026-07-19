@@ -1,5 +1,13 @@
 # 平台对照
 
+## Studio 日常路径
+
+下载并打开已签名 Studio artifact：macOS 使用 `CodexDreamSkinStudio.dmg`，Windows 使用 `CodexDreamSkinStudio-Setup.exe`。完成 preflight，只在 Studio 请求时授权一次重启，等待严格验证成功；**Pause** 是可逆软关闭，**Complete Restore** 会移除实时皮肤并关闭受管 CDP。
+
+普通 macOS 不需要 Terminal、SwiftBar、Homebrew 或另装 Node；普通 Windows 不需要 PowerShell、PATH Node、管理员或手动命令。CDP 仅绑定 loopback，但没有同用户认证；Pause 不关闭 CDP，Complete Restore 会关闭。官方 Codex 文件和签名不变。
+
+仓库 shell/PowerShell 启动器、SwiftBar、诊断和手动恢复仅用于高级恢复/维护。Milestone 1 不包括主题包分享、工作区场景/绑定、上下文配置档或动态/视频。
+
 ## 运行模型（两边相同）
 
 ```text
