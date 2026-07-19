@@ -9,11 +9,16 @@ $InnoSource = Join-Path $WindowsRoot 'build\dream-skin-studio.iss'
 $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $DotNet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
 $InnoSetup = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+$TaskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
 $Version = [IO.File]::ReadAllText((Join-Path $WindowsRoot 'VERSION')).Trim()
 . (Join-Path $WindowsRoot 'scripts\common-windows.ps1')
 
 function Invoke-TestProcess {
-  param([string]$FilePath, [string[]]$Arguments)
+  param(
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [ValidateRange(1000, 3600000)][int]$TimeoutMilliseconds = 600000
+  )
   $startInfo = [Diagnostics.ProcessStartInfo]::new()
   $startInfo.FileName = $FilePath
   $startInfo.Arguments = (@($Arguments | ForEach-Object { ConvertTo-DreamSkinProcessArgument -Value "$_" })) -join ' '
@@ -27,7 +32,11 @@ function Invoke-TestProcess {
     if (-not $process.Start()) { throw 'Test process could not start.' }
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
-    $process.WaitForExit()
+    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+      & $TaskKill /PID "$($process.Id)" /T /F *> $null
+      $null = $process.WaitForExit(10000)
+      throw 'Controlled Windows release test process timed out.'
+    }
     return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $stdout.Result + $stderr.Result }
   } finally {
     $process.Dispose()
@@ -47,7 +56,7 @@ function Assert-SnapshotEqual {
     (ConvertTo-Json -InputObject @($Expected) -Compress)) { throw $Message }
 }
 
-foreach ($tool in @($PowerShell, $DotNet, $InnoSetup)) {
+foreach ($tool in @($PowerShell, $DotNet, $InnoSetup, $TaskKill)) {
   if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw 'A required Windows release test tool is unavailable.' }
 }
 
@@ -90,7 +99,8 @@ $TestBaseName = "CodexDreamSkinStudio-test-$token"
 $ThemeSentinel = Join-Path $env:LOCALAPPDATA "CodexDreamSkin\themes\task12-$token.keep"
 $ReleaseSentinel = Join-Path $ReleaseRoot "prior-output-$token.keep"
 $stub = Join-Path $TemporaryRoot 'prepare-uninstall-stub.exe'
-$firstInstance = $null
+$instanceMutex = $null
+$ownsInstanceMutex = $false
 $previousGuardExit = $env:DREAM_SKIN_TEST_PREPARE_EXIT
 $previousThumbprint = $env:WINDOWS_SIGN_CERT_THUMBPRINT
 
@@ -118,7 +128,8 @@ public static class Program {
   $TestSetup = Join-Path $TestOutput "$TestBaseName.exe"
   if (-not (Test-Path -LiteralPath $TestSetup -PathType Leaf)) { throw 'Isolated Inno test installer is missing.' }
 
-  $install = Invoke-TestProcess $TestSetup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', "/DIR=$InstallRoot")
+  $install = Invoke-TestProcess $TestSetup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', "/DIR=$InstallRoot") `
+    -TimeoutMilliseconds 120000
   if ($install.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $InstallRoot -PathType Container)) {
     throw "Isolated Studio installation failed.`n$($install.Output)"
   }
@@ -149,19 +160,17 @@ public static class Program {
     --root $InstalledPayload --allowlist (Join-Path $RepoRoot 'studio\release\allowlist-windows.json')
   if ($LASTEXITCODE -ne 0) { throw 'Installed release content scan failed.' }
 
-  if ([Environment]::UserInteractive) {
-    $firstInstance = Start-Process -FilePath (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') -PassThru
-    Start-Sleep -Milliseconds 1000
-    if ($firstInstance.HasExited) { throw 'Studio mutex fixture exited before acquiring the instance mutex.' }
-    $contended = Invoke-TestProcess (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') @('--prepare-uninstall')
-    if ($contended.ExitCode -eq 0) { throw 'Prepare-uninstall succeeded while another Studio instance owned the mutex.' }
-    $firstInstance.Kill()
-    $firstInstance.WaitForExit()
-    $firstInstance.Dispose()
-    $firstInstance = $null
-  } else {
-    Write-Warning 'Studio mutex execution is unavailable in a non-interactive Windows session.'
-  }
+  $mutexUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  if (-not $mutexUser) { $mutexUser = [Environment]::UserName }
+  $instanceMutex = [Threading.Mutex]::new($true, "Local\CodexDreamSkinStudio.$mutexUser", [ref]$ownsInstanceMutex)
+  if (-not $ownsInstanceMutex) { throw 'Studio mutex fixture could not own the production instance mutex.' }
+  $contended = Invoke-TestProcess (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') @('--prepare-uninstall') `
+    -TimeoutMilliseconds 15000
+  if ($contended.ExitCode -eq 0) { throw 'Prepare-uninstall succeeded while the production Studio mutex was owned.' }
+  $instanceMutex.ReleaseMutex()
+  $instanceMutex.Dispose()
+  $instanceMutex = $null
+  $ownsInstanceMutex = $false
 
   Copy-Item -LiteralPath $stub -Destination (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') -Force
   New-Item -ItemType Directory -Path (Split-Path -Parent $ThemeSentinel) -Force | Out-Null
@@ -171,11 +180,13 @@ public static class Program {
   if ($null -eq $Uninstaller) { throw 'Isolated Studio uninstaller is missing.' }
   $beforeGuardFailure = @(Get-FileSnapshot $InstallRoot)
   $env:DREAM_SKIN_TEST_PREPARE_EXIT = '1'
-  $null = Invoke-TestProcess $Uninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+  $null = Invoke-TestProcess $Uninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
+    -TimeoutMilliseconds 120000
   Assert-SnapshotEqual @(Get-FileSnapshot $InstallRoot) $beforeGuardFailure 'Nonzero prepare guard changed installed files.'
 
   $env:DREAM_SKIN_TEST_PREPARE_EXIT = '0'
-  $successfulUninstall = Invoke-TestProcess $Uninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+  $successfulUninstall = Invoke-TestProcess $Uninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
+    -TimeoutMilliseconds 120000
   if ($successfulUninstall.ExitCode -ne 0) { throw "Successful guarded uninstall failed.`n$($successfulUninstall.Output)" }
   for ($attempt = 0; $attempt -lt 50 -and (Test-Path -LiteralPath $InstallRoot); $attempt++) { Start-Sleep -Milliseconds 100 }
   if (Test-Path -LiteralPath $InstallRoot) { throw 'Successful guarded uninstall preserved installed files.' }
@@ -193,14 +204,17 @@ public static class Program {
 
   Write-Host 'PASS: Windows Studio release build, install scan, mutex, uninstall guard, and publication behavior.'
 } finally {
-  if ($firstInstance -and -not $firstInstance.HasExited) { $firstInstance.Kill(); $firstInstance.WaitForExit() }
-  if ($firstInstance) { $firstInstance.Dispose() }
+  if ($instanceMutex) {
+    if ($ownsInstanceMutex) { $instanceMutex.ReleaseMutex() }
+    $instanceMutex.Dispose()
+  }
   if (Test-Path -LiteralPath $InstallRoot -PathType Container) {
     $cleanupUninstaller = Get-ChildItem -LiteralPath $InstallRoot -Filter 'unins*.exe' -File | Select-Object -First 1
     if ($cleanupUninstaller -and (Test-Path -LiteralPath $stub -PathType Leaf)) {
       Copy-Item -LiteralPath $stub -Destination (Join-Path $InstallRoot 'CodexDreamSkinStudio.exe') -Force
       $env:DREAM_SKIN_TEST_PREPARE_EXIT = '0'
-      $null = Invoke-TestProcess $cleanupUninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+      $null = Invoke-TestProcess $cleanupUninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
+        -TimeoutMilliseconds 120000
     }
   }
   if (Test-Path -LiteralPath $ThemeSentinel) { Remove-Item -LiteralPath $ThemeSentinel -Force }

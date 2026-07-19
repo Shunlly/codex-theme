@@ -147,11 +147,6 @@ try {
 
   if (-not $SkipSign) { Sign-And-Verify -Path (Join-Path $StageRoot 'CodexDreamSkinStudio.exe') -SignTool $SignTool -Thumbprint $Thumbprint }
 
-  if (-not $SkipTests) {
-    & (Join-Path $runtimeRoot 'node.exe') (Join-Path $WindowsRoot 'tests\studio-release-contract.test.mjs')
-    Assert-LastExitCode 'Portable Windows Studio release checks failed.'
-  }
-
   $PrivateNodePath = Join-Path $runtimeRoot 'node.exe'
   & $PrivateNodePath (Join-Path $RepoRoot 'studio\release\check-contents.mjs') `
     --root $StageRoot --allowlist (Join-Path $RepoRoot 'studio\release\allowlist-windows.json')

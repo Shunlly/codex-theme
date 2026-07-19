@@ -31,6 +31,7 @@ for (const contract of [
   "UNSIGNED", "[IO.Directory]::Move", "/p:ApplicationIcon=", "RuntimeInformation]::OSArchitecture",
   "Windows Studio releases require a matching X64 or Arm64 build host.",
 ]) contains(builder, contract, `builder contract missing: ${contract}`);
+assert.doesNotMatch(builder, /studio-release-contract\.test\.mjs/, "builder duplicates the aggregate portable contract gate");
 
 const app = read("windows/studio/App.xaml.cs");
 contains(app, "e.Args.Length == 1", "argument match is not exact");
