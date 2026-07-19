@@ -32,7 +32,7 @@ done
   printf 'macOS Studio adapter must expose all Protocol v1 operations.\n' >&2
   exit 1
 }
-/usr/bin/grep -F -q 'check-contents.mjs' "$ROOT/scripts/build-studio-release.sh" || {
+/usr/bin/grep -Eq '^[[:space:]]*"\$NODE"[[:space:]]+"\$SNAPSHOT_ROOT/studio/release/check-contents\.mjs"' "$ROOT/scripts/build-studio-release.sh" || {
   printf 'macOS Studio release builder must invoke the content scanner.\n' >&2
   exit 1
 }
@@ -40,12 +40,23 @@ done
   printf 'macOS Studio bundle metadata must derive its version from VERSION.\n' >&2
   exit 1
 }
-for readme in "$ROOT/../README.md" "$ROOT/../README.en.md" "$ROOT/README.md"; do
-  /usr/bin/grep -F -q 'Studio' "$readme" || {
-    printf 'Studio-first quick start is missing from %s.\n' "$readme" >&2
-    exit 1
+"$NODE" - "$ROOT/../README.md" "$ROOT/../README.en.md" "$ROOT/README.md" <<'NODE'
+const fs = require("node:fs");
+const contracts = [
+  ["## 快速开始", "### 高级恢复", ["已签名 Studio artifact", "preflight", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
+  ["## Quick start", "### Advanced recovery", ["signed Studio artifact", "preflight", "authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+  ["## Quick start (Studio)", "## Advanced recovery", ["signed Studio artifact", "preflight", "Authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+];
+for (const [file, [quick, advanced, terms, exclusions]] of process.argv.slice(2).map((file, index) => [file, contracts[index]])) {
+  const text = fs.readFileSync(file, "utf8");
+  const start = text.indexOf(quick);
+  const end = text.indexOf(advanced);
+  const section = start < 0 || end <= start ? "" : text.slice(start, end);
+  if (!section || terms.some((term) => !section.includes(term)) || exclusions.some((term) => !text.includes(term))) {
+    throw new Error(`Studio quick-start contract is incomplete in ${file}`);
   }
-done
+}
+NODE
 
 while IFS= read -r file; do /bin/bash -n "$file"; done < <(
   /usr/bin/find "$ROOT" -type f \( -name '*.sh' -o -name '*.command' \) \
@@ -130,6 +141,20 @@ cleanup_tests() {
   /bin/rm -rf "$TMP"
 }
 trap cleanup_tests EXIT
+
+VERSION_MUTATION_ROOT="$TMP/version-placeholder"
+/bin/mkdir -p "$VERSION_MUTATION_ROOT/scripts" "$VERSION_MUTATION_ROOT/assets"
+/bin/cp "$ROOT/scripts/injector.mjs" "$ROOT/scripts/image-metadata.mjs" "$VERSION_MUTATION_ROOT/scripts/"
+/bin/cp "$ROOT/assets/dream-skin.css" "$ROOT/assets/renderer-inject.js" "$VERSION_MUTATION_ROOT/assets/"
+/bin/cp "$ROOT/VERSION" "$VERSION_MUTATION_ROOT/VERSION"
+/usr/bin/sed '/^[[:space:]]*\.replace("__DREAM_SKIN_VERSION_JSON__/d' "$VERSION_MUTATION_ROOT/scripts/injector.mjs" > "$VERSION_MUTATION_ROOT/scripts/injector.mjs.next"
+/bin/mv "$VERSION_MUTATION_ROOT/scripts/injector.mjs.next" "$VERSION_MUTATION_ROOT/scripts/injector.mjs"
+VERSION_MUTATION_SCRIPT="$(cd "$VERSION_MUTATION_ROOT/scripts" && pwd -P)/injector.mjs"
+if "$NODE" "$VERSION_MUTATION_SCRIPT" --check-payload \
+  --theme-dir "$ROOT/presets/preset-midnight-aurora" >/dev/null 2>&1; then
+  printf 'macOS payload check accepted an unresolved version placeholder.\n' >&2
+  exit 1
+fi
 
 # The runtime is user-scoped: sudo must fail before creating install or state files.
 ROOT_GUARD_HOME="$TMP/root-guard-home"

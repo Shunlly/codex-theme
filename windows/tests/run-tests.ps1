@@ -19,17 +19,24 @@ if ([IO.File]::ReadAllText((Join-Path $Root 'assets\renderer-inject.js')) -notma
 if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\studio-adapter.ps1')) -notmatch "'preflight', 'install', 'apply', 'status', 'pause', 'resume', 'restore', 'verify', 'uninstall'") {
   throw 'Windows Studio adapter must expose all Protocol v1 operations.'
 }
-if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\build-studio-release.ps1')) -notmatch 'check-contents\.mjs') {
+if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\build-studio-release.ps1')) -notmatch "(?m)^\s*& \`$PrivateNodePath \(Join-Path \`$RepoRoot 'studio\\release\\check-contents\.mjs'\)") {
   throw 'Windows Studio release builder must invoke the content scanner.'
 }
-foreach ($readme in @(
-  (Join-Path $Root '..\README.md'),
-  (Join-Path $Root '..\README.en.md'),
-  (Join-Path $Root '..\docs\platforms.md'),
-  (Join-Path $Root 'SKILL.md')
-)) {
-  if ([IO.File]::ReadAllText($readme) -notmatch 'Studio') { throw "Studio-first quick start is missing from $readme" }
+function Assert-StudioQuickStartContract {
+  param([string]$Path, [string]$QuickHeading, [string]$AdvancedHeading, [string[]]$Terms, [string[]]$Exclusions)
+  $content = [IO.File]::ReadAllText($Path)
+  $start = $content.IndexOf($QuickHeading, [StringComparison]::Ordinal)
+  $end = $content.IndexOf($AdvancedHeading, [StringComparison]::Ordinal)
+  $section = if ($start -ge 0 -and $end -gt $start) { $content.Substring($start, $end - $start) } else { '' }
+  if (-not $section -or @($Terms | Where-Object { -not $section.Contains($_) }).Count -gt 0 -or
+    @($Exclusions | Where-Object { -not $content.Contains($_) }).Count -gt 0) {
+    throw "Studio quick-start contract is incomplete in $Path"
+  }
 }
+Assert-StudioQuickStartContract (Join-Path $Root '..\README.md') '## 快速开始' '### 高级恢复' @('已签名 Studio artifact', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
+Assert-StudioQuickStartContract (Join-Path $Root '..\README.en.md') '## Quick start' '### Advanced recovery' @('signed Studio artifact', 'preflight', 'authorize one', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
+Assert-StudioQuickStartContract (Join-Path $Root '..\docs\platforms.md') '## Studio 日常路径' '## 高级恢复' @('已签名 Studio artifact', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
+Assert-StudioQuickStartContract (Join-Path $Root 'SKILL.md') '## Ordinary-user workflow (Studio)' '## Advanced recovery' @('signed Studio artifact', 'preflight', 'authorize a single restart', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
 & (Join-Path $PSScriptRoot 'studio-protocol.tests.ps1')
 & (Join-Path $PSScriptRoot 'studio-release.tests.ps1')
 . (Join-Path $Root 'scripts\common-windows.ps1')
@@ -631,6 +638,16 @@ public static class Program {
   if ($LASTEXITCODE -ne 0) { throw 'Injector CDP self-test failed.' }
   & $node.Path (Join-Path $Root 'scripts\injector.mjs') --check-payload *> $null
   if ($LASTEXITCODE -ne 0) { throw 'Injector self-test failed.' }
+  $versionMutationRoot = Join-Path $temporaryRoot 'version-placeholder'
+  New-Item -ItemType Directory -Path (Join-Path $versionMutationRoot 'scripts'), (Join-Path $versionMutationRoot 'assets') | Out-Null
+  Copy-Item -LiteralPath (Join-Path $Root 'scripts\injector.mjs'), (Join-Path $Root 'scripts\image-metadata.mjs') -Destination (Join-Path $versionMutationRoot 'scripts')
+  Copy-Item -LiteralPath (Join-Path $Root 'assets\dream-skin.css'), (Join-Path $Root 'assets\renderer-inject.js'), (Join-Path $Root 'assets\theme.json'), (Join-Path $Root 'assets\dream-reference.jpg') -Destination (Join-Path $versionMutationRoot 'assets')
+  Copy-Item -LiteralPath (Join-Path $Root 'VERSION') -Destination $versionMutationRoot
+  $mutatedInjectorPath = Join-Path $versionMutationRoot 'scripts\injector.mjs'
+  $mutatedInjector = [IO.File]::ReadAllText($mutatedInjectorPath).Replace("    .replace(`"__DREAM_SKIN_VERSION_JSON__`", JSON.stringify(SKIN_VERSION));", ';')
+  [IO.File]::WriteAllText($mutatedInjectorPath, $mutatedInjector, [Text.UTF8Encoding]::new($false))
+  & $node.Path $mutatedInjectorPath --check-payload *> $null
+  if ($LASTEXITCODE -eq 0) { throw 'Windows payload check accepted an unresolved version placeholder.' }
   & $node.Path (Join-Path $Root 'scripts\injector.mjs') --check-payload --theme-dir $themePaths.Active *> $null
   if ($LASTEXITCODE -ne 0) { throw 'Managed theme payload validation failed.' }
   & $node.Path (Join-Path $Root 'scripts\injector.mjs') --check-payload --theme-dir $oversizedTheme *> $null

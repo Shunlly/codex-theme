@@ -6,6 +6,8 @@
 
 普通 macOS 不需要 Terminal、SwiftBar、Homebrew 或另装 Node；普通 Windows 不需要 PowerShell、PATH Node、管理员或手动命令。CDP 仅绑定 loopback，但没有同用户认证；Pause 不关闭 CDP，Complete Restore 会关闭。官方 Codex 文件和签名不变。
 
+## 高级恢复
+
 仓库 shell/PowerShell 启动器、SwiftBar、诊断和手动恢复仅用于高级恢复/维护。Milestone 1 不包括主题包分享、工作区场景/绑定、上下文配置档或动态/视频。
 
 ## 运行模型（两边相同）

@@ -16,11 +16,13 @@ This project injects through **local loopback CDP**. It does **not** modify the 
 
 ## Quick start (Studio)
 
-1. Download the signed `CodexDreamSkinStudio.dmg`, move the app to Applications, and open it.
+1. Download the signed Studio artifact `CodexDreamSkinStudio.dmg`, move the app to Applications, and open it.
 2. Complete preflight. Authorize one Codex restart only when Studio requests it.
 3. Wait for strict verified success. **Pause** is reversible soft-off; **Complete Restore** removes the live skin and closes managed CDP.
 
 Ordinary use needs no Terminal, SwiftBar, Homebrew, or separately installed Node. CDP is loopback-only but has no same-user authentication; Pause leaves CDP open, while Complete Restore closes it. Official Codex files and signatures stay unchanged.
+
+Milestone 1 does not include theme-package sharing, workspace scenes/bindings, context profiles, or motion/video.
 
 ## Advanced recovery (repo engine)
 

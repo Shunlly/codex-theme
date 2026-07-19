@@ -429,6 +429,9 @@ ACTUAL="$TMP/actual-files"
   'AppIcon' ]
 [ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")" = \
   '12.0' ]
+RELEASE_VERSION="$(/usr/bin/tr -d '[:space:]' < "$ROOT/macos/VERSION")"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$RELEASE_VERSION" ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")" = "$RELEASE_VERSION" ]
 
 for binary in \
   "$APP/Contents/MacOS/CodexDreamSkinStudio" \

@@ -10,6 +10,13 @@ const here = path.dirname(scriptPath);
 const root = path.resolve(here, "..");
 const SKIN_VERSION = (await fs.readFile(path.join(root, "VERSION"), "utf8")).trim();
 if (!/^\d+\.\d+\.\d+$/.test(SKIN_VERSION)) throw new Error("Invalid Dream Skin VERSION");
+const PAYLOAD_PLACEHOLDERS = [
+  "__DREAM_SKIN_CSS_JSON__",
+  "__DREAM_SKIN_ART_JSON__",
+  "__DREAM_SKIN_THEME_JSON__",
+  "__DREAM_SKIN_VERSION_JSON__",
+  "__DREAM_SKIN_STYLE_REVISION_JSON__",
+];
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const CDP_ID_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
 const MAX_ART_BYTES = 16 * 1024 * 1024;
@@ -470,6 +477,9 @@ async function loadPayload(themeDir) {
     .replace("__DREAM_SKIN_THEME_JSON__", JSON.stringify(theme))
     .replace("__DREAM_SKIN_VERSION_JSON__", JSON.stringify(SKIN_VERSION))
     .replace("__DREAM_SKIN_STYLE_REVISION_JSON__", JSON.stringify(styleRevision));
+  if (PAYLOAD_PLACEHOLDERS.some((placeholder) => payload.includes(placeholder))) {
+    throw new Error("Payload placeholders were not fully replaced");
+  }
   const revision = createHash("sha256")
     .update(SKIN_VERSION)
     .update(css)
