@@ -871,6 +871,7 @@ NATIVE_MARKER="$TMP/native-restore-marker"
 /bin/cp "$NATIVE_CONFIG_RESTORE" "$NATIVE_ENGINE/bin/dream-skin-config-restore"
 /bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$NATIVE_ENGINE/scripts/"
 /bin/cp "$ROOT/scripts/common-macos.sh" "$NATIVE_ENGINE/scripts/"
+/bin/cp "$ROOT/VERSION" "$NATIVE_ENGINE/VERSION"
 /usr/bin/printf '%s\n' \
   'model = "gpt-5"' \
   '' \
@@ -951,6 +952,7 @@ assert_unsafe_native_restore_helper_rejected() {
     "$fixture_home/.codex"
   /bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$fixture_engine/scripts/"
   /bin/cp "$ROOT/scripts/common-macos.sh" "$fixture_engine/scripts/"
+  /bin/cp "$ROOT/VERSION" "$fixture_engine/VERSION"
   /usr/bin/printf 'config sentinel\n' > "$fixture_home/.codex/config.toml"
   /usr/bin/printf 'backup sentinel\n' > "$fixture_state/theme-backup.json"
   /bin/cp "$fixture_home/.codex/config.toml" "$fixture_home/.codex/config.toml.original"
@@ -1033,6 +1035,7 @@ RACE_ERROR="$TMP/native-helper-race.error"
 /bin/cp "$NATIVE_CONFIG_RESTORE" "$RACE_HELPER"
 /bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$RACE_ENGINE/scripts/"
 /bin/cp "$ROOT/scripts/common-macos.sh" "$RACE_ENGINE/scripts/"
+/bin/cp "$ROOT/VERSION" "$RACE_ENGINE/VERSION"
 /usr/bin/printf 'config sentinel\n' > "$RACE_HOME/.codex/config.toml"
 /usr/bin/printf 'backup sentinel\n' > "$RACE_STATE/theme-backup.json"
 /bin/cp "$RACE_HOME/.codex/config.toml" "$RACE_HOME/.codex/config.toml.original"
@@ -1139,11 +1142,13 @@ fi
 APP_IDENTITY_HOME="$TMP/app-identity-home"
 APP_IDENTITY_BUNDLE="$TMP/app-identity.app"
 APP_IDENTITY_EXE="$APP_IDENTITY_BUNDLE/Contents/MacOS/Codex"
-APP_IDENTITY_COMMON="$TMP/app-identity-common.sh"
+APP_IDENTITY_ROOT="$TMP/app-identity-engine"
+APP_IDENTITY_COMMON="$APP_IDENTITY_ROOT/scripts/common-macos.sh"
 APP_IDENTITY_CODESIGN="$TMP/app-identity-codesign"
 APP_IDENTITY_LOG="$TMP/app-identity-codesign.log"
 APP_IDENTITY_ERROR="$TMP/app-identity.error"
-/bin/mkdir -p "$APP_IDENTITY_HOME" "$APP_IDENTITY_BUNDLE/Contents/MacOS"
+/bin/mkdir -p "$APP_IDENTITY_HOME" "$APP_IDENTITY_BUNDLE/Contents/MacOS" "$APP_IDENTITY_ROOT/scripts"
+/bin/cp "$ROOT/VERSION" "$APP_IDENTITY_ROOT/VERSION"
 /usr/bin/plutil -create xml1 "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
 /usr/bin/plutil -insert CFBundleIdentifier -string com.openai.codex \
   "$APP_IDENTITY_BUNDLE/Contents/Info.plist"
@@ -1340,6 +1345,10 @@ STUB
 ' _ "$ROOT"
 
 /usr/bin/env -u HOME /bin/bash -c '. "$1/scripts/common-macos.sh"; [ -n "$HOME" ] && [ "$SKIN_VERSION" = "1.3.0" ]' _ "$ROOT"
-"$ROOT/scripts/doctor-macos.sh" >/dev/null
+DOCTOR_HOME="$TMP/doctor-home"
+/bin/mkdir -p "$DOCTOR_HOME/.codex" "$DOCTOR_HOME/Library/Application Support/CodexDreamSkinStudio/theme"
+/usr/bin/printf '%s\n' 'model = "gpt-5"' > "$DOCTOR_HOME/.codex/config.toml"
+/bin/cp "$ROOT/presets/preset-midnight-aurora"/* "$DOCTOR_HOME/Library/Application Support/CodexDreamSkinStudio/theme/"
+HOME="$DOCTOR_HOME" "$ROOT/scripts/doctor-macos.sh" >/dev/null
 
 printf 'PASS: syntax, payload, bundled presets, preset seeding, runtime-state safety, custom-theme, config round-trips, HOME recovery, signature, and doctor checks.\n'
