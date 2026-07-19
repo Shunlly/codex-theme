@@ -1015,6 +1015,12 @@ try {
     Assert-StudioResult -Result $result -ExitCode 0 -Ok $true -Install 'not-installed' -Codex 'stopped' -Session 'official' `
       -ThemeName '午夜极光' -RequiresRestart $false -Verified $null -AvailableActions @('install') -ErrorCode $null
   }
+  $residualActive = New-CaseRoot -Name 'residual-active-incomplete-install'
+  [IO.File]::WriteAllText($versionPath, 'invalid', $utf8NoBom)
+  $result = Invoke-Studio -Case $residualActive -Scenario 'active-exact-runtime' -ExtraArguments @('-Deep')
+  Assert-StudioResult -Result $result -ExitCode 1 -Ok $false -Install 'not-installed' -Codex 'running' -Session 'stale' `
+    -ThemeName '午夜极光' -RequiresRestart $false -Verified $null -AvailableActions @('install') `
+    -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('restore', 'diagnostics', 'cancel')
   [IO.File]::WriteAllText($versionPath, '1.3.0', $utf8NoBom)
 
   $mutexCase = New-CaseRoot -Name 'mutex-hold' -NoState

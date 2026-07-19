@@ -220,6 +220,7 @@ function Get-DreamSkinStudioStatus {
   } elseif ($pausedMarker) {
     $session = 'paused'
   }
+  if ($session -eq 'active' -and $install -ne 'ready') { $session = 'stale' }
 
   try {
     $theme = Read-DreamSkinTheme -ThemeDirectory (Join-Path $stateRoot 'active-theme') -SkipImageMetadata

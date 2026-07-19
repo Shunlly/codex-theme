@@ -91,37 +91,15 @@ Throws<InvalidDataException>(() => EngineProtocol.Parse(valid.Replace("\"pause\"
 Throws<InvalidDataException>(() => EngineProtocol.Parse(valid.Replace("\"error\": null", "\"error\": {\"code\":\"X\",\"message\":\"x\",\"recoveryActions\":[\"cancel\"]}"), EngineOperation.Apply), "Invalid success shape was accepted.");
 Throws<InvalidDataException>(() => EngineProtocol.Parse(valid.Replace("\"themeName\": \"午夜极光\",", ""), EngineOperation.Apply), "Missing state field was accepted.");
 
-var installed = fixtures.RootElement[2].GetProperty("response").GetRawText();
-var paused = fixtures.RootElement[4].GetProperty("response").GetRawText();
 var restartRequired = fixtures.RootElement[6].GetProperty("response").GetRawText();
 var restored = fixtures.RootElement[9].GetProperty("response").GetRawText();
-var uninstalled = fixtures.RootElement[10].GetProperty("response").GetRawText();
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(installed, root => root["state"]!["requiresRestart"] = true), EngineOperation.Install), "Restart-required stopped state was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(installed, root => root["state"]!["availableActions"]!.AsArray().Add("install")), EngineOperation.Install), "Install action for a ready engine was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(uninstalled, root => root["state"]!["availableActions"] = new JsonArray("apply")), EngineOperation.Uninstall), "Ready-only action for a missing engine was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(restartRequired, root => { root["state"]!["operation"] = "busy"; root["state"]!["availableActions"] = new JsonArray(); }), EngineOperation.Apply), "Busy state without OPERATION_BUSY was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(restartRequired, root => root["error"]!["code"] = "OPERATION_BUSY"), EngineOperation.Apply), "OPERATION_BUSY with idle state was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(paused, root => { root["state"]!["install"] = "not-installed"; root["state"]!["themeName"] = null; root["state"]!["availableActions"] = new JsonArray("install"); }), EngineOperation.Pause), "Managed session without a ready install was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(installed, root => root["state"]!["availableActions"]!.AsArray().Add("pause")), EngineOperation.Install), "Pause outside an active session was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(valid, root => root["state"]!["availableActions"]!.AsArray().Add("apply")), EngineOperation.Apply), "Apply action for an active session was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(paused, root => root["state"]!["session"] = "official"), EngineOperation.Pause), "Successful pause without a paused session was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(restored, root => root["state"]!["session"] = "paused"), EngineOperation.Restore), "Successful restore without an official session was accepted.");
-
-const string statusFailure = "{\"schemaVersion\":1,\"ok\":false,\"operation\":\"status\",\"state\":{\"install\":\"not-installed\",\"codex\":\"not-installed\",\"session\":\"stale\",\"operation\":\"idle\",\"themeName\":null,\"requiresRestart\":false,\"availableActions\":[],\"verified\":null},\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Studio status could not be read safely.\",\"recoveryActions\":[\"retry\",\"diagnostics\",\"cancel\"]}}";
-Assert(EngineProtocol.Parse(statusFailure, EngineOperation.Status).Error?.Code == "INTERNAL_ERROR", "The safe Task 7 status failure was rejected.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(statusFailure, root => root["state"]!["availableActions"] = new JsonArray("install")), EngineOperation.Status), "A stale unavailable status with actions was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(statusFailure, root => { root["ok"] = true; root["error"] = null; }), EngineOperation.Status), "A successful stale unavailable status was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(statusFailure, root => root["error"]!["code"] = "OPERATION_FAILED"), EngineOperation.Status), "A stale unavailable status with the wrong error was accepted.");
-const string unavailableStatus = "{\"schemaVersion\":1,\"ok\":true,\"operation\":\"status\",\"state\":{\"install\":\"not-installed\",\"codex\":\"stopped\",\"session\":\"official\",\"operation\":\"idle\",\"themeName\":\"午夜极光\",\"requiresRestart\":false,\"availableActions\":[\"install\"],\"verified\":null},\"error\":null}";
-Assert(EngineProtocol.Parse(unavailableStatus, EngineOperation.Status).State.ThemeName == "午夜极光", "The Task 7 unavailable-engine status was rejected.");
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(unavailableStatus, root => root["state"]!["availableActions"] = new JsonArray()), EngineOperation.Status), "A successful unavailable status without install recovery was accepted.");
-var unavailableCodexError = Mutate(unavailableStatus, root =>
-{
-  root["ok"] = false;
-  root["state"]!["codex"] = "not-installed";
-  root["error"] = JsonNode.Parse("{\"code\":\"CODEX_NOT_INSTALLED\",\"message\":\"Codex is not installed.\",\"recoveryActions\":[\"cancel\"]}");
-});
-Assert(EngineProtocol.Parse(unavailableCodexError, EngineOperation.Status).Error?.Code == "CODEX_NOT_INSTALLED", "The unavailable-engine Codex error projection was rejected.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(valid, root => root["state"]!["install"] = "not-installed"), EngineOperation.Apply), "An active session without a ready install was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(valid, root => root["state"]!["codex"] = "stopped"), EngineOperation.Apply), "An active session without running Codex was accepted.");
+Assert(EngineProtocol.Parse(Mutate(restored, root => root["state"]!["verified"] = true), EngineOperation.Restore).State.Verified == true, "Verified true outside an active session was rejected.");
+Assert(EngineProtocol.Parse(Mutate(restartRequired, root => { root["state"]!["operation"] = "busy"; root["error"]!["code"] = "OPERATION_BUSY"; }), EngineOperation.Apply).State.AvailableActions.Length > 0, "Busy state actions were rejected by an unfrozen rule.");
+Assert(EngineProtocol.Parse(Mutate(restartRequired, root => root["error"]!["recoveryActions"] = new JsonArray("cancel", "cancel")), EngineOperation.Apply).Error?.RecoveryActions.Length == 2, "Duplicate allowed recovery actions were rejected.");
+const string retainedThemeLifecycleError = "{\"schemaVersion\":1,\"ok\":false,\"operation\":\"install\",\"state\":{\"install\":\"not-installed\",\"codex\":\"not-installed\",\"session\":\"official\",\"operation\":\"idle\",\"themeName\":\"午夜极光\",\"requiresRestart\":false,\"availableActions\":[\"install\"],\"verified\":null},\"error\":{\"code\":\"CODEX_NOT_INSTALLED\",\"message\":\"Codex is not installed.\",\"recoveryActions\":[\"cancel\"]}}";
+Assert(EngineProtocol.Parse(retainedThemeLifecycleError, EngineOperation.Install).State.ThemeName == "午夜极光", "A valid retained-theme lifecycle error was rejected.");
 
 Assert(EngineOperation.Uninstall.ToArgument() == "uninstall", "Operation mapping was not lowercase.");
 var adapterPath = Path.Combine(AppContext.BaseDirectory, "engine", "scripts", "studio-adapter.ps1");
@@ -140,18 +118,12 @@ Assert(progress.SequenceEqual(new[] { EngineProgress.Checking, EngineProgress.Ap
 Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("raw error\n", null), "Raw stderr was accepted.");
 Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS mystery\n", null), "Unknown progress was accepted.");
 
-var invalidRequest = Mutate(restartRequired, root =>
-{
-  root["state"] = JsonNode.Parse("{\"install\":\"not-installed\",\"codex\":\"not-installed\",\"session\":\"official\",\"operation\":\"idle\",\"themeName\":null,\"requiresRestart\":false,\"availableActions\":[],\"verified\":null}");
-  root["error"]!["code"] = "INVALID_REQUEST";
-  root["error"]!["recoveryActions"] = new JsonArray("cancel");
-});
-Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(invalidRequest, root => root["state"]!["availableActions"] = new JsonArray("install")), EngineOperation.Apply), "INVALID_REQUEST with a non-empty state projection was accepted.");
+var invalidRequest = Mutate(restartRequired, root => root["error"]!["code"] = "INVALID_REQUEST");
 foreach (var accepted in new[] { new EngineProcessResult(0, valid, ""), new EngineProcessResult(1, restartRequired, ""), new EngineProcessResult(2, invalidRequest, "") })
   Assert((await new EngineClient(new FakeRunner(accepted), "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false)).SchemaVersion == 1, $"Valid exit {accepted.ExitCode} was rejected.");
 await ThrowsAsync<InvalidDataException>(async () => await new EngineClient(new FakeRunner(new EngineProcessResult(1, invalidRequest, "")), "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false), "INVALID_REQUEST at exit 1 was accepted.");
 await ThrowsAsync<InvalidDataException>(async () => await new EngineClient(new FakeRunner(new EngineProcessResult(2, restartRequired, "")), "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false), "Domain error at exit 2 was accepted.");
-Assert((await new EngineClient(new FakeRunner(new EngineProcessResult(1, statusFailure, "")), "C:\\Windows").RunAsync(EngineOperation.Status, deep: true)).Error?.Code == "INTERNAL_ERROR", "The Task 7 status failure was not accepted at exit 1.");
+Assert((await new EngineClient(new FakeRunner(new EngineProcessResult(1, retainedThemeLifecycleError, "")), "C:\\Windows").RunAsync(EngineOperation.Install, deep: false)).State.ThemeName == "午夜极光", "The retained-theme lifecycle error was not accepted at exit 1.");
 var pathRunner = new FakeRunner(new EngineProcessResult(0, valid, ""));
 await new EngineClient(pathRunner, "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false);
 Assert(pathRunner.FileName == "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "The fixed Windows PowerShell path was not used.");

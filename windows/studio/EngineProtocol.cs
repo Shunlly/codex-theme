@@ -71,7 +71,7 @@ internal static class EngineProtocol
         RequireString(error, "code");
         RequireString(error, "message");
         RequireKind(error, "recoveryActions", JsonValueKind.Array);
-        ValidateStringArray(Get(error, "recoveryActions"), RecoveryActions);
+        ValidateStringArray(Get(error, "recoveryActions"), RecoveryActions, requireUnique: false);
         if (Get(error, "code").GetString() is not { } errorCode || !ErrorCodes.Contains(errorCode) ||
             string.IsNullOrWhiteSpace(Get(error, "message").GetString())) Invalid();
       }
@@ -89,11 +89,8 @@ internal static class EngineProtocol
           !StateOperations.Contains(envelope.State.Operation) ||
           envelope.Ok != (envelope.Error is null)) Invalid();
       ValidateStringArray(Get(state, "availableActions"), Actions);
-      if (envelope.State.Operation == "busy" && envelope.State.AvailableActions.Length != 0) Invalid();
       if (envelope.State.Session == "active" && (envelope.State.Install != "ready" || envelope.State.Codex != "running")) Invalid();
-      if (envelope.State.Verified == true && envelope.State.Session != "active") Invalid();
       if (envelope.Ok && requestedOperation is EngineOperation.Apply or EngineOperation.Resume or EngineOperation.Verify && envelope.State.Verified != true) Invalid();
-      ValidateSemantics(envelope, requestedOperation);
       return envelope;
     }
   }
@@ -138,64 +135,12 @@ internal static class EngineProtocol
     if (Get(value, name).GetString() is not { Length: > 0 }) Invalid();
   }
 
-  private static void ValidateStringArray(JsonElement values, HashSet<string> allowed)
+  private static void ValidateStringArray(JsonElement values, HashSet<string> allowed, bool requireUnique = true)
   {
     var seen = new HashSet<string>(StringComparer.Ordinal);
     foreach (var value in values.EnumerateArray())
-      if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } text || !allowed.Contains(text) || !seen.Add(text)) Invalid();
-  }
-
-  private static void ValidateSemantics(EngineEnvelope envelope, EngineOperation requestedOperation)
-  {
-    var state = envelope.State;
-    var actions = state.AvailableActions;
-    var safeUnavailableStatusFailure = !envelope.Ok && requestedOperation is EngineOperation.Preflight or EngineOperation.Status &&
-      envelope.Error?.Code == "INTERNAL_ERROR" && envelope.Error.RecoveryActions.SequenceEqual(["retry", "diagnostics", "cancel"]) &&
-      state.Install == "not-installed" && state.Codex == "not-installed" && state.Session == "stale" &&
-      state.Operation == "idle" && state.ThemeName is null && !state.RequiresRestart && actions.Length == 0 && state.Verified is null;
-    var safeUnavailableStatus = requestedOperation is EngineOperation.Preflight or EngineOperation.Status &&
-      state.Install == "not-installed" && state.Session == "official" && state.Operation == "idle" &&
-      actions.SequenceEqual(["install"]) && state.Verified is null;
-    if (state.RequiresRestart && (state.Codex != "running" || state.Session != "official")) Invalid();
-    if (state.Session != "official" && state.Install != "ready" && !safeUnavailableStatusFailure) Invalid();
-    if (state.Operation == "busy")
-    {
-      if (envelope.Ok || envelope.Error?.Code != "OPERATION_BUSY" || actions.Length != 0) Invalid();
-    }
-    else if (envelope.Error?.Code == "OPERATION_BUSY") Invalid();
-    if (envelope.Error?.Code == "INVALID_REQUEST" && (state.Install != "not-installed" || state.Codex != "not-installed" ||
-        state.Session != "official" || state.Operation != "idle" || state.ThemeName is not null || state.RequiresRestart ||
-        state.Verified is not null || actions.Length != 0)) Invalid();
-
-    if (state.Install == "ready")
-    {
-      if (actions.Contains("install")) Invalid();
-    }
-    else
-    {
-      if (actions.Any(action => action != "install") || state.Verified is not null ||
-          state.ThemeName is not null && !safeUnavailableStatus) Invalid();
-    }
-    if (actions.Contains("pause") && state.Session != "active") Invalid();
-    if (actions.Contains("resume") && state.Session is not ("active" or "paused")) Invalid();
-    if (actions.Contains("apply") && state.Session == "active") Invalid();
-
-    if (!envelope.Ok) return;
-    if (state.Install == "not-installed" && requestedOperation is not EngineOperation.Uninstall && !safeUnavailableStatus) Invalid();
-    if (state.Operation != "idle") Invalid();
-    switch (requestedOperation)
-    {
-      case EngineOperation.Install when state.Install != "ready":
-      case EngineOperation.Pause when state.Session != "paused":
-      case EngineOperation.Restore when state.Session != "official":
-        Invalid();
-        break;
-      case EngineOperation.Uninstall when state.Install != "not-installed" || state.Codex != "stopped" ||
-        state.Session != "official" || state.ThemeName is not null || state.Verified is not null ||
-        !actions.SequenceEqual(["install"]):
-        Invalid();
-        break;
-    }
+      if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } text || !allowed.Contains(text) ||
+          requireUnique && !seen.Add(text)) Invalid();
   }
 
   private static void Invalid() => throw new InvalidDataException("The engine response violates Protocol v1.");
