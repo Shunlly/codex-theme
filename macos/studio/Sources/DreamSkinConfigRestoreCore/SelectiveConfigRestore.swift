@@ -3,6 +3,11 @@ import Foundation
 
 public enum SelectiveConfigRestore {
     private static let settingKeys = ["appearanceTheme", "appearanceDarkCodeThemeId"]
+    private static let targetKeys = [
+        "appearanceTheme",
+        "appearanceLightCodeThemeId",
+        "appearanceDarkCodeThemeId",
+    ]
 
     public static func restore(configURL: URL, backupURL: URL) throws {
         let lock = try ConfigLock(configURL: configURL)
@@ -22,8 +27,7 @@ public enum SelectiveConfigRestore {
         guard !content.contains("\"\"\"") && !content.contains("'''") else {
             throw RestoreError("Refusing to rewrite TOML containing multiline strings.")
         }
-        try assertSupportedTOMLLayout(content)
-        try assertNoAmbiguousDesktopTables(content)
+        try assertEditableTOML(content)
         var section = try desktopSection(content)
         let preferredNewline = content.contains("\r\n") ? "\r\n" : "\n"
 
@@ -72,7 +76,6 @@ public enum SelectiveConfigRestore {
             throw RestoreError("Could not locate the [desktop] table.")
         }
         var body = String(content[section.bodyRange])
-        try assertNoAmbiguousSettings(body)
         for key in settingKeys {
             body = try replaceSetting(
                 in: body,
@@ -84,6 +87,7 @@ public enum SelectiveConfigRestore {
         let restored = String(content[..<section.bodyRange.lowerBound])
             + body
             + String(content[section.bodyRange.upperBound...])
+        try assertEditableTOML(restored)
 
         try assertConfigUnchanged(
             at: configURL,
@@ -154,27 +158,70 @@ public enum SelectiveConfigRestore {
     }
 
     private static func assertNoAmbiguousDesktopTables(_ content: String) throws {
+        let desktopAlias = escapedBasicKeyPattern("desktop")
         let patterns = [
             #"(?m)^(?:\x{FEFF})?[\t ]*\[[\t ]*[\"']desktop[\"'][\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#,
             #"(?m)^(?:\x{FEFF})?[\t ]*\[[\t ]*\"[^\"\r\n]*\\[^\"\r\n]*\"[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)"#,
+            #"(?m)^(?:\x{FEFF})?[\t ]*\[\[[\t ]*(?:desktop|[\"']desktop[\"'])(?:[\t ]*\.|[\t ]*\]\])"#,
+            #"(?m)^(?:\x{FEFF})?[\t ]*\[[\t ]*(?:desktop|[\"']desktop[\"'])[\t ]*\."#,
+            "(?m)^(?:\\x{FEFF})?[\\t ]*\\[\\[?[\\t ]*\"\(desktopAlias)\"",
         ]
         let range = NSRange(content.startIndex..<content.endIndex, in: content)
         for pattern in patterns where try NSRegularExpression(pattern: pattern).firstMatch(in: content, range: range) != nil {
-            throw RestoreError("Refusing to rewrite a quoted or escaped [desktop] table.")
+            throw RestoreError("Refusing to rewrite an aliased or nested [desktop] table.")
+        }
+
+        let firstHeader = try NSRegularExpression(pattern: #"(?m)^(?:\x{FEFF})?[\t ]*\["#)
+            .firstMatch(in: content, range: range)
+            .flatMap { Range($0.range, in: content) }
+        let root = String(content[..<(firstHeader?.lowerBound ?? content.endIndex)])
+        let rootRange = NSRange(root.startIndex..<root.endIndex, in: root)
+        let rootPatterns = [
+            #"(?m)^(?:\x{FEFF})?[\t ]*(?:desktop|[\"']desktop[\"'])[\t ]*(?:=|\.)"#,
+            "(?m)^(?:\\x{FEFF})?[\\t ]*\"\(desktopAlias)\"[\\t ]*(?:=|\\.)",
+        ]
+        for pattern in rootPatterns where try NSRegularExpression(pattern: pattern).firstMatch(in: root, range: rootRange) != nil {
+            throw RestoreError("Refusing to rewrite a dotted or inline desktop alias.")
         }
     }
 
     private static func assertNoAmbiguousSettings(_ body: String) throws {
-        let keys = settingKeys.map(NSRegularExpression.escapedPattern).joined(separator: "|")
+        let keys = targetKeys.map(NSRegularExpression.escapedPattern).joined(separator: "|")
+        let escapedKeys = targetKeys.map(escapedBasicKeyPattern).joined(separator: "|")
         let patterns = [
             "(?m)^[\\t ]+(?:\(keys))[\\t ]*=",
-            "(?m)^[\\t ]*[\\\"'](?:\(keys))[\\\"'][\\t ]*=",
-            #"(?m)^[\t ]*\"[^\"\r\n]*\\[^\"\r\n]*\"[\t ]*="#,
+            "(?m)^[\\t ]*[\\\"'](?:\(keys))[\\\"'][\\t ]*(?:=|\\.)",
+            "(?m)^[\\t ]*(?:\(keys))[\\t ]*\\.",
+            "(?m)^[\\t ]*\"(?:\(escapedKeys))\"[\\t ]*(?:=|\\.)",
         ]
         let range = NSRange(body.startIndex..<body.endIndex, in: body)
         for pattern in patterns where try NSRegularExpression(pattern: pattern).firstMatch(in: body, range: range) != nil {
-            throw RestoreError("Refusing to rewrite quoted, escaped, or indented appearance settings.")
+            throw RestoreError("Refusing to rewrite aliased, dotted, or indented appearance settings.")
         }
+        for key in targetKeys {
+            for match in try settingMatches(in: body, key: key) {
+                guard let lineRange = Range(match.range, in: body), validAssignment(String(body[lineRange]), key: key) else {
+                    throw RestoreError("Refusing to rewrite a non-string \(key) setting.")
+                }
+            }
+        }
+    }
+
+    private static func assertEditableTOML(_ content: String) throws {
+        try assertSupportedTOMLLayout(content)
+        try assertNoAmbiguousDesktopTables(content)
+        if let section = try desktopSection(content) {
+            try assertNoAmbiguousSettings(String(content[section.bodyRange]))
+        }
+    }
+
+    private static func escapedBasicKeyPattern(_ key: String) -> String {
+        key.unicodeScalars.map { scalar in
+            let literal = NSRegularExpression.escapedPattern(for: String(scalar))
+            let short = String(format: "%04X", scalar.value)
+            let long = String(format: "%08X", scalar.value)
+            return "(?:\(literal)|\\\\u(?i:\(short))|\\\\U(?i:\(long)))"
+        }.joined()
     }
 
     private static func tomlStructure(for line: String) -> String {

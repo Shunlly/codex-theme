@@ -20,6 +20,9 @@ INJECTOR="$SCRIPT_DIR/injector.mjs"
 INSTALL_ROOT="$HOME/.codex/codex-dream-skin-studio"
 STATE_ROOT="$HOME/Library/Application Support/CodexDreamSkinStudio"
 STATE_PATH="$STATE_ROOT/state.json"
+LIFECYCLE_LOCK_PATH="$STATE_ROOT/lifecycle.lock"
+LIFECYCLE_LOCK_OWNER_PATH="$LIFECYCLE_LOCK_PATH/owner"
+LIFECYCLE_LOCK_GATE_PATH="$STATE_ROOT/lifecycle.lock.gate"
 THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
 THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="$HOME/.codex/config.toml"
@@ -35,6 +38,11 @@ SKIN_VERSION="$(/bin/cat "$PROJECT_ROOT/VERSION")"
 CODEX_APP_VALIDATED="false"
 CODEX_APP_CONTROL_VALIDATED="false"
 NODE_RUNTIME_VALIDATED="false"
+LIFECYCLE_LOCK_OWNED="false"
+LIFECYCLE_LOCK_BORROWED="false"
+LIFECYCLE_LOCK_OWNER_PID=""
+LIFECYCLE_LOCK_OWNER_STARTED_AT=""
+LIFECYCLE_LOCK_GATE_HELD="false"
 
 fail() {
   local message="$*"
@@ -65,7 +73,8 @@ APPLESCRIPT
 }
 
 ensure_state_root() {
-  /bin/mkdir -p "$STATE_ROOT"
+  /bin/mkdir -p "$STATE_ROOT" || return 1
+  [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] || return 1
   /bin/chmod 700 "$STATE_ROOT"
 }
 
@@ -369,6 +378,217 @@ codex_is_running() {
 
 process_started_at() {
   /bin/ps -p "$1" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}'
+}
+
+lifecycle_process_started_at() {
+  LC_ALL=C TZ=UTC /bin/ps -p "$1" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}'
+}
+
+read_lifecycle_lock_owner() {
+  [ -d "$LIFECYCLE_LOCK_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_PATH" ] \
+    && [ -f "$LIFECYCLE_LOCK_OWNER_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_OWNER_PATH" ] || return 1
+  local pid started_at extra
+  pid="$(/usr/bin/sed -n '1p' "$LIFECYCLE_LOCK_OWNER_PATH" 2>/dev/null)"
+  started_at="$(/usr/bin/sed -n '2p' "$LIFECYCLE_LOCK_OWNER_PATH" 2>/dev/null)"
+  extra="$(/usr/bin/sed -n '3p' "$LIFECYCLE_LOCK_OWNER_PATH" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+  [ "$pid" -gt 1 ] 2>/dev/null && [ -n "$started_at" ] && [ -z "$extra" ] || return 1
+  LIFECYCLE_RECORDED_OWNER_PID="$pid"
+  LIFECYCLE_RECORDED_OWNER_STARTED_AT="$started_at"
+}
+
+lifecycle_lock_owner_matches() {
+  local pid="$1"
+  local started_at="$2"
+  /bin/kill -0 "$pid" 2>/dev/null || return 1
+  [ "$(lifecycle_process_started_at "$pid")" = "$started_at" ]
+}
+
+lifecycle_process_is_descendant() {
+  local current="$1"
+  local ancestor="$2"
+  local parent=""
+  local depth=0
+  while [ "$depth" -lt 64 ]; do
+    [ "$current" = "$ancestor" ] && return 0
+    case "$current" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    parent="$(/bin/ps -p "$current" -o ppid= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
+    [ -n "$parent" ] && [ "$parent" != "$current" ] || return 1
+    current="$parent"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+lifecycle_lock_handoff_is_valid() {
+  local owner_pid="${DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID:-}"
+  local owner_started_at="${DREAM_SKIN_LIFECYCLE_LOCK_OWNER_STARTED_AT:-}"
+  case "$owner_pid" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+  [ -n "$owner_started_at" ] || return 1
+  read_lifecycle_lock_owner || return 1
+  [ "$LIFECYCLE_RECORDED_OWNER_PID" = "$owner_pid" ] \
+    && [ "$LIFECYCLE_RECORDED_OWNER_STARTED_AT" = "$owner_started_at" ] \
+    && lifecycle_lock_owner_matches "$owner_pid" "$owner_started_at" \
+    && lifecycle_process_is_descendant "$$" "$owner_pid"
+}
+
+lifecycle_lock_is_recent() {
+  local modified now
+  modified="$(/usr/bin/stat -f '%m' "$LIFECYCLE_LOCK_PATH" 2>/dev/null)" || return 1
+  now="$(/bin/date '+%s')"
+  case "$modified:$now" in *[!0-9:]*) return 1 ;; esac
+  [ "$now" -lt "$modified" ] || [ $((now - modified)) -lt 10 ]
+}
+
+ensure_lifecycle_lock_gate() {
+  if [ ! -e "$LIFECYCLE_LOCK_GATE_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_GATE_PATH" ]; then
+    (umask 077; set -o noclobber; : > "$LIFECYCLE_LOCK_GATE_PATH") 2>/dev/null || true
+  fi
+  [ -f "$LIFECYCLE_LOCK_GATE_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_GATE_PATH" ] || return 1
+  /bin/chmod 600 "$LIFECYCLE_LOCK_GATE_PATH"
+}
+
+lifecycle_lock_gate_acquire() {
+  local timeout="${1:-0}"
+  local gate_status=0
+  LIFECYCLE_LOCK_GATE_HELD="false"
+  [ -f "$LIFECYCLE_LOCK_GATE_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_GATE_PATH" ] || return 1
+  if ! exec 9<"$LIFECYCLE_LOCK_GATE_PATH"; then return 1; fi
+  if /usr/bin/lockf -s -t "$timeout" 9; then
+    LIFECYCLE_LOCK_GATE_HELD="true"
+    return 0
+  else
+    gate_status="$?"
+  fi
+  exec 9>&-
+  return "$gate_status"
+}
+
+lifecycle_lock_gate_release() {
+  if [ "$LIFECYCLE_LOCK_GATE_HELD" = "true" ]; then exec 9>&-; fi
+  LIFECYCLE_LOCK_GATE_HELD="false"
+}
+
+lifecycle_lock_record_is_busy() {
+  [ -e "$LIFECYCLE_LOCK_PATH" ] || [ -L "$LIFECYCLE_LOCK_PATH" ] || return 1
+  [ -d "$LIFECYCLE_LOCK_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_PATH" ] || return 0
+  if read_lifecycle_lock_owner; then
+    lifecycle_lock_owner_matches \
+      "$LIFECYCLE_RECORDED_OWNER_PID" "$LIFECYCLE_RECORDED_OWNER_STARTED_AT"
+    return
+  fi
+  lifecycle_lock_is_recent
+}
+
+# Returns success only when another live/recent operation or lock transition owns the lock.
+lifecycle_lock_is_busy() {
+  local gate_status=0
+  local record_status=0
+  lifecycle_lock_handoff_is_valid && return 1
+  if [ -e "$LIFECYCLE_LOCK_GATE_PATH" ] || [ -L "$LIFECYCLE_LOCK_GATE_PATH" ]; then
+    if lifecycle_lock_gate_acquire; then gate_status=0; else gate_status="$?"; fi
+    if [ "$gate_status" -eq 75 ]; then return 0; fi
+    [ "$gate_status" -eq 0 ] || return 1
+    if lifecycle_lock_record_is_busy; then record_status=0; else record_status="$?"; fi
+    lifecycle_lock_gate_release
+    return "$record_status"
+  fi
+  lifecycle_lock_record_is_busy
+}
+
+acquire_lifecycle_lock() {
+  if lifecycle_lock_handoff_is_valid; then
+    if [ "$$" = "$DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID" ]; then
+      LIFECYCLE_LOCK_OWNED="true"
+      LIFECYCLE_LOCK_BORROWED="false"
+      LIFECYCLE_LOCK_OWNER_PID="$DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID"
+      LIFECYCLE_LOCK_OWNER_STARTED_AT="$DREAM_SKIN_LIFECYCLE_LOCK_OWNER_STARTED_AT"
+    else
+      LIFECYCLE_LOCK_BORROWED="true"
+    fi
+    return 0
+  fi
+
+  LIFECYCLE_LOCK_OWNED="false"
+  LIFECYCLE_LOCK_BORROWED="false"
+  ensure_state_root || return 1
+  ensure_lifecycle_lock_gate || return 1
+  lifecycle_lock_gate_acquire || return 1
+  local attempt=0
+  local acquired="false"
+  local owner_started_at=""
+  local temporary_owner=""
+  local stale_path=""
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
+    if /bin/mkdir "$LIFECYCLE_LOCK_PATH" 2>/dev/null; then
+      if ! /bin/chmod 700 "$LIFECYCLE_LOCK_PATH"; then
+        /bin/rmdir "$LIFECYCLE_LOCK_PATH" 2>/dev/null || true
+        break
+      fi
+      owner_started_at="$(lifecycle_process_started_at "$$")"
+      if [ -z "$owner_started_at" ]; then
+        /bin/rmdir "$LIFECYCLE_LOCK_PATH" 2>/dev/null || true
+        break
+      fi
+      temporary_owner="$LIFECYCLE_LOCK_PATH/.owner.$$"
+      if ! (umask 077; printf '%s\n%s\n' "$$" "$owner_started_at" > "$temporary_owner") \
+        || ! /bin/chmod 600 "$temporary_owner" \
+        || ! /bin/mv "$temporary_owner" "$LIFECYCLE_LOCK_OWNER_PATH"; then
+        /bin/rm -rf "$LIFECYCLE_LOCK_PATH"
+        break
+      fi
+      LIFECYCLE_LOCK_OWNED="true"
+      LIFECYCLE_LOCK_OWNER_PID="$$"
+      LIFECYCLE_LOCK_OWNER_STARTED_AT="$owner_started_at"
+      DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID="$$"
+      DREAM_SKIN_LIFECYCLE_LOCK_OWNER_STARTED_AT="$owner_started_at"
+      export DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID DREAM_SKIN_LIFECYCLE_LOCK_OWNER_STARTED_AT
+      acquired="true"
+      break
+    fi
+    lifecycle_lock_record_is_busy && break
+    stale_path="$LIFECYCLE_LOCK_PATH.stale.$$.$attempt"
+    if /bin/mv "$LIFECYCLE_LOCK_PATH" "$stale_path" 2>/dev/null; then
+      /bin/rm -rf "$stale_path" || break
+    fi
+  done
+  lifecycle_lock_gate_release
+  [ "$acquired" = "true" ]
+}
+
+require_lifecycle_lock() {
+  acquire_lifecycle_lock && return 0
+  printf 'Codex Dream Skin Studio: Another lifecycle operation is already running.\n' >&2
+  exit 1
+}
+
+release_lifecycle_lock() {
+  local release_status=0
+  if [ "$LIFECYCLE_LOCK_OWNED" = "true" ]; then
+    ensure_lifecycle_lock_gate || return 1
+    lifecycle_lock_gate_acquire 5 || return 1
+    if read_lifecycle_lock_owner \
+      && [ "$LIFECYCLE_RECORDED_OWNER_PID" = "$LIFECYCLE_LOCK_OWNER_PID" ] \
+      && [ "$LIFECYCLE_RECORDED_OWNER_STARTED_AT" = "$LIFECYCLE_LOCK_OWNER_STARTED_AT" ]; then
+      local released_path="$LIFECYCLE_LOCK_PATH.released.$$"
+      if /bin/mv "$LIFECYCLE_LOCK_PATH" "$released_path" 2>/dev/null; then
+        /bin/rm -rf "$released_path" || release_status=1
+      else
+        release_status=1
+      fi
+    else
+      release_status=1
+    fi
+    lifecycle_lock_gate_release
+    [ "$release_status" -eq 0 ] || return 1
+  fi
+  LIFECYCLE_LOCK_OWNED="false"
+  LIFECYCLE_LOCK_BORROWED="false"
+  LIFECYCLE_LOCK_OWNER_PID=""
+  LIFECYCLE_LOCK_OWNER_STARTED_AT=""
+  unset DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID DREAM_SKIN_LIFECYCLE_LOCK_OWNER_STARTED_AT
+  return 0
 }
 
 recorded_injector_process_matches() {

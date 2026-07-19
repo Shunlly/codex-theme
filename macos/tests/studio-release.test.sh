@@ -5,8 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"
 BUILD="$ROOT/macos/scripts/build-studio-release.sh"
 SCANNER="$ROOT/studio/release/check-contents.mjs"
-APP="$ROOT/macos/release/CodexDreamSkinStudio.app"
-DMG="$ROOT/macos/release/CodexDreamSkinStudio.dmg"
+RELEASE_VERSION="$(/usr/bin/tr -d '[:space:]' < "$ROOT/macos/VERSION")"
+RELEASE_DIR="$ROOT/macos/release/adhoc"
+BASE_NAME="CodexDreamSkinStudio-$RELEASE_VERSION-macos-universal-ADHOC"
+APP_NAME="$BASE_NAME.app"
+DMG_NAME="$BASE_NAME.dmg"
+APP="$RELEASE_DIR/$APP_NAME"
+DMG="$RELEASE_DIR/$DMG_NAME"
+MANIFEST="$RELEASE_DIR/release-manifest.json"
 ALLOWLIST="$ROOT/studio/release/allowlist-macos.json"
 WINDOWS_ALLOWLIST="$ROOT/studio/release/allowlist-windows.json"
 ICON_SOURCE="$ROOT/studio/assets/app-icon-source.png"
@@ -35,6 +41,54 @@ NODE="${NODE:-$(command -v node || true)}"
     const next = helper.indexOf(step, offset + 1);
     if (next < 0) throw new Error(`copy_snapshot_file is missing ordered safety step: ${step}`);
     offset = next;
+  }
+' "$BUILD"
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  const versionRead = `VERSION="$(/usr/bin/tr -d ${String.fromCharCode(39)}[:space:]${String.fromCharCode(39)} < "$SNAPSHOT_ROOT/macos/VERSION")"`;
+  const versionIndex = source.indexOf(versionRead);
+  const snapshotIndex = source.indexOf(`SNAPSHOT_ROOT="$TMP/index"`);
+  const buildIndex = source.indexOf("build_thin CodexDreamSkinStudio");
+  if (snapshotIndex < 0 || versionIndex <= snapshotIndex || buildIndex <= versionIndex) {
+    throw new Error("macOS VERSION is not validated from the immutable snapshot before Swift build");
+  }
+  if (source.includes(`< "$MACOS_ROOT/VERSION"`)) {
+    throw new Error("macOS release metadata still reads live VERSION");
+  }
+' "$BUILD"
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  for (const required of [
+    `RELEASE_CHANNEL="adhoc"`,
+    `RELEASE_CHANNEL="notarized"`,
+    `CodexDreamSkinStudio-$VERSION-macos-universal-ADHOC.app`,
+    `CodexDreamSkinStudio-$VERSION-macos-universal-ADHOC.dmg`,
+    `RELEASE_DIR="$RELEASE_ROOT/$RELEASE_CHANNEL"`,
+    `OLD_RELEASE="$MACOS_ROOT/.release-old.$RELEASE_CHANNEL.$$"`,
+    "release-manifest.json",
+    "notarized",
+    "stapled",
+  ]) {
+    if (!source.includes(required)) throw new Error(`release truth contract is missing: ${required}`);
+  }
+  const namingStart = source.indexOf(`if [ "$MODE" = "adhoc" ]; then`);
+  const namingEnd = source.indexOf("\nfi", namingStart);
+  const naming = source.slice(namingStart, namingEnd);
+  const canonical = naming.indexOf(`APP_NAME="CodexDreamSkinStudio.app"`);
+  const adhoc = naming.indexOf(`APP_NAME="CodexDreamSkinStudio-$VERSION-macos-universal-ADHOC.app"`);
+  if (namingStart < 0 || adhoc < 0 || canonical <= adhoc ||
+      !naming.slice(0, canonical).includes("else")) {
+    throw new Error("canonical app name is not reserved for notarized output");
+  }
+  const manifest = source.lastIndexOf("release-manifest.json");
+  for (const gate of [
+    `notarytool submit "$PUBLISH/$DMG_NAME"`,
+    `stapler validate "$APP"`,
+    `stapler validate "$PUBLISH/$DMG_NAME"`,
+    `spctl --assess --type execute "$APP"`,
+  ]) {
+    const index = source.indexOf(gate);
+    if (index < 0 || index > manifest) throw new Error(`manifest precedes production trust gate: ${gate}`);
   }
 ' "$BUILD"
 "$NODE" -e '
@@ -103,6 +157,9 @@ UNTRACKED_SWIFT_SYMLINK=""
 MODE_SWIFT=""
 UNREADABLE_DIR=""
 RACE_PID=""
+LEGACY_SENTINEL="$ROOT/macos/release/preserve-legacy-$$.keep"
+NOTARIZED_SENTINEL="$ROOT/macos/release/notarized/preserve-notarized-$$.keep"
+NOTARIZED_DIR_CREATED="false"
 cleanup() {
   if [ -n "$MOUNT_POINT" ]; then
     /usr/bin/hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1 || true
@@ -113,6 +170,8 @@ cleanup() {
   [ -z "$UNREADABLE_DIR" ] || /bin/chmod 700 "$UNREADABLE_DIR" 2>/dev/null || true
   [ -z "$RACE_PID" ] || /bin/kill -TERM "$RACE_PID" 2>/dev/null || true
   [ -z "$RACE_PID" ] || wait "$RACE_PID" 2>/dev/null || true
+  /bin/rm -f "$LEGACY_SENTINEL" "$NOTARIZED_SENTINEL"
+  if [ "$NOTARIZED_DIR_CREATED" = "true" ]; then /bin/rmdir "$ROOT/macos/release/notarized" 2>/dev/null || true; fi
   /bin/rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -145,12 +204,65 @@ expect_build_input_rejection() {
   /usr/bin/cmp "$TMP/release-before-$label" "$TMP/release-after-$label"
 }
 
+VERSION_INDEX="$TMP/version-index-fixture"
+/bin/cp -P "$(/usr/bin/git -C "$ROOT" rev-parse --git-path index)" "$VERSION_INDEX"
+VERSION_BLOB="$(/usr/bin/git -C "$ROOT" rev-parse ':README.md')"
+/usr/bin/env GIT_INDEX_FILE="$VERSION_INDEX" /usr/bin/git -C "$ROOT" update-index \
+  --cacheinfo "100644,$VERSION_BLOB,macos/VERSION"
+snapshot_release > "$TMP/release-before-invalid-version"
+if /usr/bin/env GIT_INDEX_FILE="$VERSION_INDEX" \
+  "$BUILD" --adhoc >"$TMP/invalid-version.out" 2>"$TMP/invalid-version.err"; then
+  printf 'Studio release builder accepted an invalid snapshot VERSION.\n' >&2
+  exit 1
+fi
+/usr/bin/printf 'The macOS release version is invalid.\n' > "$TMP/invalid-version.expected"
+/usr/bin/cmp "$TMP/invalid-version.expected" "$TMP/invalid-version.err"
+[ ! -s "$TMP/invalid-version.out" ]
+snapshot_release > "$TMP/release-after-invalid-version"
+/usr/bin/cmp "$TMP/release-before-invalid-version" "$TMP/release-after-invalid-version"
+
+[ -d "$ROOT/macos/release/notarized" ] || {
+  /bin/mkdir -p "$ROOT/macos/release/notarized"
+  NOTARIZED_DIR_CREATED="true"
+}
+/usr/bin/printf 'preserve legacy root\n' > "$LEGACY_SENTINEL"
+/usr/bin/printf 'preserve notarized channel\n' > "$NOTARIZED_SENTINEL"
+"$BUILD" --adhoc
+[ -f "$LEGACY_SENTINEL" ] || { printf 'Ad-hoc publication deleted a legacy release.\n' >&2; exit 1; }
+[ -f "$NOTARIZED_SENTINEL" ] || { printf 'Ad-hoc publication deleted notarized output.\n' >&2; exit 1; }
+
 [ -d "$APP" ] || { printf 'Studio app is missing: %s\n' "$APP" >&2; exit 1; }
 [ -f "$DMG" ] || { printf 'Studio DMG is missing: %s\n' "$DMG" >&2; exit 1; }
-[ -f "$ROOT/macos/release/SHA256SUMS.txt" ] || {
+[ -f "$RELEASE_DIR/SHA256SUMS.txt" ] || {
   printf 'Studio checksums are missing.\n' >&2
   exit 1
 }
+[ -f "$MANIFEST" ] || { printf 'Studio release manifest is missing.\n' >&2; exit 1; }
+[ ! -e "$RELEASE_DIR/CodexDreamSkinStudio.app" ]
+[ ! -e "$RELEASE_DIR/CodexDreamSkinStudio.dmg" ]
+"$NODE" - "$MANIFEST" "$DMG" "$RELEASE_VERSION" "$DMG_NAME" <<'NODE'
+const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const [manifestPath, dmgPath, version, file] = process.argv.slice(2);
+const sha256 = crypto.createHash("sha256").update(fs.readFileSync(dmgPath)).digest("hex");
+assert.deepEqual(JSON.parse(fs.readFileSync(manifestPath, "utf8")), {
+  schemaVersion: 1,
+  version,
+  architecture: "universal",
+  signing: "adhoc",
+  notarized: false,
+  stapled: false,
+  file,
+  sha256,
+});
+NODE
+{
+  /usr/bin/printf '%s\n' "$APP_NAME" "$DMG_NAME" SHA256SUMS.txt release-manifest.json
+} | LC_ALL=C /usr/bin/sort > "$TMP/expected-release-root"
+/usr/bin/find "$RELEASE_DIR" -mindepth 1 -maxdepth 1 -exec /usr/bin/basename {} \; \
+  | LC_ALL=C /usr/bin/sort > "$TMP/release-root"
+/usr/bin/cmp "$TMP/expected-release-root" "$TMP/release-root"
 
 UNTRACKED_SWIFT_SYMLINK="$ROOT/macos/studio/Sources/DreamSkinStudioCore/Task10UntrackedSymlinkGuard_$$.swift"
 /bin/ln -s EngineProtocol.swift "$UNTRACKED_SWIFT_SYMLINK"
@@ -429,7 +541,6 @@ ACTUAL="$TMP/actual-files"
   'AppIcon' ]
 [ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")" = \
   '12.0' ]
-RELEASE_VERSION="$(/usr/bin/tr -d '[:space:]' < "$ROOT/macos/VERSION")"
 [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$RELEASE_VERSION" ]
 [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")" = "$RELEASE_VERSION" ]
 
@@ -444,14 +555,20 @@ done
 
 "$NODE" "$SCANNER" --root "$APP" --allowlist "$ALLOWLIST"
 /usr/bin/codesign --verify --deep --strict "$APP"
-(cd "$ROOT/macos/release" && /usr/bin/shasum -a 256 -c SHA256SUMS.txt)
+/usr/bin/codesign --verify "$DMG"
+for signed_artifact in "$APP" "$DMG"; do
+  /usr/bin/codesign -d --verbose=4 "$signed_artifact" 2> "$TMP/codesign-info"
+  /usr/bin/grep -F -q 'Signature=adhoc' "$TMP/codesign-info"
+  /usr/bin/grep -F -q 'TeamIdentifier=not set' "$TMP/codesign-info"
+done
+(cd "$RELEASE_DIR" && /usr/bin/shasum -a 256 -c SHA256SUMS.txt)
 
 ATTACH_OUTPUT="$(/usr/bin/hdiutil attach -nobrowse -readonly "$DMG")"
 MOUNT_POINT="$(/usr/bin/printf '%s\n' "$ATTACH_OUTPUT" | /usr/bin/awk -F '\t' 'NF >= 3 { mount = $NF } END { print mount }')"
 [ -d "$MOUNT_POINT" ] || { printf 'Studio DMG did not mount.\n' >&2; exit 1; }
 /usr/bin/find "$MOUNT_POINT" -mindepth 1 -maxdepth 1 -exec /usr/bin/basename {} \; \
   | LC_ALL=C /usr/bin/sort > "$TMP/dmg-root"
-/usr/bin/printf '%s\n' Applications CodexDreamSkinStudio.app \
+/usr/bin/printf '%s\n' Applications "$APP_NAME" \
   | LC_ALL=C /usr/bin/sort > "$TMP/expected-dmg-root"
 /usr/bin/cmp "$TMP/expected-dmg-root" "$TMP/dmg-root"
 [ -L "$MOUNT_POINT/Applications" ]

@@ -4,9 +4,17 @@
 
 ### Changed
 
-- Studio is now the documented ordinary-user flow: signed artifact, preflight, one authorized restart, strict verify, Pause, and Complete Restore.
+- Studio is the intended ordinary-user flow after a production artifact passes signing and platform trust gates: preflight, one authorized restart, strict verify, Pause, and Complete Restore.
 - `VERSION` is authoritative for the macOS engine, injector payload, renderer verification, package metadata, and client release text.
 - Shell launchers and SwiftBar remain available as advanced recovery paths. Milestone 1 does not add theme package sharing, workspace scenes/bindings, context profiles, or motion/video.
+
+### Fixed
+
+- Complete Restore and uninstall remain usable through the bundled native helper when the installed engine is partial or the validated Node runtime is unavailable; completed restore state is committed before optional relaunch.
+- Config install/restore rejects aliased, dotted, inline, nested, and array-table appearance structures without changing config or deleting recovery data.
+- Studio and advanced shell entries share one stale-recoverable per-user lifecycle lock. Concurrent operations return `OPERATION_BUSY`, and normal Quit or window close is disabled while a mutation is active.
+- Active sessions without a verified watcher are reported stale, install upgrades discard verified-stopped watcher state, and progress messages use `DREAM_SKIN_PROGRESS=<value>` consistently.
+- Ad-hoc Studio builds now use labeled names and a dedicated `release/adhoc` manifest; canonical app/DMG names are reserved for verified notarized output under `release/notarized`.
 
 ### Verification
 

@@ -7,7 +7,7 @@ import DreamSkinStudioCore
 @main
 @MainActor
 struct CodexDreamSkinStudioApp: App {
-    @StateObject private var controller = StudioAppController()
+    @NSApplicationDelegateAdaptor(StudioAppController.self) private var controller
 
     var body: some Scene {
         WindowGroup("Dream Skin") {
@@ -15,16 +15,27 @@ struct CodexDreamSkinStudioApp: App {
                 .task { await controller.launch() }
         }
         .commands {
-            CommandGroup(replacing: .newItem) {}
-            CommandGroup(replacing: .appTermination) {
-                Button("Quit Dream Skin") { controller.quit() }
-            }
+            StudioCommands(model: controller.model, onQuit: controller.quit)
         }
     }
 }
 
 @MainActor
-final class StudioAppController: ObservableObject {
+private struct StudioCommands: Commands {
+    @ObservedObject var model: StudioModel
+    let onQuit: () -> Void
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {}
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit Dream Skin", action: onQuit)
+                .disabled(!model.menuState.allowsTermination)
+        }
+    }
+}
+
+@MainActor
+final class StudioAppController: NSObject, ObservableObject, NSApplicationDelegate {
     let model: StudioModel
 
     private var subscriptions = Set<AnyCancellable>()
@@ -37,10 +48,11 @@ final class StudioAppController: ObservableObject {
         onQuit: { [weak self] in self?.quit() }
     )
 
-    init() {
+    override init() {
         let adapterURL = Bundle.main.resourceURL!
             .appendingPathComponent("engine/scripts/studio-adapter-macos.sh")
         model = StudioModel(engine: EngineClient(adapterURL: adapterURL))
+        super.init()
         Publishers.CombineLatest3(model.$envelope, model.$isBusy, model.$presentation)
             .map(StudioMenuState.init)
             .sink { [weak self] in self?.statusItem.update($0) }
@@ -77,6 +89,10 @@ final class StudioAppController: ObservableObject {
 
     func quit() {
         NSApp.terminate(nil)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        model.menuState.allowsTermination ? .terminateNow : .terminateCancel
     }
 
     private func showWindow() {

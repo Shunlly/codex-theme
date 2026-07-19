@@ -102,7 +102,7 @@ internal static class EngineProtocol
     if (normalized.EndsWith('\n')) normalized = normalized[..^1];
     foreach (var line in normalized.Split('\n'))
     {
-      const string prefix = "DREAM_SKIN_PROGRESS ";
+      const string prefix = "DREAM_SKIN_PROGRESS=";
       if (line.Length == 0 || !line.StartsWith(prefix, StringComparison.Ordinal) || !ProgressValues.Contains(line[prefix.Length..])) Invalid();
       progress?.Report(Enum.Parse<EngineProgress>(line[prefix.Length..], true));
     }

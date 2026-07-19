@@ -12,11 +12,9 @@ namespace CodexDreamSkinStudio;
 public partial class MainWindow : Window
 {
   private readonly EngineClient _client = new();
-  private readonly CancellationTokenSource _operationCancellation = new();
   private readonly Forms.NotifyIcon _tray;
   private readonly bool _prepareUninstall;
   private EngineEnvelope? _envelope;
-  private Task<EngineEnvelope>? _activeEngineCall;
   private bool _busy;
   private bool _confirming;
   private bool _preflightStarted;
@@ -38,13 +36,13 @@ public partial class MainWindow : Window
   {
     if (_preflightStarted) return;
     _preflightStarted = true;
-    var success = await DispatchAsync(EngineOperation.Preflight);
     if (_prepareUninstall)
     {
-      if (success && ConfirmPrepareUninstall()) success = await DispatchAsync(EngineOperation.Uninstall);
-      else success = false;
+      var success = ConfirmPrepareUninstall() && await DispatchAsync(EngineOperation.Uninstall, bypassAvailability: true);
       FinishPrepareUninstall(success ? 0 : 1);
+      return;
     }
+    await DispatchAsync(EngineOperation.Preflight);
   }
 
   private Forms.NotifyIcon CreateTray()
@@ -81,9 +79,11 @@ public partial class MainWindow : Window
       operation == EngineOperation.Restore && _envelope.Error?.RecoveryActions.Contains("restore") == true;
   }
 
-  private async Task<bool> DispatchAsync(EngineOperation operation, bool deleteUserThemes = false)
+  internal static bool AllowsTermination(bool busy) => !busy;
+
+  private async Task<bool> DispatchAsync(EngineOperation operation, bool deleteUserThemes = false, bool bypassAvailability = false)
   {
-    if (!CanRun(operation)) return false;
+    if (!bypassAvailability && !CanRun(operation)) return false;
     var restartAuthorized = false;
     var forceAuthorized = false;
     try
@@ -145,11 +145,9 @@ public partial class MainWindow : Window
     ProgressText.Text = "正在准备…";
     UpdateView();
     var progress = new Progress<EngineProgress>(value => ProgressText.Text = ProgressTextFor(value));
-    _activeEngineCall = _client.RunAsync(operation, restartAuthorized, forceAuthorized, deleteUserThemes,
+    return await _client.RunAsync(operation, restartAuthorized, forceAuthorized, deleteUserThemes,
       deep: operation is EngineOperation.Preflight or EngineOperation.Status, progress: progress,
-      cancellationToken: _operationCancellation.Token);
-    try { return await _activeEngineCall; }
-    finally { _activeEngineCall = null; }
+      cancellationToken: CancellationToken.None);
   }
 
   private bool ConfirmRestart()
@@ -234,6 +232,7 @@ public partial class MainWindow : Window
     primary.Enabled = CanRun(PrimaryOperation());
     _tray.ContextMenuStrip.Items["pause"]!.Enabled = CanRun(EngineOperation.Pause);
     _tray.ContextMenuStrip.Items["restore"]!.Enabled = CanRun(EngineOperation.Restore);
+    _tray.ContextMenuStrip.Items["exit"]!.Enabled = AllowsTermination(_busy);
   }
 
   private static string StateText(EngineState state)
@@ -294,16 +293,13 @@ public partial class MainWindow : Window
     Focus();
   }
 
-  private async Task ExitApplicationAsync()
+  private Task ExitApplicationAsync()
   {
+    if (!AllowsTermination(_busy)) return Task.CompletedTask;
     _explicitExit = true;
-    _operationCancellation.Cancel();
-    if (_activeEngineCall is not null)
-    {
-      try { await _activeEngineCall; } catch { }
-    }
     DisposeResources();
     System.Windows.Application.Current.Shutdown(_prepareUninstall ? 1 : 0);
+    return Task.CompletedTask;
   }
 
   private void FinishPrepareUninstall(int exitCode)
@@ -319,16 +315,15 @@ public partial class MainWindow : Window
     _resourcesDisposed = true;
     _tray.Visible = false;
     _tray.Dispose();
-    _operationCancellation.Dispose();
   }
 
   protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
   {
-    if (_prepareUninstall && !_explicitExit)
+    if (!_explicitExit && !AllowsTermination(_busy))
     {
-      _operationCancellation.Cancel();
+      e.Cancel = true;
     }
-    else if (!_explicitExit)
+    else if (!_prepareUninstall && !_explicitExit)
     {
       e.Cancel = true;
       Hide();

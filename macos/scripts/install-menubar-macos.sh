@@ -13,6 +13,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
+
 PLUGIN_SRC="$PROJECT_ROOT/menubar/codex_dream_skin.10s.sh"
 [ -f "$PLUGIN_SRC" ] || fail "Plugin source missing: $PLUGIN_SRC"
 
@@ -40,7 +43,7 @@ if [ -d "$INSTALL_ROOT" ] && [ "$PROJECT_ROOT" != "$INSTALL_ROOT" ]; then
   /bin/mkdir -p "$INSTALL_ROOT/menubar" "$INSTALL_ROOT/scripts"
   /bin/cp -f "$PLUGIN_SRC" "$INSTALL_ROOT/menubar/codex_dream_skin.10s.sh"
   /bin/chmod 755 "$INSTALL_ROOT/menubar/codex_dream_skin.10s.sh"
-  for name in pause-dream-skin-macos.sh status-dream-skin-macos.sh apply-from-menubar-macos.sh \
+  for name in common-macos.sh pause-dream-skin-macos.sh status-dream-skin-macos.sh apply-from-menubar-macos.sh \
     switch-theme-macos.sh load-image-theme-macos.sh install-menubar-macos.sh; do
     if [ -f "$PROJECT_ROOT/scripts/$name" ]; then
       /bin/cp -f "$PROJECT_ROOT/scripts/$name" "$INSTALL_ROOT/scripts/$name"

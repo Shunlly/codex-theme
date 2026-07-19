@@ -192,7 +192,7 @@ function Complete-StudioProcess {
     pause = 'pausing'; resume = 'applying'; restore = 'restoring'; verify = 'verifying'; uninstall = 'uninstalling'
   }
   $progress = $progressByOperation["$($envelope.operation)"]
-  if ($stderr -and $stderr -cne "DREAM_SKIN_PROGRESS $progress") { throw "Unexpected Studio stderr: $stderr" }
+  if ($stderr -and $stderr -cne "DREAM_SKIN_PROGRESS=$progress") { throw "Unexpected Studio stderr: $stderr" }
   $preflightError = $null -ne $envelope.error -and $envelope.error.code -in @(
     'INVALID_REQUEST', 'CODEX_CLOSE_REQUIRED', 'RESTART_REQUIRED', 'STATE_UNSAFE',
     'CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED', 'RUNTIME_INVALID', 'OPERATION_BUSY'
@@ -291,13 +291,17 @@ foreach ($required in @(
   '$powershellPath = Join-Path $PSHOME ''powershell.exe''',
   "'install-dream-skin.ps1'", "@('-NoShortcuts', '-NodePath', `$PrivateNodePath)",
   "'pause-dream-skin.ps1'", "@('-RestoreBaseTheme', '-Uninstall')",
-  "[Console]::Error.WriteLine(\"DREAM_SKIN_PROGRESS `$progress\")",
+  "[Console]::Error.WriteLine(\"DREAM_SKIN_PROGRESS=`$progress\")",
   "Get-DreamSkinNodeRuntime -NodePath `$PrivateNodePath -ExpectedVersion '22.23.1'",
   "`$childArguments += '-AdapterLockHeld'",
   "`$startInfo.EnvironmentVariables['DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'] = \"`$PID\"",
   "@('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')",
   "`$status.Error.code -in @('STATE_UNSAFE', 'RUNTIME_INVALID')",
-  "New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official'"
+  "New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official'",
+  'function Test-DreamSkinPathEntry',
+  '$appearanceMarker = Get-DreamSkinAppearanceMarkerPath -BackupPath $restoreBackup',
+  '$status.State.codex -ne ''running''',
+  'Assert-DreamSkinNoReparseComponents -Path $stateRoot'
 )) {
   if (-not $adapterSource.Contains($required)) { throw "Studio adapter contract is missing: $required" }
 }
@@ -599,7 +603,23 @@ function Get-DreamSkinNodeRuntime {
 '@
 $themeStub = @'
 function Ensure-DreamSkinManagedDirectory { param([string]$Path, [string]$Root) New-Item -ItemType Directory -Path $Path -Force | Out-Null }
-function Assert-DreamSkinNoReparseComponents { param([string]$Path) }
+function Assert-DreamSkinNoReparseComponents {
+  param([string]$Path)
+  $current = [IO.Path]::GetFullPath($Path)
+  $root = [IO.Path]::GetPathRoot($current)
+  while ($true) {
+    try {
+      $attributes = [IO.File]::GetAttributes($current)
+      if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'fixture reparse point' }
+    } catch [IO.FileNotFoundException] {
+    } catch [IO.DirectoryNotFoundException] {
+    }
+    if ($current.TrimEnd('\') -ieq $root.TrimEnd('\')) { break }
+    $parent = [IO.Path]::GetDirectoryName($current)
+    if (-not $parent -or $parent -ieq $current) { break }
+    $current = $parent
+  }
+}
 function Test-DreamSkinThemePathWithin {
   param([string]$Path, [string]$Root)
   try { return [IO.Path]::GetFullPath($Path).StartsWith([IO.Path]::GetFullPath($Root).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) } catch { return $false }
@@ -1167,6 +1187,8 @@ try {
   if ($result.Envelope.error.code -cne 'LIVE_REMOVE_FAILED' -or (Test-Path -LiteralPath (Join-Path $pauseFailure.StateRoot 'paused'))) {
     throw 'Failed live removal wrote the pause marker or mapped incorrectly.'
   }
+  Assert-Equal @($result.Envelope.error.recoveryActions) @('restore', 'diagnostics', 'cancel') `
+    'Failed live removal advertised an unusable retry.'
   Assert-Equal (Get-ProtectedSnapshot -Case $pauseFailure) @($stateBefore | Where-Object { $_ -notlike 'studio-operation.log|*' }) 'Failed pause did not preserve state.'
 
   $resumeHot = New-CaseRoot -Name 'resume-hot'
@@ -1290,6 +1312,148 @@ try {
   $verifyFailure = New-CaseRoot -Name 'verify-fail'
   $result = Invoke-Studio -Case $verifyFailure -Scenario 'verify-fail' -Operation 'verify'
   if ($result.Envelope.error.code -cne 'VERIFY_FAILED') { throw 'Verify failure was not mapped safely.' }
+
+  $partialEngineUninstall = New-CaseRoot -Name 'uninstall-partial-engine' -NoState
+  $partialNodeBackup = "$nodePath.partial-engine"
+  Move-Item -LiteralPath $nodePath -Destination $partialNodeBackup
+  try {
+    $result = Invoke-Studio -Case $partialEngineUninstall -Scenario 'stopped' -Operation 'uninstall'
+  } finally {
+    Move-Item -LiteralPath $partialNodeBackup -Destination $nodePath
+  }
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
+    -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @('install') -ErrorCode $null
+  Assert-ChildInvocation -Case $partialEngineUninstall `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-AdapterLockHeld'
+  Assert-OperationLog -Case $partialEngineUninstall -ScriptName 'restore-dream-skin.ps1'
+  if (Test-Path -LiteralPath (Join-Path $partialEngineUninstall.StateRoot 'config.before-dream-skin.toml')) {
+    throw 'Partial-engine uninstall skipped the retained config backup.'
+  }
+
+  $neverApplied = New-CaseRoot -Name 'uninstall-never-applied' -NoState
+  Remove-Item -LiteralPath (Join-Path $neverApplied.StateRoot 'config.before-dream-skin.toml') -Force
+  $before = Get-ProtectedSnapshot -Case $neverApplied
+  $result = Invoke-Studio -Case $neverApplied -Scenario 'stopped' -Operation 'uninstall'
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
+    -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @('install') -ErrorCode $null
+  Assert-Equal (Get-ProtectedSnapshot -Case $neverApplied) $before 'Never-applied uninstall changed retained theme state.'
+  Assert-NoChildOrLog -Case $neverApplied
+
+  $alreadyRestored = New-CaseRoot -Name 'uninstall-already-restored' -NoState
+  Move-Item -LiteralPath (Join-Path $alreadyRestored.StateRoot 'config.before-dream-skin.toml') `
+    -Destination (Join-Path $alreadyRestored.StateRoot 'config.restored-test.toml')
+  $before = Get-ProtectedSnapshot -Case $alreadyRestored
+  foreach ($attempt in 1..2) {
+    $result = Invoke-Studio -Case $alreadyRestored -Scenario 'stopped' -Operation 'uninstall'
+    if ($result.ExitCode -ne 0 -or -not $result.Envelope.ok) { throw 'Repeated already-restored uninstall failed.' }
+  }
+  Assert-Equal (Get-ProtectedSnapshot -Case $alreadyRestored) $before 'Repeated uninstall changed restored state.'
+  Assert-NoChildOrLog -Case $alreadyRestored
+
+  $malformedBackup = New-CaseRoot -Name 'uninstall-malformed-backup' -NoState
+  $malformedBackupPath = Join-Path $malformedBackup.StateRoot 'config.before-dream-skin.toml'
+  Remove-Item -LiteralPath $malformedBackupPath -Force
+  New-Item -ItemType Directory -Path $malformedBackupPath | Out-Null
+  $before = Get-ProtectedSnapshot -Case $malformedBackup
+  $result = Invoke-Studio -Case $malformedBackup -Scenario 'uninstall-malformed-backup' -Operation 'uninstall'
+  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'OPERATION_FAILED') {
+    throw 'Malformed backup directory was treated as affirmative restore proof.'
+  }
+  Assert-Equal (Get-ProtectedSnapshot -Case $malformedBackup) $before 'Malformed backup failure changed protected state.'
+
+  $reparseBackup = New-CaseRoot -Name 'uninstall-reparse-backup' -NoState
+  $reparseBackupPath = Join-Path $reparseBackup.StateRoot 'config.before-dream-skin.toml'
+  $reparseTarget = Join-Path $reparseBackup.Root 'reparse-backup-target'
+  Remove-Item -LiteralPath $reparseBackupPath -Force
+  New-Item -ItemType Directory -Path $reparseTarget | Out-Null
+  $null = New-Item -ItemType Junction -Path $reparseBackupPath -Target $reparseTarget
+  try {
+    $result = Invoke-Studio -Case $reparseBackup -Scenario 'stopped' -Operation 'uninstall'
+    if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'OPERATION_FAILED') {
+      throw 'Backup reparse point was treated as affirmative restore proof.'
+    }
+    Assert-NoChildOrLog -Case $reparseBackup
+  } finally {
+    [IO.Directory]::Delete($reparseBackupPath)
+  }
+
+  $orphanAppearance = New-CaseRoot -Name 'uninstall-orphan-appearance' -NoState
+  $orphanBackup = Join-Path $orphanAppearance.StateRoot 'config.before-dream-skin.toml'
+  Remove-Item -LiteralPath $orphanBackup -Force
+  [IO.File]::WriteAllText((Get-DreamSkinAppearanceMarkerPath -BackupPath $orphanBackup), '{}', $utf8NoBom)
+  $before = Get-ProtectedSnapshot -Case $orphanAppearance
+  $result = Invoke-Studio -Case $orphanAppearance -Scenario 'stopped' -Operation 'uninstall'
+  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'OPERATION_FAILED') {
+    throw 'Orphan appearance marker was treated as affirmative restore proof.'
+  }
+  Assert-Equal (Get-ProtectedSnapshot -Case $orphanAppearance) $before 'Orphan appearance recovery failure changed protected state.'
+
+  $runningWithoutArtifacts = New-CaseRoot -Name 'uninstall-running-without-artifacts' -NoState
+  Remove-Item -LiteralPath (Join-Path $runningWithoutArtifacts.StateRoot 'config.before-dream-skin.toml') -Force
+  $before = Get-ProtectedSnapshot -Case $runningWithoutArtifacts
+  $result = Invoke-Studio -Case $runningWithoutArtifacts -Scenario 'running' -Operation 'uninstall'
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 1 -Ok $false -Install 'not-installed' `
+    -Codex 'running' -Session 'official' -ThemeName '午夜极光' -RequiresRestart $true -Verified $null `
+    -AvailableActions @('install') -ErrorCode 'RESTART_REQUIRED' -RecoveryActions @('authorize-restart', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $runningWithoutArtifacts) $before 'Running-Codex uninstall changed protected state before authorization.'
+  Assert-NoChildOrLog -Case $runningWithoutArtifacts
+
+  $unsafeStateRoot = New-CaseRoot -Name 'uninstall-state-root-file' -NoState
+  Remove-Item -LiteralPath $unsafeStateRoot.StateRoot -Recurse -Force
+  [IO.File]::WriteAllText($unsafeStateRoot.StateRoot, 'unsafe state root', $utf8NoBom)
+  $stateRootHash = (Get-FileHash -LiteralPath $unsafeStateRoot.StateRoot -Algorithm SHA256).Hash
+  $result = Invoke-Studio -Case $unsafeStateRoot -Scenario 'stopped' -Operation 'uninstall'
+  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'OPERATION_FAILED' -or
+    (Get-FileHash -LiteralPath $unsafeStateRoot.StateRoot -Algorithm SHA256).Hash -cne $stateRootHash) {
+    throw 'Non-directory state root was treated as affirmative restore proof.'
+  }
+  Assert-NoChildOrLog -Case $unsafeStateRoot
+
+  $reparseStateRoot = New-CaseRoot -Name 'uninstall-state-root-reparse' -NoState
+  $reparseStateTarget = Join-Path $reparseStateRoot.Root 'state-root-target'
+  Remove-Item -LiteralPath $reparseStateRoot.StateRoot -Recurse -Force
+  New-Item -ItemType Directory -Path $reparseStateTarget | Out-Null
+  $null = New-Item -ItemType Junction -Path $reparseStateRoot.StateRoot -Target $reparseStateTarget
+  try {
+    $result = Invoke-Studio -Case $reparseStateRoot -Scenario 'stopped' -Operation 'uninstall'
+    if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'OPERATION_FAILED') {
+      throw 'State-root reparse point was treated as affirmative restore proof.'
+    }
+    Assert-NoChildOrLog -Case $reparseStateRoot
+  } finally {
+    [IO.Directory]::Delete($reparseStateRoot.StateRoot)
+  }
+
+  $neverAppliedDelete = New-CaseRoot -Name 'uninstall-never-applied-delete' -NoState
+  Remove-Item -LiteralPath (Join-Path $neverAppliedDelete.StateRoot 'config.before-dream-skin.toml') -Force
+  New-Item -ItemType Directory -Path (Join-Path $neverAppliedDelete.StateRoot 'themes') -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $neverAppliedDelete.StateRoot 'images') -Force | Out-Null
+  $result = Invoke-Studio -Case $neverAppliedDelete -Scenario 'stopped' -Operation 'uninstall' `
+    -ExtraArguments @('-DeleteUserThemes')
+  if ($result.ExitCode -ne 0 -or -not $result.Envelope.ok) {
+    throw 'Never-applied uninstall with explicit theme deletion failed.'
+  }
+  foreach ($deleted in @('themes', 'images', 'active-theme')) {
+    if (Test-Path -LiteralPath (Join-Path $neverAppliedDelete.StateRoot $deleted)) {
+      throw "Never-applied uninstall retained explicitly deleted $deleted."
+    }
+  }
+  Assert-NoChildOrLog -Case $neverAppliedDelete
+
+  $missingCodexUninstall = New-CaseRoot -Name 'uninstall-missing-codex' -NoState
+  $result = Invoke-Studio -Case $missingCodexUninstall -Scenario 'missing-codex' -Operation 'uninstall'
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
+    -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @('install') -ErrorCode $null
+  Assert-ChildInvocation -Case $missingCodexUninstall `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-AdapterLockHeld'
+  $childInvocationCount = @([IO.File]::ReadAllLines($missingCodexUninstall.ArgvPath)).Count
+  $result = Invoke-Studio -Case $missingCodexUninstall -Scenario 'missing-codex' -Operation 'uninstall'
+  if ($result.ExitCode -ne 0 -or @([IO.File]::ReadAllLines($missingCodexUninstall.ArgvPath)).Count -ne $childInvocationCount) {
+    throw 'Repeated missing-Codex uninstall reran completed recovery.'
+  }
 
   $uninstall = New-CaseRoot -Name 'uninstall' -NoState
   New-Item -ItemType Directory -Path (Join-Path $uninstall.StateRoot 'themes\saved') -Force | Out-Null

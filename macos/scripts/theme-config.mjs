@@ -9,6 +9,11 @@ const settings = new Map([
   ["appearanceTheme", null],
   ["appearanceDarkCodeThemeId", null],
 ]);
+const targetKeys = [
+  "appearanceTheme",
+  "appearanceLightCodeThemeId",
+  "appearanceDarkCodeThemeId",
+];
 
 if (!["install", "restore"].includes(mode) || !configPath || !backupPath) {
   throw new Error("Usage: theme-config.mjs <install|restore> <config-path> <backup-path>");
@@ -27,25 +32,65 @@ function desktopSection(content) {
 }
 
 function assertNoAmbiguousDesktopTables(content) {
+  const desktopAlias = escapedBasicKeyPattern("desktop");
   const patterns = [
     /^(?:\uFEFF)?[\t ]*\[[\t ]*["']desktop["'][\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/gm,
     /^(?:\uFEFF)?[\t ]*\[[\t ]*"[^"\r\n]*\\[^"\r\n]*"[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/gm,
+    /^(?:\uFEFF)?[\t ]*\[\[[\t ]*(?:desktop|["']desktop["'])(?:[\t ]*\.|[\t ]*\]\])/gm,
+    /^(?:\uFEFF)?[\t ]*\[[\t ]*(?:desktop|["']desktop["'])[\t ]*\./gm,
+    new RegExp(`^(?:\\uFEFF)?[\\t ]*\\[\\[?[\\t ]*"${desktopAlias}"`, "gm"),
   ];
   if (patterns.some((pattern) => pattern.test(content))) {
-    throw new Error("Refusing to rewrite a quoted or escaped [desktop] table.");
+    throw new Error("Refusing to rewrite an aliased or nested [desktop] table.");
+  }
+
+  const firstHeader = /^(?:\uFEFF)?[\t ]*\[/m.exec(content);
+  const root = content.slice(0, firstHeader?.index ?? content.length);
+  const rootPatterns = [
+    /^(?:\uFEFF)?[\t ]*(?:desktop|["']desktop["'])[\t ]*(?:=|\.)/m,
+    new RegExp(`^(?:\\uFEFF)?[\\t ]*"${desktopAlias}"[\\t ]*(?:=|\\.)`, "m"),
+  ];
+  if (rootPatterns.some((pattern) => pattern.test(root))) {
+    throw new Error("Refusing to rewrite a dotted or inline desktop alias.");
   }
 }
 
 function assertNoAmbiguousSettings(body) {
-  const keys = [...settings.keys()].join("|");
+  const keys = targetKeys.join("|");
+  const escapedKeys = targetKeys.map(escapedBasicKeyPattern).join("|");
   const patterns = [
     new RegExp(`^[\\t ]+(?:${keys})[\\t ]*=`, "m"),
-    new RegExp(`^[\\t ]*[\"'](?:${keys})[\"'][\\t ]*=`, "m"),
-    /^[\t ]*"[^"\r\n]*\\[^"\r\n]*"[\t ]*=/m,
+    new RegExp(`^[\\t ]*[\"'](?:${keys})[\"'][\\t ]*(?:=|\\.)`, "m"),
+    new RegExp(`^[\\t ]*(?:${keys})[\\t ]*\\.`, "m"),
+    new RegExp(`^[\\t ]*"(?:${escapedKeys})"[\\t ]*(?:=|\\.)`, "m"),
   ];
   if (patterns.some((pattern) => pattern.test(body))) {
-    throw new Error("Refusing to rewrite quoted, escaped, or indented appearance settings.");
+    throw new Error("Refusing to rewrite aliased, dotted, or indented appearance settings.");
   }
+  for (const key of targetKeys) {
+    for (const line of settingLines(body, key).matches) {
+      if (!validBackupAssignment(line, key)) {
+        throw new Error(`Refusing to rewrite a non-string ${key} setting.`);
+      }
+    }
+  }
+}
+
+function escapedBasicKeyPattern(key) {
+  const hexPattern = (value, width) => value.toString(16).padStart(width, "0")
+    .replace(/[a-f]/g, (digit) => `[${digit}${digit.toUpperCase()}]`);
+  return [...key].map((character) => {
+    const literal = character.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const value = character.codePointAt(0);
+    return `(?:${literal}|\\\\u${hexPattern(value, 4)}|\\\\U${hexPattern(value, 8)})`;
+  }).join("");
+}
+
+function assertEditableToml(content) {
+  assertSupportedTomlLayout(content);
+  assertNoAmbiguousDesktopTables(content);
+  const section = desktopSection(content);
+  if (section) assertNoAmbiguousSettings(section.body);
 }
 
 function tomlStructureForLine(line) {
@@ -315,11 +360,9 @@ async function main() {
   if (content.includes('"""') || content.includes("'''")) {
     throw new Error("Refusing to rewrite TOML containing multiline strings.");
   }
-  assertSupportedTomlLayout(content);
-  assertNoAmbiguousDesktopTables(content);
+  assertEditableToml(content);
   let section = desktopSection(content);
   const preferredNewline = content.includes("\r\n") ? "\r\n" : "\n";
-  if (section) assertNoAmbiguousSettings(section.body);
 
   if (mode === "install") {
     if (!section) {
@@ -356,6 +399,7 @@ async function main() {
     }
     if (changed) {
       const updated = content.slice(0, section.bodyStart) + body + content.slice(section.bodyEnd);
+      assertEditableToml(updated);
       await assertConfigUnchanged(originalBytes, originalStat);
       await atomicWrite(configPath, updated, originalStat.mode & 0o777, originalBytes, originalStat);
     }
@@ -388,6 +432,7 @@ async function main() {
     body = replaceSetting(body, key, backup.values[key] ?? null, preferredNewline);
   }
   const restored = content.slice(0, section.bodyStart) + body + content.slice(section.bodyEnd);
+  assertEditableToml(restored);
   await assertConfigUnchanged(originalBytes, originalStat);
   await atomicWrite(configPath, restored, originalStat.mode & 0o777, originalBytes, originalStat);
   await fs.unlink(backupPath);

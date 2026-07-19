@@ -19,8 +19,12 @@ if ([IO.File]::ReadAllText((Join-Path $Root 'assets\renderer-inject.js')) -notma
 if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\studio-adapter.ps1')) -notmatch "'preflight', 'install', 'apply', 'status', 'pause', 'resume', 'restore', 'verify', 'uninstall'") {
   throw 'Windows Studio adapter must expose all Protocol v1 operations.'
 }
-if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\build-studio-release.ps1')) -notmatch "(?m)^\s*& \`$PrivateNodePath \(Join-Path \`$RepoRoot 'studio\\release\\check-contents\.mjs'\)") {
+$builderSource = [IO.File]::ReadAllText((Join-Path $Root 'scripts\build-studio-release.ps1'))
+if ($builderSource -notmatch "(?m)^\s*& \`$PrivateNodePath \(Join-Path \`$SnapshotRepoRoot 'studio\\release\\check-contents\.mjs'\)") {
   throw 'Windows Studio release builder must invoke the content scanner.'
+}
+if (-not $builderSource.Contains('--artifacts-path $TestArtifactsRoot')) {
+  throw 'Windows Studio release tests must keep .NET artifacts outside required inputs.'
 }
 function Assert-StudioQuickStartContract {
   param([string]$Path, [string]$QuickHeading, [string]$AdvancedHeading, [string[]]$Terms, [string[]]$Exclusions)
@@ -33,10 +37,10 @@ function Assert-StudioQuickStartContract {
     throw "Studio quick-start contract is incomplete in $Path"
   }
 }
-Assert-StudioQuickStartContract (Join-Path $Root '..\README.md') '## 快速开始' '### 高级恢复' @('已签名 Studio artifact', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
-Assert-StudioQuickStartContract (Join-Path $Root '..\README.en.md') '## Quick start' '### Advanced recovery' @('signed Studio artifact', 'preflight', 'authorize one', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
-Assert-StudioQuickStartContract (Join-Path $Root '..\docs\platforms.md') '## Studio 日常路径' '## 高级恢复' @('已签名 Studio artifact', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
-Assert-StudioQuickStartContract (Join-Path $Root 'SKILL.md') '## Ordinary-user workflow (Studio)' '## Advanced recovery' @('signed Studio artifact', 'preflight', 'authorize a single restart', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
+Assert-StudioQuickStartContract (Join-Path $Root '..\README.md') '## 快速开始' '### 高级恢复' @('当前仓库不声称已有通过生产信任验收的 Studio 二进制发布', '生产发布完成后', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
+Assert-StudioQuickStartContract (Join-Path $Root '..\README.en.md') '## Quick start' '### Advanced recovery' @('No trusted Studio binary is currently claimed as published or accepted', 'After a production release', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', 'authorize one', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
+Assert-StudioQuickStartContract (Join-Path $Root '..\docs\platforms.md') '## Studio 日常路径' '## 高级恢复' @('当前仓库不声称已有通过生产信任验收的 Studio 二进制发布', '生产发布完成后', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
+Assert-StudioQuickStartContract (Join-Path $Root 'SKILL.md') '## Ordinary-user workflow (Studio)' '## Advanced recovery' @('No trusted Studio binary is currently claimed as published or accepted', 'Authenticode', 'SmartScreen', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', 'authorize a single restart', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
 & (Join-Path $PSScriptRoot 'studio-protocol.tests.ps1')
 & (Join-Path $PSScriptRoot 'studio-release.tests.ps1')
 . (Join-Path $Root 'scripts\common-windows.ps1')

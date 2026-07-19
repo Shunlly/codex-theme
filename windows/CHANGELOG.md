@@ -4,9 +4,15 @@
 
 ### Changed
 
-- Studio is the documented ordinary-user flow: signed setup, preflight, one authorized restart, strict verify, Pause, and Complete Restore.
+- Studio is the intended ordinary-user flow after a production setup passes signing and platform trust gates: preflight, one authorized restart, strict verify, Pause, and Complete Restore.
 - `VERSION` now drives the injector payload and renderer verification; PowerShell remains advanced recovery.
 - Milestone 1 does not add theme package sharing, workspace scenes/bindings, context profiles, or motion/video.
+- Release builds consume one immutable Git-index snapshot, reject dirty/untracked inputs, and pass `VERSION` through assembly, file, product, and informational metadata.
+
+### Fixed
+
+- Apps & Features removal is idempotent after a never-applied or completed restore and can recover when Codex is missing, while unsafe state, reparse points, cancellation, and restore failures still block removal.
+- Normal window close and tray Exit are disabled while a Studio operation is active so the adapter process tree is not left running without its UI.
 
 ### Verification
 

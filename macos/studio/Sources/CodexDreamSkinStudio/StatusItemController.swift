@@ -44,7 +44,7 @@ final class StatusItemController: NSObject {
         menu.addItem(item(actionTitle(menuState.pauseResumeOperation, fallback: "Pause / Resume"), #selector(pauseResume), enabled: menuState.pauseResumeEnabled))
         menu.addItem(item("Complete Restore", #selector(restore), enabled: menuState.restoreEnabled))
         menu.addItem(.separator())
-        menu.addItem(item("Quit Dream Skin", #selector(quit), enabled: true))
+        menu.addItem(item("Quit Dream Skin", #selector(quit), enabled: menuState.allowsTermination))
         statusItem.menu = menu
     }
 

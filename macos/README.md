@@ -16,7 +16,12 @@ This project injects through **local loopback CDP**. It does **not** modify the 
 
 ## Quick start (Studio)
 
-1. Download the signed Studio artifact `CodexDreamSkinStudio.dmg`, move the app to Applications, and open it.
+No trusted Studio binary is currently claimed as published or accepted. The canonical
+`CodexDreamSkinStudio.dmg` name is reserved for a production artifact that has passed
+Developer ID signing, notarization, stapling, and Gatekeeper verification. Ad-hoc
+development builds are labeled under `release/adhoc/` and are not production evidence.
+
+1. After that production release is published, download `CodexDreamSkinStudio.dmg`, move the app to Applications, and open it.
 2. Complete preflight. Authorize one Codex restart only when Studio requests it.
 3. Wait for strict verified success. **Pause** is reversible soft-off; **Complete Restore** removes the live skin and closes managed CDP.
 

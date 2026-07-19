@@ -6,23 +6,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 MACOS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 REPO_ROOT="$(cd "$MACOS_ROOT/.." && pwd -P)"
 PACKAGE="$MACOS_ROOT/studio"
-RELEASE_DIR="$MACOS_ROOT/release"
-APP_NAME="CodexDreamSkinStudio.app"
-DMG_NAME="CodexDreamSkinStudio.dmg"
-VERSION="$(/usr/bin/tr -d '[:space:]' < "$MACOS_ROOT/VERSION")"
-[ "$VERSION" = "1.3.0" ] || {
-  printf 'The macOS release version is invalid.\n' >&2
-  exit 1
-}
+RELEASE_ROOT="$MACOS_ROOT/release"
 
 if [ "$#" -ne 1 ]; then
   printf 'Usage: %s --adhoc|--notarize\n' "$0" >&2
   exit 2
 fi
 case "$1" in
-  --adhoc) MODE="adhoc"; IDENTITY="-" ;;
+  --adhoc)
+    MODE="adhoc"
+    IDENTITY="-"
+    RELEASE_CHANNEL="adhoc"
+    SIGNING_MODE="adhoc"
+    NOTARIZED="false"
+    STAPLED="false"
+    ;;
   --notarize)
     MODE="notarize"
+    RELEASE_CHANNEL="notarized"
+    SIGNING_MODE="developer-id"
+    NOTARIZED="true"
+    STAPLED="true"
     [ -n "${CODE_SIGN_IDENTITY:-}" ] || {
       printf 'CODE_SIGN_IDENTITY is required for --notarize.\n' >&2
       exit 2
@@ -38,6 +42,7 @@ case "$1" in
     exit 2
     ;;
 esac
+RELEASE_DIR="$RELEASE_ROOT/$RELEASE_CHANNEL"
 
 [ "$(/usr/bin/uname -s)" = "Darwin" ] || {
   printf 'Studio macOS releases must be built on macOS.\n' >&2
@@ -135,7 +140,7 @@ verify_index_snapshot_modes
   || release_input_error
 
 TMP="$(/usr/bin/mktemp -d "$MACOS_ROOT/.studio-release.XXXXXX")"
-OLD_RELEASE="$MACOS_ROOT/.release-old.$$"
+OLD_RELEASE="$MACOS_ROOT/.release-old.$RELEASE_CHANNEL.$$"
 cleanup() {
   /bin/rm -rf "$TMP"
   if [ -d "$OLD_RELEASE" ] && [ ! -e "$RELEASE_DIR" ]; then
@@ -154,6 +159,19 @@ SNAPSHOT_PACKAGE="$SNAPSHOT_ROOT/macos/studio"
   && [ -d "$SNAPSHOT_PACKAGE/Sources" ] && [ ! -L "$SNAPSHOT_PACKAGE/Sources" ] \
   || release_input_error
 /usr/bin/find "$SNAPSHOT_ROOT" -type f -exec /bin/chmod a-w {} +
+
+VERSION="$(/usr/bin/tr -d '[:space:]' < "$SNAPSHOT_ROOT/macos/VERSION")"
+[ "$VERSION" = "1.3.0" ] || {
+  printf 'The macOS release version is invalid.\n' >&2
+  exit 1
+}
+if [ "$MODE" = "adhoc" ]; then
+  APP_NAME="CodexDreamSkinStudio-$VERSION-macos-universal-ADHOC.app"
+  DMG_NAME="CodexDreamSkinStudio-$VERSION-macos-universal-ADHOC.dmg"
+else
+  APP_NAME="CodexDreamSkinStudio.app"
+  DMG_NAME="CodexDreamSkinStudio.dmg"
+fi
 
 PUBLISH="$TMP/publish"
 APP="$PUBLISH/$APP_NAME"
@@ -341,9 +359,26 @@ fi
   cd "$PUBLISH"
   hash="$(/usr/bin/shasum -a 256 "$DMG_NAME" | /usr/bin/awk '{print $1}')"
   /usr/bin/printf '%s  %s\n' "$hash" "$DMG_NAME" > SHA256SUMS.txt
+  "$NODE" - release-manifest.json "$VERSION" "$SIGNING_MODE" "$NOTARIZED" "$STAPLED" \
+    "$DMG_NAME" "$hash" <<'NODE'
+const fs = require("node:fs");
+const [path, version, signing, notarized, stapled, file, sha256] = process.argv.slice(2);
+const manifest = {
+  schemaVersion: 1,
+  version,
+  architecture: "universal",
+  signing,
+  notarized: notarized === "true",
+  stapled: stapled === "true",
+  file,
+  sha256,
+};
+fs.writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+NODE
 )
 
 /bin/rm -rf "$OLD_RELEASE"
+/bin/mkdir -p "$RELEASE_ROOT"
 if [ -e "$RELEASE_DIR" ]; then /bin/mv "$RELEASE_DIR" "$OLD_RELEASE"; fi
 if ! /bin/mv "$PUBLISH" "$RELEASE_DIR"; then
   [ ! -e "$OLD_RELEASE" ] || /bin/mv "$OLD_RELEASE" "$RELEASE_DIR"

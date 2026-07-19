@@ -14,6 +14,7 @@ public struct StudioMenuState: Equatable, Sendable {
     public let pauseResumeOperation: EngineOperation?
     public let pauseResumeEnabled: Bool
     public let restoreEnabled: Bool
+    public let allowsTermination: Bool
     private let enabledOperations: [EngineOperation]
 
     public init(envelope: EngineEnvelope?, isBusy: Bool, presentation: StudioPresentation?) {
@@ -47,6 +48,7 @@ public struct StudioMenuState: Equatable, Sendable {
             pauseResumeEnabled = false
         }
         restoreEnabled = enabledOperations.contains(.restore)
+        allowsTermination = !isBusy
     }
 
     public func isEnabled(_ operation: EngineOperation) -> Bool {

@@ -38,8 +38,8 @@ static async Task RunChildAsync(string[] arguments)
       Console.Error.Write("DREAM_SKIN_PRO");
       Console.Error.Flush();
       await Task.Delay(50);
-      Console.Error.WriteLine("GRESS checking");
-      Console.Error.WriteLine("DREAM_SKIN_PROGRESS applying");
+      Console.Error.WriteLine("GRESS=checking");
+      Console.Error.WriteLine("DREAM_SKIN_PROGRESS=applying");
       Console.Write("child-ok");
       return;
     case "--engine-child-oversized":
@@ -111,12 +111,15 @@ Throws<ArgumentException>(() => EngineClient.BuildArguments(EngineOperation.Appl
 Throws<ArgumentException>(() => EngineClient.BuildArguments(EngineOperation.Apply, adapterPath, false, true, false, false), "Force without restart was accepted.");
 Throws<ArgumentException>(() => EngineClient.BuildArguments(EngineOperation.Apply, adapterPath, false, false, false, true), "Deep lifecycle operation was accepted.");
 Throws<ArgumentException>(() => EngineClient.BuildArguments(EngineOperation.Pause, adapterPath, true, false, false, false), "Pause authorization was accepted.");
+Assert(!MainWindow.AllowsTermination(busy: true), "Busy window termination was allowed.");
+Assert(MainWindow.AllowsTermination(busy: false), "Idle window termination was vetoed.");
 
 var progress = new List<EngineProgress>();
-EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS checking\r\nDREAM_SKIN_PROGRESS applying\r\n", new InlineProgress<EngineProgress>(progress.Add));
+EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS=checking\r\nDREAM_SKIN_PROGRESS=applying\r\n", new InlineProgress<EngineProgress>(progress.Add));
 Assert(progress.SequenceEqual(new[] { EngineProgress.Checking, EngineProgress.Applying }), "Progress chunks were not parsed.");
 Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("raw error\n", null), "Raw stderr was accepted.");
-Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS mystery\n", null), "Unknown progress was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS=mystery\n", null), "Unknown progress was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS checking\n", null), "Legacy progress was accepted.");
 
 var invalidRequest = Mutate(restartRequired, root => root["error"]!["code"] = "INVALID_REQUEST");
 foreach (var accepted in new[] { new EngineProcessResult(0, valid, ""), new EngineProcessResult(1, restartRequired, ""), new EngineProcessResult(2, invalidRequest, "") })

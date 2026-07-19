@@ -9,9 +9,9 @@ const macosRoot = path.resolve(here, "..");
 const themeConfig = path.join(macosRoot, "scripts", "theme-config.mjs");
 const tempRoot = await fs.mkdtemp(path.join("/tmp", "codex-dream-skin-config-"));
 
-function runRestore(config, backup) {
+function runThemeConfig(mode, config, backup) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [themeConfig, "restore", config, backup], {
+    const child = spawn(process.execPath, [themeConfig, mode, config, backup], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -82,7 +82,7 @@ const invalidAssignments = [
 try {
   for (const [index, assignment] of validAssignments.entries()) {
     const fixture = await writeFixture(`valid-${index}`, assignment);
-    const result = await runRestore(fixture.config, fixture.backup);
+    const result = await runThemeConfig("restore", fixture.config, fixture.backup);
     assert.equal(result.code, 0, `${assignment}\n${result.stderr}`);
     assert.equal(
       await fs.readFile(fixture.config, "utf8"),
@@ -105,7 +105,7 @@ try {
   ];
   for (const { label, config, expected } of layoutCases) {
     const fixture = await writeFixture(label, `appearanceTheme = "system"`, config);
-    const result = await runRestore(fixture.config, fixture.backup);
+    const result = await runThemeConfig("restore", fixture.config, fixture.backup);
     assert.equal(result.code, 0, `${label}\n${result.stderr}`);
     assert.equal(await fs.readFile(fixture.config, "utf8"), expected);
   }
@@ -116,11 +116,30 @@ try {
     `appearanceTheme = "system"`,
     Buffer.concat([bom, Buffer.from(`[desktop]\nappearanceTheme = "dark"\n`)]),
   );
-  const bomResult = await runRestore(bomFixture.config, bomFixture.backup);
+  const bomResult = await runThemeConfig("restore", bomFixture.config, bomFixture.backup);
   assert.equal(bomResult.code, 0, bomResult.stderr);
   assert.deepEqual(
     await fs.readFile(bomFixture.config),
     Buffer.concat([bom, Buffer.from(`[desktop]\nappearanceTheme = "system"\n`)]),
+  );
+
+  const unrelatedEscaped = await writeFixture(
+    "unrelated-escaped-keys",
+    `appearanceTheme = "system"`,
+    String.raw`"\u006dodel" = "gpt-5"
+[desktop]
+"\u006bkeep" = "value"
+`,
+  );
+  const unrelatedEscapedResult = await runThemeConfig("restore", unrelatedEscaped.config, unrelatedEscaped.backup);
+  assert.equal(unrelatedEscapedResult.code, 0, unrelatedEscapedResult.stderr);
+  assert.equal(
+    await fs.readFile(unrelatedEscaped.config, "utf8"),
+    String.raw`"\u006dodel" = "gpt-5"
+[desktop]
+"\u006bkeep" = "value"
+appearanceTheme = "system"
+`,
   );
 
   const ambiguousLayouts = [
@@ -134,6 +153,32 @@ keepMe = true
 "\u0061ppearanceTheme" = "dark"
 `,
   ];
+  const targetKeys = [
+    "appearanceTheme",
+    "appearanceLightCodeThemeId",
+    "appearanceDarkCodeThemeId",
+  ];
+  for (const key of targetKeys) {
+    ambiguousLayouts.push(
+      `[desktop]\n${key}.variant = "dark"\n`,
+      `[desktop]\n"${key}".variant = "dark"\n`,
+      `[desktop]\n${key} = { variant = "dark" }\n`,
+      `desktop.${key} = "dark"\n`,
+    );
+  }
+  ambiguousLayouts.push(
+    `desktop = { appearanceTheme = "dark" }\n`,
+    `"desktop".appearanceTheme = "dark"\n`,
+    `"desktop" = { appearanceTheme = "dark" }\n`,
+    `[[desktop]]\nappearanceTheme = "dark"\n`,
+    `[desktop.appearanceTheme]\nvariant = "dark"\n`,
+    `["desktop".appearanceTheme]\nvariant = "dark"\n`,
+    String.raw`["desk\u0074op".appearanceTheme]
+variant = "dark"
+`,
+    String.raw`"\u0064esktop".appearanceTheme = "dark"
+`,
+  );
   for (const [index, config] of ambiguousLayouts.entries()) {
     const fixture = await writeFixture(
       `ambiguous-layout-${index}`,
@@ -141,23 +186,29 @@ keepMe = true
       config,
     );
     const original = await fs.readFile(fixture.config);
-    const result = await runRestore(fixture.config, fixture.backup);
+    const originalBackup = await fs.readFile(fixture.backup);
+    const result = await runThemeConfig("restore", fixture.config, fixture.backup);
     assert.notEqual(result.code, 0, `unexpectedly accepted: ${JSON.stringify(config)}`);
     assert.deepEqual(await fs.readFile(fixture.config), original);
-    await fs.access(fixture.backup);
+    assert.deepEqual(await fs.readFile(fixture.backup), originalBackup);
+
+    const installResult = await runThemeConfig("install", fixture.config, fixture.backup);
+    assert.notEqual(installResult.code, 0, `install unexpectedly accepted: ${JSON.stringify(config)}`);
+    assert.deepEqual(await fs.readFile(fixture.config), original);
+    assert.deepEqual(await fs.readFile(fixture.backup), originalBackup);
   }
 
   for (const [index, assignment] of invalidAssignments.entries()) {
     const fixture = await writeFixture(`invalid-${index}`, assignment);
     const original = await fs.readFile(fixture.config);
-    const result = await runRestore(fixture.config, fixture.backup);
+    const result = await runThemeConfig("restore", fixture.config, fixture.backup);
     assert.notEqual(result.code, 0, `unexpectedly accepted: ${JSON.stringify(assignment)}`);
     assert.deepEqual(await fs.readFile(fixture.config), original);
     await fs.access(fixture.backup);
     await assert.rejects(fs.access(`${fixture.config}.dream-skin.lock`), { code: "ENOENT" });
   }
 
-  console.log("PASS: theme backup restore accepts only complete single-line TOML string assignments.");
+  console.log("PASS: theme config install/restore accepts only editable TOML and complete single-line string backups.");
 } finally {
   await fs.rm(tempRoot, { recursive: true, force: true });
 }

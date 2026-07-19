@@ -28,6 +28,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
+
 discover_codex_app
 require_macos_runtime
 ensure_state_root
@@ -56,7 +59,7 @@ else
   temporary="$THEME_DIR/.${image_name}.tmp.jpg"
   prepared="$THEME_DIR/$image_name"
   cleanup_temporary() { /bin/rm -f "$temporary"; }
-  trap cleanup_temporary EXIT
+  trap 'cleanup_temporary; release_lifecycle_lock' EXIT
   /usr/bin/sips -s format jpeg -s formatOptions 84 -Z 3200 "$IMAGE" --out "$temporary" >/dev/null \
     || fail "macOS could not convert the selected image. Use PNG, JPEG, HEIC, TIFF, or WebP."
   [ -s "$temporary" ] || fail "The converted image is empty."
@@ -70,7 +73,6 @@ else
     --name "$THEME_NAME" --tagline "$TAGLINE" --quote "$QUOTE" \
     --accent "$ACCENT" --secondary "$SECONDARY" --highlight "$HIGHLIGHT"
   /usr/bin/find "$THEME_DIR" -maxdepth 1 -type f -name 'background-*' ! -name "$image_name" -delete
-  trap - EXIT
 fi
 
 if [ "$APPLY_NOW" = "true" ]; then

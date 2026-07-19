@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'studio-windows.ps1')
-[Console]::Error.WriteLine('DREAM_SKIN_PROGRESS checking')
+[Console]::Error.WriteLine('DREAM_SKIN_PROGRESS=checking')
 
 $operationLock = $null
 $operationBusy = $false

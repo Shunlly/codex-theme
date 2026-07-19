@@ -13,13 +13,14 @@ FORCE_AUTHORIZED="false"
 DELETE_USER_THEMES="false"
 
 emit_invalid_request() {
-  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"INVALID_REQUEST","message":"The Studio operation is invalid.","recoveryActions":["cancel"]}}\n' "$OPERATION"
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"INVALID_REQUEST","message":"The Studio operation is invalid.","recoveryActions":["cancel"]}}\n' \
+    "$OPERATION"
   exit 2
 }
 
 case "$OPERATION" in
   preflight|install|apply|status|pause|resume|restore|verify|uninstall) ;;
-  *) emit_invalid_request ;;
+  *) OPERATION="status"; emit_invalid_request ;;
 esac
 
 while [ "$#" -gt 0 ]; do
@@ -56,6 +57,12 @@ emit_runtime_invalid() {
   exit 1
 }
 
+emit_lifecycle_error() {
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"%s","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"%s","message":"%s","recoveryActions":%s}}\n' \
+    "$OPERATION" "$1" "$2" "$3" "$4"
+  exit 1
+}
+
 if { [ "$OPERATION" = "preflight" ] || [ "$OPERATION" = "install" ]; } \
   && ! native_restore_helper_is_safe "$PROJECT_ROOT"; then
   emit_runtime_invalid
@@ -65,21 +72,16 @@ if [ "$OPERATION" = "preflight" ] || [ "$OPERATION" = "status" ]; then
   exec "$SCRIPT_DIR/status-dream-skin-macos.sh" --studio-json --deep --operation "$OPERATION"
 fi
 
-NODE_BIN="${NODE:-}"
-if [ ! -x "$NODE_BIN" ]; then
-  for candidate in \
-    "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node" \
-    "/Applications/Codex.app/Contents/Resources/cua_node/bin/node" \
-    "$HOME/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node" \
-    "$HOME/Applications/Codex.app/Contents/Resources/cua_node/bin/node"
-  do
-    if [ -x "$candidate" ]; then NODE_BIN="$candidate"; break; fi
-  done
+. "$SCRIPT_DIR/common-macos.sh"
+if ! acquire_lifecycle_lock; then
+  if lifecycle_lock_is_busy; then
+    emit_lifecycle_error busy OPERATION_BUSY \
+      "Another Studio operation is already running." '["retry","cancel"]'
+  fi
+  emit_lifecycle_error idle INTERNAL_ERROR \
+    "The Studio lifecycle lock is unavailable." '["retry","diagnostics","cancel"]'
 fi
-[ -x "$NODE_BIN" ] || {
-  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"RUNTIME_INVALID","message":"The Codex runtime is unavailable.","recoveryActions":["diagnostics","cancel"]}}\n' "$OPERATION"
-  exit 1
-}
+trap release_lifecycle_lock EXIT
 
 engine_complete() {
   local root="$1"
@@ -106,22 +108,22 @@ emit_error() {
   local message="$2"
   local recovery_json="$3"
   local restart="${4:-false}"
-  "$NODE_BIN" -e '
-    let state = { install: "not-installed", codex: "not-installed", session: "official", operation: "idle", themeName: null, requiresRestart: false, availableActions: [], verified: null };
-    try { state = JSON.parse(process.argv[1]).state || state; } catch {}
-    state.operation = "idle";
-    state.requiresRestart = process.argv[6] === "true";
-    process.stdout.write(`${JSON.stringify({ schemaVersion: 1, ok: false, operation: process.argv[2], state, error: { code: process.argv[3], message: process.argv[4], recoveryActions: JSON.parse(process.argv[5]) } })}\n`);
-  ' "${STATUS_JSON:-}" "$OPERATION" "$code" "$message" "$recovery_json" "$restart"
+  local state_json='{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null}'
+  if [ -n "${STATUS_JSON:-}" ]; then
+    state_json="$(printf '%s' "$STATUS_JSON" | /usr/bin/plutil -extract state json -o - - 2>/dev/null || printf '%s' "$state_json")"
+  fi
+  if [ "$restart" = "true" ]; then
+    state_json="$(printf '%s' "$state_json" \
+      | /usr/bin/plutil -replace requiresRestart -bool YES -o - -- - 2>/dev/null \
+      || printf '%s' '{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":true,"availableActions":[],"verified":null}')"
+  fi
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":%s,"error":{"code":"%s","message":"%s","recoveryActions":%s}}\n' \
+    "$OPERATION" "$state_json" "$code" "$message" "$recovery_json"
   exit 1
 }
 
 json_field() {
-  "$NODE_BIN" -e '
-    let value = JSON.parse(process.argv[1]);
-    for (const key of process.argv[2].split(".")) value = value?.[key];
-    if (value !== undefined && value !== null) process.stdout.write(String(value));
-  ' "$STATUS_JSON" "$1"
+  printf '%s' "$STATUS_JSON" | /usr/bin/plutil -extract "$1" raw -o - - 2>/dev/null
 }
 
 status_root="$PROJECT_ROOT"
@@ -131,23 +133,24 @@ case "$OPERATION" in
       || emit_error OPERATION_FAILED "The installed Studio engine is unavailable or out of date." '["retry","diagnostics","cancel"]'
     status_root="$INSTALL_ROOT"
     ;;
-  restore|uninstall)
-    if engine_complete "$INSTALL_ROOT"; then status_root="$INSTALL_ROOT"; fi
-    ;;
 esac
 
 set +e
 STATUS_JSON="$("$status_root/scripts/status-dream-skin-macos.sh" --studio-json --deep --operation "$OPERATION" 2>/dev/null)"
 status_exit="$?"
 set -e
-if ! "$NODE_BIN" -e 'JSON.parse(process.argv[1])' "$STATUS_JSON" >/dev/null 2>&1; then
+if ! printf '%s' "$STATUS_JSON" | /usr/bin/plutil -convert json -o - - >/dev/null 2>&1; then
   emit_error INTERNAL_ERROR "Studio status could not be read safely." '["retry","diagnostics","cancel"]'
 fi
 
 status_error="$(json_field error.code 2>/dev/null || true)"
+status_install="$(json_field state.install 2>/dev/null || true)"
 if [ "$status_exit" -ne 0 ] && [ -n "$status_error" ]; then
-  printf '%s\n' "$STATUS_JSON"
-  exit 1
+  if [ "$OPERATION" != "install" ] || [ "$status_error" != "STATE_UNSAFE" ] \
+    || [ "$status_install" != "not-installed" ]; then
+    printf '%s\n' "$STATUS_JSON"
+    exit 1
+  fi
 fi
 
 codex_state="$(json_field state.codex)"
@@ -199,7 +202,7 @@ esac
 OPERATION_LOG="$STATE_ROOT/studio-operation.log"
 : > "$OPERATION_LOG"
 /bin/chmod 600 "$OPERATION_LOG"
-printf 'DREAM_SKIN_PROGRESS %s\n' "$progress" >&2
+printf 'DREAM_SKIN_PROGRESS=%s\n' "$progress" >&2
 
 set +e
 if [ "$OPERATION" = "uninstall" ]; then
@@ -225,8 +228,10 @@ if [ "$command_exit" -ne 0 ]; then
     emit_error RESTART_REQUIRED "Codex must restart once to apply the theme." '["authorize-restart","cancel"]' true
   elif /usr/bin/grep -Eqi 'verification failed|verify failed' "$OPERATION_LOG"; then
     emit_error VERIFY_FAILED "Theme verification failed." '["retry","restore","diagnostics","cancel"]'
+  elif /usr/bin/grep -Eqi 'Node.js runtime|bundled Node|runtime.*signature|signature validation failed' "$OPERATION_LOG"; then
+    emit_error RUNTIME_INVALID "The Studio runtime is unavailable." '["diagnostics","cancel"]'
   elif /usr/bin/grep -Eqi 'remove the live skin|live skin could not be removed' "$OPERATION_LOG"; then
-    emit_error LIVE_REMOVE_FAILED "The live theme could not be removed safely." '["retry","restore","diagnostics","cancel"]'
+    emit_error LIVE_REMOVE_FAILED "The live theme could not be removed safely." '["restore","diagnostics","cancel"]'
   else
     emit_error OPERATION_FAILED "The Studio operation failed." '["retry","diagnostics","cancel"]'
   fi
@@ -274,20 +279,6 @@ case "$OPERATION" in
   apply|resume|verify)
     [ "$(json_field state.verified)" = "true" ] \
       || emit_error VERIFY_FAILED "Theme verification failed." '["retry","restore","diagnostics","cancel"]'
-    ;;
-  uninstall)
-    STATUS_JSON="$("$NODE_BIN" -e '
-      const value = JSON.parse(process.argv[1]);
-      value.ok = true;
-      value.operation = "uninstall";
-      value.state.install = "not-installed";
-      value.state.session = "official";
-      value.state.themeName = null;
-      value.state.availableActions = ["install"];
-      value.state.verified = null;
-      value.error = null;
-      process.stdout.write(JSON.stringify(value));
-    ' "$STATUS_JSON")"
     ;;
 esac
 printf '%s\n' "$STATUS_JSON"

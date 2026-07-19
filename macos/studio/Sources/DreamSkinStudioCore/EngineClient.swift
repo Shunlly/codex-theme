@@ -500,7 +500,7 @@ private final class Invocation: @unchecked Sendable {
         _ data: Data,
         onProgress: @escaping @Sendable (EngineProgress) -> Void
     ) -> Bool {
-        let prefix = "DREAM_SKIN_PROGRESS "
+        let prefix = "DREAM_SKIN_PROGRESS="
         guard let line = String(data: data, encoding: .utf8),
               line.hasPrefix(prefix),
               let progress = EngineProgress(rawValue: String(line.dropFirst(prefix.count))) else {

@@ -16,6 +16,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ "$RELOAD" = "true" ] && require_lifecycle_lock
+[ "$RELOAD" != "true" ] || trap release_lifecycle_lock EXIT
+
 discover_codex_app
 require_macos_runtime
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
@@ -26,4 +29,8 @@ verified_cdp_endpoint "$PORT" || fail "Port $PORT is not a verified Codex loopba
 ARGS=("$INJECTOR" --verify --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 30000)
 [ -n "$SCREENSHOT" ] && ARGS+=(--screenshot "$SCREENSHOT")
 [ "$RELOAD" = "true" ] && ARGS+=(--reload)
-exec "$NODE" "${ARGS[@]}"
+if [ "$RELOAD" = "true" ]; then
+  "$NODE" "${ARGS[@]}"
+else
+  exec "$NODE" "${ARGS[@]}"
+fi

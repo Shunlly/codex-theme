@@ -2,9 +2,11 @@
 
 ## Studio 日常路径
 
-下载并打开已签名 Studio artifact：macOS 使用 `CodexDreamSkinStudio.dmg`，Windows 使用 `CodexDreamSkinStudio-Setup.exe`。完成 preflight，只在 Studio 请求时授权一次重启，等待严格验证成功；**Pause** 是可逆软关闭，**Complete Restore** 会移除实时皮肤并关闭受管 CDP。
+当前仓库不声称已有通过生产信任验收的 Studio 二进制发布。生产发布完成后，macOS 在 Developer ID 签名、公证、装订和 Gatekeeper 验证全部通过后使用 `CodexDreamSkinStudio.dmg`；Windows 在 Authenticode/SmartScreen 验收后按架构使用 `CodexDreamSkinStudio-1.3.0-win-x64.exe` 或 `CodexDreamSkinStudio-1.3.0-win-arm64.exe`。完成 preflight，只在 Studio 请求时授权一次重启，等待严格验证成功；**Pause** 是可逆软关闭，**Complete Restore** 会移除实时皮肤并关闭受管 CDP。
 
 普通 macOS 不需要 Terminal、SwiftBar、Homebrew 或另装 Node；普通 Windows 不需要 PowerShell、PATH Node、管理员或手动命令。CDP 仅绑定 loopback，但没有同用户认证；Pause 不关闭 CDP，Complete Restore 会关闭。官方 Codex 文件和签名不变。
+
+本地开发构建使用 `macos/release/adhoc/CodexDreamSkinStudio-1.3.0-macos-universal-ADHOC.dmg` 或 Windows `-UNSIGNED` 后缀，不代表生产信任验收。Milestone 1 原生 Studio 仅提供生命周期操作；主题导入和切换仍属于 macOS SwiftBar/脚本或 Windows 系统托盘的高级能力。
 
 ## 高级恢复
 

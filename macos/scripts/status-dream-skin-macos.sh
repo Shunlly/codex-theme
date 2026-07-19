@@ -33,6 +33,17 @@ THEME_BACKUP_PATH="${STATE_ROOT}/theme-backup.json"
 INSTALL_ROOT="${HOME}/.codex/codex-dream-skin-studio"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 
+studio_operation_is_busy() (
+  . "$PROJECT_ROOT/scripts/common-macos.sh" >/dev/null 2>&1 || exit 1
+  lifecycle_lock_is_busy
+)
+
+if [ "$STUDIO_JSON" = "true" ] && studio_operation_is_busy; then
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"busy","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"OPERATION_BUSY","message":"Another Studio operation is already running.","recoveryActions":["retry","cancel"]}}\n' \
+    "$OPERATION"
+  exit 1
+fi
+
 PORT="9341"
 SESSION="off"
 INJECTOR_ALIVE="false"
@@ -102,6 +113,8 @@ if [ -f "$STATE_PATH" ]; then
   elif [ "${SESSION:-}" = "paused" ] && [ "${pid:-}" = "0" ]; then
     SESSION="paused"
   elif [ -n "${pid:-}" ] && [ "$pid" != "0" ]; then
+    SESSION="stale"
+  elif [ "${SESSION:-}" = "active" ]; then
     SESSION="stale"
   elif [ -z "${SESSION:-}" ]; then
     SESSION="unknown"
@@ -200,6 +213,10 @@ if [ "$STUDIO_JSON" = "true" ]; then
   fi
 
   case "$SESSION" in active|paused|stale) STUDIO_SESSION="$SESSION" ;; esac
+  if [ "$STUDIO_SESSION" = "active" ] \
+    && { [ "$INSTALL" != "ready" ] || [ "$CODEX" != "running" ]; }; then
+    STUDIO_SESSION="stale"
+  fi
   CDP_OK="false"
   if [ "$DEEP" = "true" ] && studio_strict_verify "$PORT"; then
     CDP_OK="true"

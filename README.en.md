@@ -61,8 +61,9 @@ shown below are native Codex controls.
   <sub>Dark · real injected screenshot; unsent input hidden during capture (preview only)</sub>
 </p>
 
-Studio seeds the Arina Hashimoto preset on first install. Switch themes or import
-your own UI-free wallpaper from Studio after verified success.
+Studio seeds the Arina Hashimoto preset on first install. In milestone 1, native
+Studio handles lifecycle operations only; local theme switching and import remain
+advanced macOS SwiftBar/scripts or Windows system-tray workflows.
 
 > The downloadable user source is [`docs/images/presets/romantic-rose-source.png`](./docs/images/presets/romantic-rose-source.png) (`1672 × 941`); the macOS one-click preset uses the normalized derived [`background.jpg`](./macos/presets/preset-romantic-rose/background.jpg) (`2560 × 1440`). Do not import either screenshot above: they contain real UI and are previews only. The background is a user-provided AI-generated example, not an official OpenAI/Codex visual or endorsement; confirm likeness and asset rights before redistributing it.
 
@@ -125,7 +126,11 @@ for the eight individual styles.
 
 ## Quick start
 
-1. Download the signed Studio artifact for your platform, then open or install it.
+No trusted Studio binary is currently claimed as published or accepted. The flow
+below applies after Developer ID signing/notarization/stapling/Gatekeeper or
+Authenticode/SmartScreen verification has completed and the artifacts are published.
+
+1. After a production release, download the Studio artifact for your platform, then open or install it.
 2. Complete preflight and authorize one Codex restart only when Studio asks.
 3. Wait for strict verified success. Use **Pause** for reversible soft-off and
    **Complete Restore** to remove the live skin and close managed CDP.
@@ -136,7 +141,11 @@ Ordinary Windows use needs no PowerShell, PATH Node, administrator elevation, or
 | Platform | Studio artifact | Advanced recovery |
 |------|------|------|
 | Apple Silicon / Intel Mac | `CodexDreamSkinStudio.dmg` | [`macos/README.md`](./macos/README.md) |
-| Windows | `CodexDreamSkinStudio-Setup.exe` | [`windows/SKILL.md`](./windows/SKILL.md) |
+| Windows x64 / arm64 | `CodexDreamSkinStudio-1.3.0-win-x64.exe` / `CodexDreamSkinStudio-1.3.0-win-arm64.exe` | [`windows/SKILL.md`](./windows/SKILL.md) |
+
+Local development outputs are explicitly labeled as
+`macos/release/adhoc/CodexDreamSkinStudio-1.3.0-macos-universal-ADHOC.dmg` or
+with the Windows `-UNSIGNED` suffix; neither is production trust evidence.
 
 ### Advanced recovery
 

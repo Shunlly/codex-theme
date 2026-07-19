@@ -9,8 +9,6 @@ $ErrorActionPreference = 'Stop'
 $WindowsRoot = Split-Path -Parent $PSScriptRoot
 $RepoRoot = Split-Path -Parent $WindowsRoot
 $ReleaseRoot = Join-Path $WindowsRoot 'release'
-$Version = [IO.File]::ReadAllText((Join-Path $WindowsRoot 'VERSION')).Trim()
-if ($Version -cne '1.3.0') { throw 'The Windows release version is invalid.' }
 $hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 $requiredHostArchitecture = if ($Architecture -eq 'x64') { 'X64' } else { 'Arm64' }
 if ($hostArchitecture -cne $requiredHostArchitecture) {
@@ -27,6 +25,25 @@ foreach ($tool in @($DotNet, $PowerShell, $InnoSetup)) {
 function Assert-LastExitCode {
   param([string]$Message)
   if ($LASTEXITCODE -ne 0) { throw $Message }
+}
+
+function Assert-ReleaseInputsMatchIndex {
+  param([string[]]$Paths)
+  & git -C $RepoRoot diff --quiet $IndexTree -- $Paths
+  if ($LASTEXITCODE -ne 0) { throw 'Studio build inputs must be tracked regular files matching the Git index.' }
+  $untracked = @(& git -C $RepoRoot ls-files --others --exclude-standard -- $Paths)
+  if ($LASTEXITCODE -ne 0 -or $untracked.Count -ne 0) {
+    throw 'Studio build inputs must be tracked regular files matching the Git index.'
+  }
+  $entries = @(& git -C $RepoRoot ls-files --stage -- $Paths)
+  if ($LASTEXITCODE -ne 0 -or $entries.Count -eq 0) {
+    throw 'Studio build inputs must be tracked regular files matching the Git index.'
+  }
+  foreach ($entry in $entries) {
+    if ($entry -notmatch '^(100644|100755) [0-9a-f]{40,64} 0\t') {
+      throw 'Studio build inputs must be tracked regular files matching the Git index.'
+    }
+  }
 }
 
 function Copy-ReleaseFile {
@@ -98,34 +115,118 @@ if (-not $SkipSign) {
 
 $token = "$PID-$([guid]::NewGuid().ToString('N'))"
 $TemporaryRoot = Join-Path $WindowsRoot ".studio-release-$token"
+$SnapshotTemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "codex-dream-skin-studio-release-$token"
+$SnapshotRepoRoot = Join-Path $SnapshotTemporaryRoot 'snapshot'
+$SnapshotWindowsRoot = Join-Path $SnapshotRepoRoot 'windows'
+$SnapshotIndex = Join-Path $SnapshotTemporaryRoot 'snapshot.index'
 $PublishRoot = Join-Path $TemporaryRoot 'publish'
-$StageRoot = Join-Path $PublishRoot "stage-$Version"
-$EngineRoot = Join-Path $StageRoot 'engine'
-$PublishOutput = Join-Path $TemporaryRoot 'dotnet-publish'
-$IconPath = Join-Path $TemporaryRoot 'CodexDreamSkinStudio.ico'
+$PublishOutput = Join-Path $SnapshotTemporaryRoot 'dotnet-publish'
+$TestArtifactsRoot = Join-Path $SnapshotTemporaryRoot 'test-artifacts'
+$IconPath = Join-Path $SnapshotTemporaryRoot 'CodexDreamSkinStudio.ico'
 $OldRelease = Join-Path $WindowsRoot ".release-old-$token"
 $swapped = $false
+$releaseInputPaths = @(
+  'Directory.Build.props', 'Directory.Build.targets',
+  'windows/Directory.Build.props', 'windows/Directory.Build.targets',
+  'windows/assets', 'windows/build', 'windows/scripts', 'windows/studio',
+  'windows/LICENSE', 'windows/NOTICE.md', 'windows/VERSION',
+  'studio/assets/app-icon-source.png', 'studio/protocol/README.md', 'studio/protocol/fixtures-v1.json',
+  'studio/release/check-contents.mjs', 'studio/release/allowlist-windows.json'
+)
+if (-not $SkipTests) {
+  $releaseInputPaths += @(
+    'windows/studio-tests', 'windows/tests', 'windows/SKILL.md',
+    'README.md', 'README.en.md', 'docs/platforms.md'
+  )
+}
 
 try {
-  New-Item -ItemType Directory -Path $EngineRoot -Force | Out-Null
-  New-StudioIcon -Source (Join-Path $RepoRoot 'studio\assets\app-icon-source.png') -Destination $IconPath
+  New-Item -ItemType Directory -Path $TemporaryRoot -Force | Out-Null
+  New-Item -ItemType Directory -Path $SnapshotTemporaryRoot -Force | Out-Null
+  $treeOutput = & git -C $RepoRoot write-tree
+  if ($LASTEXITCODE -ne 0) { throw 'Studio build inputs must be tracked regular files matching the Git index.' }
+  $IndexTree = "$treeOutput".Trim()
+  if ($IndexTree -notmatch '^[0-9a-f]{40,64}$') {
+    throw 'Studio build inputs must be tracked regular files matching the Git index.'
+  }
+
+  $previousGitIndexFile = $env:GIT_INDEX_FILE
+  try {
+    $env:GIT_INDEX_FILE = $SnapshotIndex
+    & git -C $RepoRoot read-tree $IndexTree
+    Assert-LastExitCode 'Studio build inputs must be tracked regular files matching the Git index.'
+    Assert-ReleaseInputsMatchIndex -Paths $releaseInputPaths
+  } finally {
+    if ($null -eq $previousGitIndexFile) { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+    else { $env:GIT_INDEX_FILE = $previousGitIndexFile }
+  }
 
   if (-not $SkipTests) {
     & $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $WindowsRoot 'tests\run-tests.ps1')
     Assert-LastExitCode 'Windows PowerShell self-checks failed.'
-    & $DotNet run --project (Join-Path $WindowsRoot 'studio-tests\CodexDreamSkinStudio.Tests.csproj') -c Release -r "win-$Architecture"
-    Assert-LastExitCode 'Windows Studio console self-checks failed.'
   }
 
-  & $DotNet publish (Join-Path $WindowsRoot 'studio\CodexDreamSkinStudio.csproj') -c Release -r "win-$Architecture" `
-    --self-contained true -o $PublishOutput /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true `
-    /p:DebugType=None /p:DebugSymbols=false /p:ContinuousIntegrationBuild=true "/p:PathMap=$RepoRoot=/_/src" `
-    "/p:ApplicationIcon=$IconPath"
-  Assert-LastExitCode 'Windows Studio publish failed.'
+  $currentTree = "$(& git -C $RepoRoot write-tree)".Trim()
+  if ($LASTEXITCODE -ne 0 -or $currentTree -cne $IndexTree) {
+    throw 'Studio build inputs must be tracked regular files matching the Git index.'
+  }
+  try {
+    $env:GIT_INDEX_FILE = $SnapshotIndex
+    Assert-ReleaseInputsMatchIndex -Paths $releaseInputPaths
+  } finally {
+    if ($null -eq $previousGitIndexFile) { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+    else { $env:GIT_INDEX_FILE = $previousGitIndexFile }
+  }
+
+  try {
+    $env:GIT_INDEX_FILE = $SnapshotIndex
+    New-Item -ItemType Directory -Path $SnapshotRepoRoot -Force | Out-Null
+    $snapshotPrefix = ($SnapshotRepoRoot -replace '\\', '/').TrimEnd('/') + '/'
+    & git -C $RepoRoot checkout-index --all --force "--prefix=$snapshotPrefix"
+    Assert-LastExitCode 'The immutable Git-index snapshot could not be created.'
+  } finally {
+    if ($null -eq $previousGitIndexFile) { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+    else { $env:GIT_INDEX_FILE = $previousGitIndexFile }
+  }
+
+  if (-not $SkipTests) {
+    Push-Location $SnapshotRepoRoot
+    try {
+      & $DotNet run --project (Join-Path $SnapshotWindowsRoot 'studio-tests\CodexDreamSkinStudio.Tests.csproj') `
+        -c Release -r "win-$Architecture" --artifacts-path $TestArtifactsRoot
+      Assert-LastExitCode 'Windows Studio console self-checks failed.'
+    } finally {
+      Pop-Location
+    }
+  }
+
+  $Version = [IO.File]::ReadAllText((Join-Path $SnapshotWindowsRoot 'VERSION')).Trim()
+  if ($Version -cne '1.3.0') { throw 'The Windows release version is invalid.' }
+  $StageRoot = Join-Path $PublishRoot "stage-$Version"
+  $EngineRoot = Join-Path $StageRoot 'engine'
+  New-Item -ItemType Directory -Path $EngineRoot -Force | Out-Null
+  New-StudioIcon -Source (Join-Path $SnapshotRepoRoot 'studio\assets\app-icon-source.png') -Destination $IconPath
+
+  Push-Location $SnapshotRepoRoot
+  try {
+    & $DotNet publish (Join-Path $SnapshotWindowsRoot 'studio\CodexDreamSkinStudio.csproj') -c Release -r "win-$Architecture" `
+      --self-contained true -o $PublishOutput /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true `
+      /p:DebugType=None /p:DebugSymbols=false /p:ContinuousIntegrationBuild=true `
+      "/p:PathMap=$SnapshotRepoRoot=/_/src" "/p:ApplicationIcon=$IconPath" "/p:Version=$Version" `
+      "/p:FileVersion=$Version.0" "/p:AssemblyVersion=$Version.0" "/p:InformationalVersion=$Version" `
+      /p:IncludeSourceRevisionInInformationalVersion=false
+    Assert-LastExitCode 'Windows Studio publish failed.'
+  } finally {
+    Pop-Location
+  }
   Copy-ReleaseFile (Join-Path $PublishOutput 'CodexDreamSkinStudio.exe') (Join-Path $StageRoot 'CodexDreamSkinStudio.exe')
+  $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $StageRoot 'CodexDreamSkinStudio.exe'))
+  if ($versionInfo.ProductVersion -cne $Version -or $versionInfo.FileVersion -cne "$Version.0") {
+    throw 'The staged Studio version metadata does not match windows/VERSION.'
+  }
 
   $runtimeRoot = Join-Path $EngineRoot 'runtime'
-  & (Join-Path $PSScriptRoot 'fetch-node-runtime.ps1') -Architecture $Architecture -Destination $runtimeRoot
+  & (Join-Path $SnapshotWindowsRoot 'scripts\fetch-node-runtime.ps1') -Architecture $Architecture -Destination $runtimeRoot
   Assert-LastExitCode 'Private Node.js runtime staging failed.'
 
   $runtimeScripts = @(
@@ -135,21 +236,21 @@ try {
     'studio-windows.ps1', 'theme-windows.ps1', 'tray-dream-skin.ps1', 'verify-dream-skin.ps1'
   )
   foreach ($script in $runtimeScripts) {
-    Copy-ReleaseFile (Join-Path $WindowsRoot "scripts\$script") (Join-Path $EngineRoot "scripts\$script")
+    Copy-ReleaseFile (Join-Path $SnapshotWindowsRoot "scripts\$script") (Join-Path $EngineRoot "scripts\$script")
   }
   New-Item -ItemType Directory -Path (Join-Path $EngineRoot 'assets') -Force | Out-Null
-  Copy-Item -Path (Join-Path $WindowsRoot 'assets\*') -Destination (Join-Path $EngineRoot 'assets') -Recurse
-  Copy-ReleaseFile (Join-Path $WindowsRoot 'LICENSE') (Join-Path $EngineRoot 'LICENSE')
-  Copy-ReleaseFile (Join-Path $WindowsRoot 'NOTICE.md') (Join-Path $EngineRoot 'NOTICE.md')
-  Copy-ReleaseFile (Join-Path $WindowsRoot 'VERSION') (Join-Path $EngineRoot 'VERSION')
-  Copy-ReleaseFile (Join-Path $RepoRoot 'studio\protocol\README.md') (Join-Path $EngineRoot 'protocol\README.md')
-  Copy-ReleaseFile (Join-Path $RepoRoot 'studio\protocol\fixtures-v1.json') (Join-Path $EngineRoot 'protocol\fixtures-v1.json')
+  Copy-Item -Path (Join-Path $SnapshotWindowsRoot 'assets\*') -Destination (Join-Path $EngineRoot 'assets') -Recurse
+  Copy-ReleaseFile (Join-Path $SnapshotWindowsRoot 'LICENSE') (Join-Path $EngineRoot 'LICENSE')
+  Copy-ReleaseFile (Join-Path $SnapshotWindowsRoot 'NOTICE.md') (Join-Path $EngineRoot 'NOTICE.md')
+  Copy-ReleaseFile (Join-Path $SnapshotWindowsRoot 'VERSION') (Join-Path $EngineRoot 'VERSION')
+  Copy-ReleaseFile (Join-Path $SnapshotRepoRoot 'studio\protocol\README.md') (Join-Path $EngineRoot 'protocol\README.md')
+  Copy-ReleaseFile (Join-Path $SnapshotRepoRoot 'studio\protocol\fixtures-v1.json') (Join-Path $EngineRoot 'protocol\fixtures-v1.json')
 
   if (-not $SkipSign) { Sign-And-Verify -Path (Join-Path $StageRoot 'CodexDreamSkinStudio.exe') -SignTool $SignTool -Thumbprint $Thumbprint }
 
   $PrivateNodePath = Join-Path $runtimeRoot 'node.exe'
-  & $PrivateNodePath (Join-Path $RepoRoot 'studio\release\check-contents.mjs') `
-    --root $StageRoot --allowlist (Join-Path $RepoRoot 'studio\release\allowlist-windows.json')
+  & $PrivateNodePath (Join-Path $SnapshotRepoRoot 'studio\release\check-contents.mjs') `
+    --root $StageRoot --allowlist (Join-Path $SnapshotRepoRoot 'studio\release\allowlist-windows.json')
   if ($LASTEXITCODE -ne 0) { throw 'Release content scan failed.' }
 
   $label = if ($SkipSign) { 'UNSIGNED' } else { $null }
@@ -157,7 +258,7 @@ try {
   $innoArguments = @(
     "/DAppVersion=`"$Version`"", "/DArchitecture=`"$Architecture`"", "/DStageRoot=`"$StageRoot`"",
     "/DOutputDir=`"$PublishRoot`"", "/DOutputBaseFilename=`"$baseName`"", "/DIconPath=`"$IconPath`"",
-    (Join-Path $WindowsRoot 'build\dream-skin-studio.iss')
+    (Join-Path $SnapshotWindowsRoot 'build\dream-skin-studio.iss')
   )
   & $InnoSetup $innoArguments
   Assert-LastExitCode 'Inno Setup compilation failed.'
@@ -196,4 +297,7 @@ try {
     [IO.Directory]::Move($OldRelease, $ReleaseRoot)
   }
   if (Test-Path -LiteralPath $TemporaryRoot) { Remove-Item -LiteralPath $TemporaryRoot -Recurse -Force }
+  if (Test-Path -LiteralPath $SnapshotTemporaryRoot) {
+    Remove-Item -LiteralPath $SnapshotTemporaryRoot -Recurse -Force
+  }
 }

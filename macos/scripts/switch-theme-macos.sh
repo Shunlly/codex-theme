@@ -20,6 +20,8 @@ case "$THEME_ID" in
   *[!A-Za-z0-9_-]*|'') fail "Theme id may contain only letters, numbers, underscores, and hyphens." ;;
 esac
 [ "${#THEME_ID}" -le 80 ] || fail "Theme id is too long."
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
 
 ensure_state_root
 THEMES_ROOT="$STATE_ROOT/themes"
@@ -40,7 +42,7 @@ progress "Switching..."
 
 stage="$(/usr/bin/mktemp -d "$STATE_ROOT/.theme-switch.XXXXXX")"
 cleanup_stage() { /bin/rm -rf "$stage"; }
-trap cleanup_stage EXIT
+trap 'cleanup_stage; release_lifecycle_lock' EXIT
 /bin/mkdir -p "$THEME_DIR"
 /bin/chmod 700 "$stage"
 # Snapshot theme.json and its referenced image from stable, no-follow file
@@ -68,7 +70,6 @@ done
 /usr/bin/find "$THEME_DIR" -maxdepth 1 -type f \
   ! -name 'theme.json' ! -name "$THEME_IMAGE" -delete
 /bin/rm -rf "$stage"
-trap - EXIT
 
 THEME_NAME="$("$NODE" -e 'try{const t=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(t.name||"")}catch{}' "$THEME_DIR/theme.json" 2>/dev/null || true)"
 [ -n "$THEME_NAME" ] || THEME_NAME="$THEME_ID"

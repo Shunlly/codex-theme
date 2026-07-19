@@ -45,4 +45,4 @@ Errors set `ok` to `false` and provide `error.code`, a short `error.message`, an
 
 ## Transport
 
-stdout is exactly one compact UTF-8 JSON object without BOM and no other output. Raw command output goes only to `studio-operation.log`. stderr emits only progress lines in the form `DREAM_SKIN_PROGRESS <value>`, where `<value>` is one of the fixed values: `checking`, `preparing`, `installing`, `launching`, `connecting`, `applying`, `verifying`, `pausing`, `restoring`, and `uninstalling`.
+stdout is exactly one compact UTF-8 JSON object without BOM and no other output. Raw command output goes only to `studio-operation.log`. stderr emits only progress lines in the form `DREAM_SKIN_PROGRESS=<value>`, where `<value>` is one of the fixed values: `checking`, `preparing`, `installing`, `launching`, `connecting`, `applying`, `verifying`, `pausing`, `restoring`, and `uninstalling`.

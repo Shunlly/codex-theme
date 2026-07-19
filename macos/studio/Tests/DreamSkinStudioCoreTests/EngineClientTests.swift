@@ -394,7 +394,7 @@ final class EngineClientTests: CoreTestCase {
 
         let stderrFixture = try makeTemporaryDirectory()
         let stderrScript = try makeExecutable(in: stderrFixture, body: """
-        /usr/bin/printf 'DREAM_SKIN_PROGRESS ' >&2
+        /usr/bin/printf 'DREAM_SKIN_PROGRESS=' >&2
         /usr/bin/head -c 1048577 /dev/zero >&2
         """)
         await assertClientError(.outputLimitExceeded) {
@@ -417,7 +417,7 @@ final class EngineClientTests: CoreTestCase {
         let script = try makeExecutable(in: fixture, body: """
         /usr/bin/printf 'DREAM_SKIN_PRO' >&2
         /bin/sleep 0.02
-        /usr/bin/printf 'GRESS checking\\nDREAM_SKIN_PROGRESS applying\\n' >&2
+        /usr/bin/printf 'GRESS=checking\\nDREAM_SKIN_PROGRESS=applying\\n' >&2
         /usr/bin/printf '%s\\n' '\(json)'
         """)
         let progress = LockedValues<EngineProgress>()
@@ -434,9 +434,9 @@ final class EngineClientTests: CoreTestCase {
 
         for stderr in [
             "unexpected text\\n",
-            "DREAM_SKIN_PROGRESS future\\n",
-            "DREAM_SKIN_PROGRESS=checking\\n",
-            "DREAM_SKIN_PROGRESS checking",
+            "DREAM_SKIN_PROGRESS=future\\n",
+            "DREAM_SKIN_PROGRESS checking\\n",
+            "DREAM_SKIN_PROGRESS=checking",
         ] {
             let invalidFixture = try makeTemporaryDirectory()
             let invalidScript = try makeExecutable(in: invalidFixture, body: """
@@ -461,7 +461,7 @@ final class EngineClientTests: CoreTestCase {
     func testDrainsLargeStdoutAndStderrConcurrently() async throws {
         let fixture = try makeTemporaryDirectory()
         let script = try makeExecutable(in: fixture, body: """
-        /usr/bin/awk 'BEGIN { for (i = 0; i < 18000; i++) print "DREAM_SKIN_PROGRESS checking" > "/dev/stderr" }' &
+        /usr/bin/awk 'BEGIN { for (i = 0; i < 18000; i++) print "DREAM_SKIN_PROGRESS=checking" > "/dev/stderr" }' &
         /usr/bin/printf '%s' '{"schemaVersion":1,"ok":true,"operation":"status","state":{"install":"ready","codex":"running","session":"active","operation":"idle","themeName":"'
         /usr/bin/head -c 600000 /dev/zero | /usr/bin/tr '\\000' x
         /usr/bin/printf '%s\\n' '","requiresRestart":false,"availableActions":["pause"],"verified":true},"error":null}'

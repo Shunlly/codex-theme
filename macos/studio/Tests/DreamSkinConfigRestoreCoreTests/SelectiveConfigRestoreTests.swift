@@ -249,6 +249,53 @@ final class SelectiveConfigRestoreTests: TestCase {
 #if !canImport(XCTest)
     @Test
 #endif
+    func testRejectsUnsupportedTargetStructuresAndDesktopAliases() throws {
+        let targetKeys = [
+            "appearanceTheme",
+            "appearanceLightCodeThemeId",
+            "appearanceDarkCodeThemeId",
+        ]
+        for key in targetKeys {
+            try assertRejected(config: "[desktop]\n\(key).variant = \"dark\"\n")
+            try assertRejected(config: "[desktop]\n\"\(key)\".variant = \"dark\"\n")
+            try assertRejected(config: "[desktop]\n\(key) = { variant = \"dark\" }\n")
+            try assertRejected(config: "desktop.\(key) = \"dark\"\n")
+        }
+
+        for config in [
+            "desktop = { appearanceTheme = \"dark\" }\n",
+            "\"desktop\".appearanceTheme = \"dark\"\n",
+            "\"desktop\" = { appearanceTheme = \"dark\" }\n",
+            "[[desktop]]\nappearanceTheme = \"dark\"\n",
+            "[desktop.appearanceTheme]\nvariant = \"dark\"\n",
+            "[\"desktop\".appearanceTheme]\nvariant = \"dark\"\n",
+            "[\"desk\\u0074op\".appearanceTheme]\nvariant = \"dark\"\n",
+            "\"\\u0064esktop\".appearanceTheme = \"dark\"\n",
+        ] {
+            try assertRejected(config: config)
+        }
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testPreservesUnrelatedEscapedKeys() throws {
+        let fixture = try makeFixture(
+            config: "\"\\u006dodel\" = \"gpt-5\"\n[desktop]\n\"\\u006bkeep\" = \"value\"\n",
+            appearanceTheme: "appearanceTheme = \"system\""
+        )
+
+        try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup)
+
+        XCTAssertEqual(
+            try String(contentsOf: fixture.config, encoding: .utf8),
+            "\"\\u006dodel\" = \"gpt-5\"\n[desktop]\n\"\\u006bkeep\" = \"value\"\nappearanceTheme = \"system\"\n"
+        )
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
     func testRejectsMultilineStrings() throws {
         try assertRejected(config: "note = \"\"\"value\ncontinued\"\"\"\n[desktop]\nkeep = true\n")
     }
@@ -610,10 +657,11 @@ final class SelectiveConfigRestoreTests: TestCase {
     private func assertRejected(configBytes: Data) throws {
         let fixture = try makeFixture(configBytes: configBytes)
         let original = try Data(contentsOf: fixture.config)
+        let originalBackup = try Data(contentsOf: fixture.backup)
 
         XCTAssertThrowsError(try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup))
         XCTAssertEqual(try Data(contentsOf: fixture.config), original)
-        XCTAssertTrue(fileManager.fileExists(atPath: fixture.backup.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.backup), originalBackup)
         XCTAssertFalse(fileManager.fileExists(atPath: fixture.config.path + ".dream-skin.lock"))
     }
 

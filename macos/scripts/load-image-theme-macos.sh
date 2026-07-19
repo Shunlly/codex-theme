@@ -34,6 +34,8 @@ done
 case "$APPEARANCE" in auto|light|dark) ;; *) fail "Invalid appearance: $APPEARANCE" ;; esac
 case "$SAFE_AREA" in auto|left|right|center|none) ;; *) fail "Invalid safe area: $SAFE_AREA" ;; esac
 case "$TASK_MODE" in auto|ambient|banner|off) ;; *) fail "Invalid task mode: $TASK_MODE" ;; esac
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
 
 ensure_state_root
 IMAGES_DIR="$STATE_ROOT/images"
@@ -82,7 +84,7 @@ image_name="background.jpg"
 temporary="$THEME_DIR/.background.$$.tmp.jpg"
 prepared="$THEME_DIR/$image_name"
 cleanup_temporary() { /bin/rm -f "$temporary"; }
-trap cleanup_temporary EXIT
+trap 'cleanup_temporary; release_lifecycle_lock' EXIT
 
 # Prefer copying already-JPEG; sips only when needed (large PNG conversion is the slow part)
 ext="$(printf '%s' "$IMAGE" | /usr/bin/tr '[:upper:]' '[:lower:]')"
@@ -117,7 +119,6 @@ theme_args=(
 [ -n "$FOCUS_Y" ] && theme_args+=(--focus-y "$FOCUS_Y")
 "$NODE" "$SCRIPT_DIR/write-theme.mjs" "${theme_args[@]}" >/dev/null
 /usr/bin/find "$THEME_DIR" -maxdepth 1 -type f -name 'background.*' ! -name "$image_name" -delete
-trap - EXIT
 
 lib_dir="$THEMES_ROOT/$theme_id"
 /bin/mkdir -p "$lib_dir"

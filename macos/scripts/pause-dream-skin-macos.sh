@@ -15,6 +15,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
+
 discover_codex_app
 require_macos_runtime
 ensure_state_root

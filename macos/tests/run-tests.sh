@@ -40,12 +40,15 @@ done
   printf 'macOS Studio bundle metadata must derive its version from VERSION.\n' >&2
   exit 1
 }
-"$NODE" - "$ROOT/../README.md" "$ROOT/../README.en.md" "$ROOT/README.md" <<'NODE'
+"$NODE" - "$ROOT/../README.md" "$ROOT/../README.en.md" "$ROOT/README.md" \
+  "$ROOT/../docs/platforms.md" "$ROOT/../windows/SKILL.md" <<'NODE'
 const fs = require("node:fs");
 const contracts = [
-  ["## 快速开始", "### 高级恢复", ["已签名 Studio artifact", "preflight", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
-  ["## Quick start", "### Advanced recovery", ["signed Studio artifact", "preflight", "authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
-  ["## Quick start (Studio)", "## Advanced recovery", ["signed Studio artifact", "preflight", "Authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+  ["## 快速开始", "### 高级恢复", ["当前仓库不声称已有通过生产信任验收的 Studio 二进制发布", "生产发布完成后", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
+  ["## Quick start", "### Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "After a production release", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+  ["## Quick start (Studio)", "## Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "Developer ID", "notarization", "CodexDreamSkinStudio.dmg", "preflight", "Authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+  ["## Studio 日常路径", "## 高级恢复", ["当前仓库不声称已有通过生产信任验收的 Studio 二进制发布", "生产发布完成后", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
+  ["## Ordinary-user workflow (Studio)", "## Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "Authenticode", "SmartScreen", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "authorize a single restart", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
 ];
 for (const [file, [quick, advanced, terms, exclusions]] of process.argv.slice(2).map((file, index) => [file, contracts[index]])) {
   const text = fs.readFileSync(file, "utf8");
@@ -56,6 +59,16 @@ for (const [file, [quick, advanced, terms, exclusions]] of process.argv.slice(2)
     throw new Error(`Studio quick-start contract is incomplete in ${file}`);
   }
 }
+const chinese = fs.readFileSync(process.argv[2], "utf8");
+const english = fs.readFileSync(process.argv[3], "utf8");
+if (chinese.includes("在 Studio 中选择主题或导入") ||
+    /Switch themes or import\s+your own UI-free wallpaper from Studio/.test(english)) {
+  throw new Error("native Studio is documented with unsupported theme selection/import UI");
+}
+for (const file of process.argv.slice(2)) {
+  const text = fs.readFileSync(file, "utf8");
+  if (text.includes("CodexDreamSkinStudio-Setup.exe")) throw new Error(`nonexistent Studio filename in ${file}`);
+}
 NODE
 
 while IFS= read -r file; do /bin/bash -n "$file"; done < <(
@@ -65,6 +78,75 @@ while IFS= read -r file; do /bin/bash -n "$file"; done < <(
 while IFS= read -r file; do "$NODE" --check "$file" >/dev/null; done < <(
   /usr/bin/find "$ROOT/scripts" "$ROOT/assets" "$ROOT/presets" -type f \( -name '*.mjs' -o -name '*.js' \) -print
 )
+
+for lifecycle_script in \
+  install-dream-skin-macos.sh \
+  start-dream-skin-macos.sh \
+  pause-dream-skin-macos.sh \
+  restore-dream-skin-macos.sh \
+  switch-theme-macos.sh \
+  load-image-theme-macos.sh \
+  customize-theme-macos.sh \
+  apply-from-menubar-macos.sh \
+  install-menubar-macos.sh; do
+  /usr/bin/grep -F -q 'require_lifecycle_lock' "$ROOT/scripts/$lifecycle_script" || {
+    printf '%s does not acquire the shared lifecycle lock.\n' "$lifecycle_script" >&2
+    exit 1
+  }
+  /usr/bin/grep -F -q 'release_lifecycle_lock' "$ROOT/scripts/$lifecycle_script" || {
+    printf '%s does not release the shared lifecycle lock.\n' "$lifecycle_script" >&2
+    exit 1
+  }
+done
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  const copyList = source.match(/for name in ([\s\S]*?); do/)?.[1] || "";
+  if (!copyList.includes("common-macos.sh")) process.exit(1);
+' "$ROOT/scripts/install-menubar-macos.sh" || {
+  printf 'Menu-bar partial upgrades do not copy the shared lifecycle helper.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q '[ "$RELOAD" = "true" ] && require_lifecycle_lock' \
+  "$ROOT/scripts/verify-dream-skin-macos.sh" || {
+  printf 'Reload verification does not acquire the shared lifecycle lock conditionally.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q 'release_lifecycle_lock' "$ROOT/scripts/verify-dream-skin-macos.sh" || {
+  printf 'Reload verification does not release the shared lifecycle lock.\n' >&2
+  exit 1
+}
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  const foreground = source.indexOf(`if [ "$FOREGROUND_INJECTOR" = "true" ]; then`);
+  const release = source.indexOf("release_lifecycle_lock", foreground);
+  const watcher = source.indexOf(`exec "$NODE" "$INJECTOR" --watch`, foreground);
+  if (foreground < 0 || release < foreground || watcher < release) process.exit(1);
+' "$ROOT/scripts/start-dream-skin-macos.sh" || {
+  printf 'Foreground watcher execution retains the lifecycle lock.\n' >&2
+  exit 1
+}
+"$NODE" -e '
+  const fs = require("node:fs");
+  const app = fs.readFileSync(process.argv[1], "utf8");
+  const statusItem = fs.readFileSync(process.argv[2], "utf8");
+  const content = fs.readFileSync(process.argv[3], "utf8");
+  const requiredApp = [
+    "@NSApplicationDelegateAdaptor(StudioAppController.self)",
+    "applicationShouldTerminate",
+    "model.menuState.allowsTermination ? .terminateNow : .terminateCancel",
+    ".disabled(!model.menuState.allowsTermination)",
+  ];
+  if (requiredApp.some((value) => !app.includes(value))) process.exit(1);
+  if (!statusItem.includes("enabled: menuState.allowsTermination")) process.exit(1);
+  if (!content.includes("WindowClosePolicy(allowsClose: model.menuState.allowsTermination)")) process.exit(1);
+  if (!content.includes("standardWindowButton(.closeButton)?.isEnabled = allowsClose")) process.exit(1);
+' \
+  "$ROOT/studio/Sources/CodexDreamSkinStudio/CodexDreamSkinStudioApp.swift" \
+  "$ROOT/studio/Sources/CodexDreamSkinStudio/StatusItemController.swift" \
+  "$ROOT/studio/Sources/CodexDreamSkinStudio/ContentView.swift" || {
+  printf 'macOS Studio quit or window-close policy is not wired to the shared busy state.\n' >&2
+  exit 1
+}
 
 if /usr/bin/grep -R -n -E 'dream-skin-skin|DREAM_SKIN_SKIN|1\.0\.0-rc2' \
   "$ROOT/scripts" "$ROOT/assets" >/dev/null; then

@@ -22,6 +22,8 @@ while [ "$#" -gt 0 ]; do
 done
 case "$PORT" in ''|*[!0-9]*) fail "Invalid port: $PORT" ;; esac
 [ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || fail "Port must be between 1024 and 65535."
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
 
 deploy_project() {
   local temporary="$INSTALL_ROOT.installing.$$"
@@ -52,6 +54,7 @@ fi
 if [ -f "$STATE_PATH" ]; then
   stop_recorded_injector \
     || fail "Could not stop the recorded injector; the installed engine was preserved."
+  /bin/rm -f "$STATE_PATH"
 fi
 
 if [ "$IN_PLACE" = "false" ] && [ "$PROJECT_ROOT" != "$INSTALL_ROOT" ]; then

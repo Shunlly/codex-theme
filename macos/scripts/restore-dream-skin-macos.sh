@@ -47,11 +47,15 @@ elif [ "$RESTART_CODEX" = "true" ]; then
 fi
 NATIVE_CONFIG_RESTORE=""
 NATIVE_CONFIG_RESTORE_IDENTITY=""
+NATIVE_CONFIG_RESTORE_ROOT=""
 if [ "$RESTORE_BASE_THEME" = "true" ] && [ "$NODE_AVAILABLE" != "true" ]; then
-  NATIVE_CONFIG_RESTORE="$INSTALL_ROOT/bin/dream-skin-config-restore"
-  NATIVE_CONFIG_RESTORE_IDENTITY="$(native_restore_helper_identity "$INSTALL_ROOT" "$NATIVE_CONFIG_RESTORE")" \
+  NATIVE_CONFIG_RESTORE_ROOT="$PROJECT_ROOT"
+  NATIVE_CONFIG_RESTORE="$NATIVE_CONFIG_RESTORE_ROOT/bin/dream-skin-config-restore"
+  NATIVE_CONFIG_RESTORE_IDENTITY="$(native_restore_helper_identity "$NATIVE_CONFIG_RESTORE_ROOT" "$NATIVE_CONFIG_RESTORE")" \
     || fail "Native config restore helper is unsafe or missing: $NATIVE_CONFIG_RESTORE"
 fi
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
   PORT="$(state_field port)" || fail "Could not read the saved CDP port; state was preserved."
 fi
@@ -108,25 +112,33 @@ if [ "$RESTORE_BASE_THEME" = "true" ]; then
     stop_codex "$FORCE_STOP_AUTHORIZED"
     CODEX_RUNNING="false"
   fi
-  if [ "$NODE_AVAILABLE" = "true" ]; then
-    "$NODE" "$SCRIPT_DIR/theme-config.mjs" restore "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+  if [ -f "$THEME_BACKUP_PATH" ]; then
+    if [ "$NODE_AVAILABLE" = "true" ]; then
+      "$NODE" "$SCRIPT_DIR/theme-config.mjs" restore "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+    else
+      [ "$(native_restore_helper_identity "$NATIVE_CONFIG_RESTORE_ROOT" "$NATIVE_CONFIG_RESTORE")" = "$NATIVE_CONFIG_RESTORE_IDENTITY" ] \
+        || fail "Native config restore helper changed before execution; restore stopped safely."
+      "$NATIVE_CONFIG_RESTORE" "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+    fi
+  elif [ -f "$STATE_PATH" ]; then
+    fail "No selective pre-install theme backup is available; restore state was preserved."
   else
-    [ "$(native_restore_helper_identity "$INSTALL_ROOT" "$NATIVE_CONFIG_RESTORE")" = "$NATIVE_CONFIG_RESTORE_IDENTITY" ] \
-      || fail "Native config restore helper changed before execution; restore stopped safely."
-    "$NATIVE_CONFIG_RESTORE" "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+    printf 'The base theme was already restored; no backup remained.\n'
   fi
 fi
+
+/bin/rm -f "$STATE_PATH"
 
 if [ "$RESTART_CODEX" = "true" ]; then
   [ "$CODEX_RUNNING" = "true" ] && stop_codex "$FORCE_STOP_AUTHORIZED"
   if [ "$CODEX_APP_VALIDATED" = "true" ]; then
-    launch_codex_normally
+    launch_codex_normally \
+      || printf 'Codex could not be reopened automatically. The restore is complete; open Codex normally.\n' >&2
   else
     printf 'Codex was not restarted because full app signature validation failed. Repair or reinstall the official Codex app, then open it again.\n'
   fi
 fi
 
-/bin/rm -f "$STATE_PATH"
 if [ "$UNINSTALL" = "true" ] && [ "${DREAM_SKIN_DEFER_UNINSTALL_DELETE:-false}" != "true" ]; then
   /bin/rm -f "$HOME/Desktop/Codex Dream Skin.command"
   /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Customize.command"

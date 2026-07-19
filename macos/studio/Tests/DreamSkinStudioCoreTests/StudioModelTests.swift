@@ -131,6 +131,7 @@ final class StudioModelTests: CoreTestCase {
 
         try await waitUntil { await engine.recordedCalls().count == 1 }
         XCTAssertTrue(model.isBusy)
+        XCTAssertFalse(model.menuState.allowsTermination)
         await model.refresh(.status)
         let callsDuringMutation = await engine.recordedCalls()
         XCTAssertEqual(callsDuringMutation.count, 1)
@@ -138,6 +139,7 @@ final class StudioModelTests: CoreTestCase {
         await engine.resumeNext()
         try await waitUntil { await engine.recordedCalls().count == 2 }
         XCTAssertTrue(model.isBusy)
+        XCTAssertFalse(model.menuState.allowsTermination)
         let callsDuringStatus = await engine.recordedCalls()
         XCTAssertEqual(callsDuringStatus, [
             call(.apply, restart: true, force: true),
@@ -147,6 +149,7 @@ final class StudioModelTests: CoreTestCase {
         await engine.resumeNext()
         await operation.value
         XCTAssertFalse(model.isBusy)
+        XCTAssertTrue(model.menuState.allowsTermination)
         XCTAssertEqual(model.envelope, status)
     }
 
@@ -661,11 +664,13 @@ final class StudioModelTests: CoreTestCase {
         XCTAssertEqual(busy.pauseResumeOperation, .pause)
         XCTAssertFalse(busy.pauseResumeEnabled)
         XCTAssertFalse(busy.restoreEnabled)
+        XCTAssertFalse(busy.allowsTermination)
 
         let idle = StudioMenuState(envelope: ready, isBusy: false, presentation: nil)
         XCTAssertTrue(idle.primaryEnabled)
         XCTAssertTrue(idle.pauseResumeEnabled)
         XCTAssertTrue(idle.restoreEnabled)
+        XCTAssertTrue(idle.allowsTermination)
 
         let confirming = StudioMenuState(
             envelope: ready,
@@ -677,6 +682,7 @@ final class StudioModelTests: CoreTestCase {
         XCTAssertEqual(confirming.pauseResumeOperation, .pause)
         XCTAssertFalse(confirming.pauseResumeEnabled)
         XCTAssertFalse(confirming.restoreEnabled)
+        XCTAssertTrue(confirming.allowsTermination)
     }
 
 #if !canImport(XCTest)

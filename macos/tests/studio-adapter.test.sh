@@ -24,9 +24,24 @@ BUILT_NATIVE_HELPER="$(/usr/bin/swift build --package-path "$SOURCE_ROOT/studio"
 /bin/cp "$BUILT_NATIVE_HELPER" "$ROOT/bin/dream-skin-config-restore"
 /bin/chmod 755 "$ROOT/bin/dream-skin-config-restore"
 RESPONDER_PID=""
+LIFECYCLE_OWNER_PID=""
+ADAPTER_LOCK_OWNER_PID=""
+LOCK_RACE_A_PID=""
+LOCK_RACE_B_PID=""
+LOCK_GATE_HOLDER_PID=""
 cleanup() {
   [ -z "$RESPONDER_PID" ] || /bin/kill -TERM "$RESPONDER_PID" 2>/dev/null || true
   [ -z "$RESPONDER_PID" ] || wait "$RESPONDER_PID" 2>/dev/null || true
+  [ -z "$LIFECYCLE_OWNER_PID" ] || /bin/kill -TERM "$LIFECYCLE_OWNER_PID" 2>/dev/null || true
+  [ -z "$LIFECYCLE_OWNER_PID" ] || wait "$LIFECYCLE_OWNER_PID" 2>/dev/null || true
+  [ -z "$ADAPTER_LOCK_OWNER_PID" ] || /bin/kill -TERM "$ADAPTER_LOCK_OWNER_PID" 2>/dev/null || true
+  [ -z "$ADAPTER_LOCK_OWNER_PID" ] || wait "$ADAPTER_LOCK_OWNER_PID" 2>/dev/null || true
+  [ -z "$LOCK_RACE_A_PID" ] || /bin/kill -TERM "$LOCK_RACE_A_PID" 2>/dev/null || true
+  [ -z "$LOCK_RACE_A_PID" ] || wait "$LOCK_RACE_A_PID" 2>/dev/null || true
+  [ -z "$LOCK_RACE_B_PID" ] || /bin/kill -TERM "$LOCK_RACE_B_PID" 2>/dev/null || true
+  [ -z "$LOCK_RACE_B_PID" ] || wait "$LOCK_RACE_B_PID" 2>/dev/null || true
+  [ -z "$LOCK_GATE_HOLDER_PID" ] || /bin/kill -TERM "$LOCK_GATE_HOLDER_PID" 2>/dev/null || true
+  [ -z "$LOCK_GATE_HOLDER_PID" ] || wait "$LOCK_GATE_HOLDER_PID" 2>/dev/null || true
   /bin/rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -84,6 +99,359 @@ WATCHER_PID="$(HOME="$WATCHER_HOME" run_watcher_fixture)"
 [ "$WATCHER_PID" = "4242" ] || { printf 'Legacy watcher fallback did not return its launchctl PID.\n' >&2; exit 1; }
 /usr/bin/grep -q '^launchctl submit ' "$WATCHER_MARKER"
 
+# One per-user lifecycle owner must serialize direct callers, allow only its
+# verified descendants to reuse the lock, and project contention read-only.
+LOCK_FIXTURE="$TMP/lifecycle-lock"
+LOCK_HOME="$LOCK_FIXTURE/home"
+LOCK_READY="$LOCK_FIXTURE/ready"
+LOCK_RELEASE="$LOCK_FIXTURE/release"
+LOCK_CHILD="$LOCK_FIXTURE/child"
+LOCK_OWNER_PID_FILE="$LOCK_FIXTURE/owner-pid"
+LOCK_OWNER_START_FILE="$LOCK_FIXTURE/owner-start"
+LOCK_STATE="$LOCK_HOME/Library/Application Support/CodexDreamSkinStudio"
+/bin/mkdir -p "$LOCK_FIXTURE" "$LOCK_HOME/.codex" "$LOCK_STATE"
+/usr/bin/printf 'config sentinel\n' > "$LOCK_HOME/.codex/config.toml"
+/usr/bin/printf 'state sentinel\n' > "$LOCK_STATE/state.json"
+/usr/bin/sed > "$LOCK_FIXTURE/owner.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+. "$1/scripts/common-macos.sh"
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
+if [ "${7:-}" != "reentered" ]; then
+  exec "$0" "$1" "$2" "$3" "$4" "$5" "$6" reentered
+fi
+[ "$LIFECYCLE_LOCK_OWNED" = "true" ]
+[ "$LIFECYCLE_LOCK_BORROWED" = "false" ]
+printf '%s\n' "$DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID" > "$5"
+printf '%s\n' "$DREAM_SKIN_LIFECYCLE_LOCK_OWNER_STARTED_AT" > "$6"
+/bin/bash -c '
+  set -euo pipefail
+  . "$1/scripts/common-macos.sh"
+  require_lifecycle_lock
+  [ "$LIFECYCLE_LOCK_BORROWED" = "true" ]
+  : > "$2"
+' _ "$1" "$4"
+: > "$2"
+while [ ! -e "$3" ]; do /bin/sleep 0.02; done
+STUB
+/bin/chmod 755 "$LOCK_FIXTURE/owner.sh"
+/usr/bin/env HOME="$LOCK_HOME" TZ=UTC "$LOCK_FIXTURE/owner.sh" \
+  "$ROOT" "$LOCK_READY" "$LOCK_RELEASE" "$LOCK_CHILD" \
+  "$LOCK_OWNER_PID_FILE" "$LOCK_OWNER_START_FILE" &
+LIFECYCLE_OWNER_PID="$!"
+deadline=$((SECONDS + 5))
+while [ ! -e "$LOCK_READY" ] && /bin/kill -0 "$LIFECYCLE_OWNER_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do
+  /bin/sleep 0.02
+done
+[ -e "$LOCK_READY" ] && [ -e "$LOCK_CHILD" ] || {
+  printf 'Lifecycle owner or verified child did not acquire the shared lock.\n' >&2
+  exit 1
+}
+
+set +e
+/usr/bin/env HOME="$LOCK_HOME" TZ=Asia/Shanghai \
+  DREAM_SKIN_LIFECYCLE_LOCK_OWNER_PID="$(/bin/cat "$LOCK_OWNER_PID_FILE")" \
+  DREAM_SKIN_LIFECYCLE_LOCK_OWNER_STARTED_AT="$(/bin/cat "$LOCK_OWNER_START_FILE")" \
+  /bin/bash -c '
+    . "$1/scripts/common-macos.sh"
+    acquire_lifecycle_lock
+  ' _ "$ROOT"
+SPOOF_EXIT="$?"
+set -e
+[ "$SPOOF_EXIT" -ne 0 ] || { printf 'Unrelated process reused a forged lifecycle handoff.\n' >&2; exit 1; }
+
+LOCK_CONFIG_BEFORE="$(/usr/bin/shasum -a 256 "$LOCK_HOME/.codex/config.toml" "$LOCK_STATE/state.json")"
+set +e
+LOCK_STATUS_JSON="$(/usr/bin/env HOME="$LOCK_HOME" TZ=Asia/Shanghai \
+  "$ROOT/scripts/status-dream-skin-macos.sh" --studio-json --operation apply)"
+LOCK_STATUS_EXIT="$?"
+set -e
+[ "$LOCK_STATUS_EXIT" -eq 1 ] || { printf 'Busy status did not exit 1.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.operation !== "apply" || value.ok || value.state?.operation !== "busy") process.exit(1);
+  if (value.state.availableActions.length !== 0 || value.error?.code !== "OPERATION_BUSY") process.exit(1);
+  if (value.error.recoveryActions.join(",") !== "retry,cancel") process.exit(1);
+' "$LOCK_STATUS_JSON"
+[ "$LOCK_CONFIG_BEFORE" = "$(/usr/bin/shasum -a 256 "$LOCK_HOME/.codex/config.toml" "$LOCK_STATE/state.json")" ] \
+  || { printf 'Busy status changed config or lifecycle state.\n' >&2; exit 1; }
+
+: > "$LOCK_RELEASE"
+wait "$LIFECYCLE_OWNER_PID"
+LIFECYCLE_OWNER_PID=""
+[ ! -e "$LOCK_STATE/lifecycle.lock" ] || { printf 'Lifecycle owner did not release its lock.\n' >&2; exit 1; }
+
+/bin/rm -f "$LOCK_READY" "$LOCK_RELEASE" "$LOCK_CHILD"
+/usr/bin/env HOME="$LOCK_HOME" TZ=UTC "$LOCK_FIXTURE/owner.sh" \
+  "$ROOT" "$LOCK_READY" "$LOCK_RELEASE" "$LOCK_CHILD" \
+  "$LOCK_OWNER_PID_FILE" "$LOCK_OWNER_START_FILE" &
+LIFECYCLE_OWNER_PID="$!"
+deadline=$((SECONDS + 5))
+while [ ! -e "$LOCK_READY" ] && /bin/kill -0 "$LIFECYCLE_OWNER_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do
+  /bin/sleep 0.02
+done
+[ -e "$LOCK_READY" ] || { printf 'Stale-owner fixture did not acquire the lifecycle lock.\n' >&2; exit 1; }
+/bin/kill -KILL "$LIFECYCLE_OWNER_PID"
+set +e
+wait "$LIFECYCLE_OWNER_PID" 2>/dev/null
+set -e
+LIFECYCLE_OWNER_PID=""
+[ -e "$LOCK_STATE/lifecycle.lock" ] || { printf 'Killed owner did not leave a stale lifecycle lock.\n' >&2; exit 1; }
+/usr/bin/env HOME="$LOCK_HOME" TZ=Asia/Shanghai /bin/bash -c '
+  set -euo pipefail
+  . "$1/scripts/common-macos.sh"
+  require_lifecycle_lock
+  [ "$LIFECYCLE_LOCK_OWNED" = "true" ]
+  release_lifecycle_lock
+' _ "$ROOT"
+[ ! -e "$LOCK_STATE/lifecycle.lock" ] || { printf 'Stale lifecycle owner was not recovered.\n' >&2; exit 1; }
+
+LOCK_GATE_READY="$LOCK_FIXTURE/gate-ready"
+LOCK_GATE_RELEASE="$LOCK_FIXTURE/gate-release"
+/bin/rm -f "$LOCK_READY" "$LOCK_RELEASE" "$LOCK_CHILD" "$LOCK_GATE_READY" "$LOCK_GATE_RELEASE"
+/usr/bin/env HOME="$LOCK_HOME" TZ=UTC "$LOCK_FIXTURE/owner.sh" \
+  "$ROOT" "$LOCK_READY" "$LOCK_RELEASE" "$LOCK_CHILD" \
+  "$LOCK_OWNER_PID_FILE" "$LOCK_OWNER_START_FILE" &
+LIFECYCLE_OWNER_PID="$!"
+deadline=$((SECONDS + 5))
+while [ ! -e "$LOCK_READY" ] && /bin/kill -0 "$LIFECYCLE_OWNER_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.02; done
+[ -e "$LOCK_READY" ] || { printf 'Release-contention owner did not acquire the lifecycle lock.\n' >&2; exit 1; }
+/usr/bin/lockf -s -t 0 -k "$LOCK_STATE/lifecycle.lock.gate" /bin/bash -c '
+  : > "$1"
+  while [ ! -e "$2" ]; do /bin/sleep 0.02; done
+' _ "$LOCK_GATE_READY" "$LOCK_GATE_RELEASE" &
+LOCK_GATE_HOLDER_PID="$!"
+deadline=$((SECONDS + 5))
+while [ ! -e "$LOCK_GATE_READY" ] && /bin/kill -0 "$LOCK_GATE_HOLDER_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.02; done
+[ -e "$LOCK_GATE_READY" ] || { printf 'Release-contention fixture did not hold the transition gate.\n' >&2; exit 1; }
+: > "$LOCK_RELEASE"
+/bin/sleep 0.2
+: > "$LOCK_GATE_RELEASE"
+wait "$LOCK_GATE_HOLDER_PID"
+LOCK_GATE_HOLDER_PID=""
+wait "$LIFECYCLE_OWNER_PID"
+LIFECYCLE_OWNER_PID=""
+[ ! -e "$LOCK_STATE/lifecycle.lock" ] || {
+  printf 'Lifecycle release silently skipped owner removal during gate contention.\n' >&2
+  exit 1
+}
+
+LOCK_RACE="$LOCK_FIXTURE/publication-race"
+LOCK_RACE_PAUSED="$LOCK_RACE/a-paused"
+LOCK_RACE_CONTINUE="$LOCK_RACE/a-continue"
+LOCK_RACE_A_RESULT="$LOCK_RACE/a-result"
+LOCK_RACE_B_RESULT="$LOCK_RACE/b-result"
+LOCK_RACE_A_FINISH="$LOCK_RACE/a-finish"
+LOCK_RACE_B_FINISH="$LOCK_RACE/b-finish"
+/bin/mkdir -p "$LOCK_RACE"
+/usr/bin/sed > "$LOCK_RACE/owner.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+role="$1"
+root="$2"
+paused="$3"
+continue_path="$4"
+result="$5"
+finish="$6"
+acquired="false"
+. "$root/scripts/common-macos.sh"
+lifecycle_lock_is_recent() { return 1; }
+lifecycle_process_started_at() {
+  if [ "$role" = "A" ] && [ ! -e "$paused" ]; then
+    : > "$paused"
+    while [ ! -e "$continue_path" ]; do /bin/sleep 0.02; done
+  fi
+  LC_ALL=C TZ=UTC /bin/ps -p "$1" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}'
+}
+trap '[ "$acquired" != "true" ] || release_lifecycle_lock' EXIT
+trap 'exit 0' TERM
+if acquire_lifecycle_lock; then
+  acquired="true"
+  printf 'success\n%s\n%s\n' "$LIFECYCLE_LOCK_OWNER_PID" \
+    "$LIFECYCLE_LOCK_OWNER_STARTED_AT" > "$result"
+else
+  printf 'failure\n' > "$result"
+fi
+while [ ! -e "$finish" ]; do /bin/sleep 0.02; done
+STUB
+/bin/chmod 755 "$LOCK_RACE/owner.sh"
+
+/usr/bin/env HOME="$LOCK_HOME" "$LOCK_RACE/owner.sh" A "$ROOT" \
+  "$LOCK_RACE_PAUSED" "$LOCK_RACE_CONTINUE" "$LOCK_RACE_A_RESULT" \
+  "$LOCK_RACE_A_FINISH" &
+LOCK_RACE_A_PID="$!"
+deadline=$((SECONDS + 5))
+while [ ! -e "$LOCK_RACE_PAUSED" ] && /bin/kill -0 "$LOCK_RACE_A_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.02; done
+[ -e "$LOCK_RACE_PAUSED" ] || { printf 'First lock creator did not pause before owner publication.\n' >&2; exit 1; }
+
+/usr/bin/env HOME="$LOCK_HOME" "$LOCK_RACE/owner.sh" B "$ROOT" \
+  "$LOCK_RACE_PAUSED" "$LOCK_RACE_CONTINUE" "$LOCK_RACE_B_RESULT" \
+  "$LOCK_RACE_B_FINISH" &
+LOCK_RACE_B_PID="$!"
+deadline=$((SECONDS + 5))
+while [ ! -e "$LOCK_RACE_B_RESULT" ] && /bin/kill -0 "$LOCK_RACE_B_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.02; done
+[ -e "$LOCK_RACE_B_RESULT" ] || { printf 'Contending lock creator did not return.\n' >&2; exit 1; }
+
+: > "$LOCK_RACE_CONTINUE"
+deadline=$((SECONDS + 5))
+while [ ! -e "$LOCK_RACE_A_RESULT" ] && /bin/kill -0 "$LOCK_RACE_A_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.02; done
+[ -e "$LOCK_RACE_A_RESULT" ] || { printf 'Paused lock creator did not return.\n' >&2; exit 1; }
+LOCK_RACE_A_STATUS="$(/usr/bin/sed -n '1p' "$LOCK_RACE_A_RESULT")"
+LOCK_RACE_B_STATUS="$(/usr/bin/sed -n '1p' "$LOCK_RACE_B_RESULT")"
+case "$LOCK_RACE_A_STATUS:$LOCK_RACE_B_STATUS" in
+  success:failure) LOCK_RACE_WINNER_RESULT="$LOCK_RACE_A_RESULT" ;;
+  failure:success) LOCK_RACE_WINNER_RESULT="$LOCK_RACE_B_RESULT" ;;
+  *)
+  printf 'Concurrent owner publication did not produce exactly one lock owner.\n' >&2
+  exit 1
+  ;;
+esac
+LOCK_RACE_OWNER_PID="$(/usr/bin/sed -n '2p' "$LOCK_RACE_WINNER_RESULT")"
+LOCK_RACE_OWNER_START="$(/usr/bin/sed -n '3p' "$LOCK_RACE_WINNER_RESULT")"
+/usr/bin/env HOME="$LOCK_HOME" /bin/bash -c '
+  set -euo pipefail
+  . "$1/scripts/common-macos.sh"
+  read_lifecycle_lock_owner
+  [ "$LIFECYCLE_RECORDED_OWNER_PID" = "$2" ]
+  [ "$LIFECYCLE_RECORDED_OWNER_STARTED_AT" = "$3" ]
+  lifecycle_lock_is_busy
+' _ "$ROOT" "$LOCK_RACE_OWNER_PID" "$LOCK_RACE_OWNER_START" || {
+  printf 'Winning owner was not preserved after concurrent publication.\n' >&2
+  exit 1
+}
+: > "$LOCK_RACE_A_FINISH"
+: > "$LOCK_RACE_B_FINISH"
+wait "$LOCK_RACE_A_PID"
+LOCK_RACE_A_PID=""
+wait "$LOCK_RACE_B_PID"
+LOCK_RACE_B_PID=""
+/usr/bin/env HOME="$LOCK_HOME" /bin/bash -c '
+  . "$1/scripts/common-macos.sh"
+  ! lifecycle_lock_is_busy
+' _ "$ROOT" || { printf 'Publication-race fixture did not release the lifecycle lock.\n' >&2; exit 1; }
+
+ADAPTER_LOCK_FIXTURE="$TMP/adapter-lifecycle-lock"
+ADAPTER_LOCK_HOME="$ADAPTER_LOCK_FIXTURE/home"
+ADAPTER_LOCK_ROOT="$ADAPTER_LOCK_FIXTURE/engine"
+ADAPTER_LOCK_STATE="$ADAPTER_LOCK_HOME/Library/Application Support/CodexDreamSkinStudio"
+ADAPTER_LOCK_ENTERED="$ADAPTER_LOCK_FIXTURE/entered"
+ADAPTER_LOCK_RELEASE="$ADAPTER_LOCK_FIXTURE/release"
+ADAPTER_LOCK_CHILDREN="$ADAPTER_LOCK_FIXTURE/children"
+/bin/mkdir -p "$ADAPTER_LOCK_ROOT/bin" "$ADAPTER_LOCK_ROOT/scripts" \
+  "$ADAPTER_LOCK_HOME/.codex" "$ADAPTER_LOCK_STATE"
+/bin/cp "$ROOT/VERSION" "$ADAPTER_LOCK_ROOT/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$ADAPTER_LOCK_ROOT/bin/"
+/bin/cp "$ROOT/scripts/studio-adapter-macos.sh" "$ROOT/scripts/common-macos.sh" \
+  "$ADAPTER_LOCK_ROOT/scripts/"
+/usr/bin/sed "s|__ENTERED__|$ADAPTER_LOCK_ENTERED|g; s|__RELEASE__|$ADAPTER_LOCK_RELEASE|g; s|__CHILDREN__|$ADAPTER_LOCK_CHILDREN|g" \
+  > "$ADAPTER_LOCK_ROOT/scripts/install-dream-skin-macos.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd -P)/common-macos.sh"
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
+[ "$LIFECYCLE_LOCK_BORROWED" = "true" ] || exit 90
+printf 'child\n' >> "__CHILDREN__"
+: > "__ENTERED__"
+while [ ! -e "__RELEASE__" ]; do /bin/sleep 0.02; done
+STUB
+/usr/bin/sed > "$ADAPTER_LOCK_ROOT/scripts/status-dream-skin-macos.sh" <<'STUB'
+#!/bin/bash
+operation=status
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--operation" ]; then operation="$2"; shift 2; else shift; fi
+done
+. "$(cd "$(dirname "$0")" && pwd -P)/common-macos.sh"
+if lifecycle_lock_is_busy; then
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"busy","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"OPERATION_BUSY","message":"Another Studio operation is already running.","recoveryActions":["retry","cancel"]}}\n' "$operation"
+  exit 1
+fi
+printf '{"schemaVersion":1,"ok":true,"operation":"%s","state":{"install":"not-installed","codex":"stopped","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":["install"],"verified":null},"error":null}\n' "$operation"
+STUB
+/bin/chmod 755 "$ADAPTER_LOCK_ROOT/bin/dream-skin-config-restore" \
+  "$ADAPTER_LOCK_ROOT/scripts/"*.sh
+/usr/bin/printf 'config sentinel\n' > "$ADAPTER_LOCK_HOME/.codex/config.toml"
+/usr/bin/printf 'state sentinel\n' > "$ADAPTER_LOCK_STATE/state.json"
+
+/usr/bin/env HOME="$ADAPTER_LOCK_HOME" \
+  "$ADAPTER_LOCK_ROOT/scripts/studio-adapter-macos.sh" install \
+  > "$ADAPTER_LOCK_FIXTURE/owner.json" 2> "$ADAPTER_LOCK_FIXTURE/owner.stderr" &
+ADAPTER_LOCK_OWNER_PID="$!"
+deadline=$((SECONDS + 5))
+while [ ! -e "$ADAPTER_LOCK_ENTERED" ] && /bin/kill -0 "$ADAPTER_LOCK_OWNER_PID" 2>/dev/null \
+  && [ "$SECONDS" -lt "$deadline" ]; do
+  /bin/sleep 0.02
+done
+[ -e "$ADAPTER_LOCK_ENTERED" ] || {
+  printf 'Adapter lifecycle child did not enter under the verified ownership handoff.\n' >&2
+  exit 1
+}
+
+ADAPTER_PROTECTED_BEFORE="$(/usr/bin/shasum -a 256 \
+  "$ADAPTER_LOCK_HOME/.codex/config.toml" "$ADAPTER_LOCK_STATE/state.json")"
+set +e
+/usr/bin/env HOME="$ADAPTER_LOCK_HOME" \
+  "$ADAPTER_LOCK_ROOT/scripts/studio-adapter-macos.sh" install \
+  > "$ADAPTER_LOCK_FIXTURE/contender.json" 2> "$ADAPTER_LOCK_FIXTURE/contender.stderr"
+ADAPTER_CONTENDER_EXIT="$?"
+set -e
+[ "$ADAPTER_CONTENDER_EXIT" -eq 1 ] || { printf 'Contending adapter did not exit 1.\n' >&2; exit 1; }
+"$NODE" -e '
+  const lines = require("node:fs").readFileSync(process.argv[1], "utf8").trim().split("\n");
+  if (lines.length !== 1) process.exit(1);
+  const value = JSON.parse(lines[0]);
+  if (value.operation !== "install" || value.ok || value.state.operation !== "busy") process.exit(1);
+  if (value.state.availableActions.length !== 0 || value.error?.code !== "OPERATION_BUSY") process.exit(1);
+' "$ADAPTER_LOCK_FIXTURE/contender.json"
+[ "$ADAPTER_PROTECTED_BEFORE" = "$(/usr/bin/shasum -a 256 \
+  "$ADAPTER_LOCK_HOME/.codex/config.toml" "$ADAPTER_LOCK_STATE/state.json")" ] \
+  || { printf 'Contending adapter changed config or lifecycle state.\n' >&2; exit 1; }
+[ "$(/usr/bin/wc -l < "$ADAPTER_LOCK_CHILDREN" | /usr/bin/tr -d ' ')" = "1" ] \
+  || { printf 'Contending adapter invoked a lifecycle child.\n' >&2; exit 1; }
+
+: > "$ADAPTER_LOCK_RELEASE"
+wait "$ADAPTER_LOCK_OWNER_PID"
+ADAPTER_LOCK_OWNER_PID=""
+"$NODE" -e '
+  const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (!value.ok || value.operation !== "install") process.exit(1);
+' "$ADAPTER_LOCK_FIXTURE/owner.json"
+[ ! -e "$ADAPTER_LOCK_STATE/lifecycle.lock" ] || { printf 'Adapter did not release its lifecycle lock.\n' >&2; exit 1; }
+
+ADAPTER_LOCK_FAILURE_HOME="$ADAPTER_LOCK_FIXTURE/failure-home"
+ADAPTER_LOCK_FAILURE_STATE="$ADAPTER_LOCK_FAILURE_HOME/Library/Application Support/CodexDreamSkinStudio"
+/bin/mkdir -p "$ADAPTER_LOCK_FAILURE_HOME/Library/Application Support"
+/usr/bin/printf 'state-root sentinel\n' > "$ADAPTER_LOCK_FAILURE_STATE"
+/bin/chmod 600 "$ADAPTER_LOCK_FAILURE_STATE"
+ADAPTER_LOCK_FAILURE_BEFORE="$(/usr/bin/shasum -a 256 "$ADAPTER_LOCK_FAILURE_STATE"):$((8#$(/usr/bin/stat -f '%Lp' "$ADAPTER_LOCK_FAILURE_STATE")))"
+set +e
+/usr/bin/env HOME="$ADAPTER_LOCK_FAILURE_HOME" \
+  "$ADAPTER_LOCK_ROOT/scripts/studio-adapter-macos.sh" install \
+  > "$ADAPTER_LOCK_FIXTURE/failure.json" 2> "$ADAPTER_LOCK_FIXTURE/failure.stderr"
+ADAPTER_LOCK_FAILURE_EXIT="$?"
+set -e
+[ "$ADAPTER_LOCK_FAILURE_EXIT" -eq 1 ] || {
+  printf 'Non-contention lock acquisition failure did not exit 1.\n' >&2
+  exit 1
+}
+"$NODE" -e '
+  const lines = require("node:fs").readFileSync(process.argv[1], "utf8").trim().split("\n");
+  if (lines.length !== 1) process.exit(1);
+  const value = JSON.parse(lines[0]);
+  if (value.operation !== "install" || value.ok || value.state.operation !== "idle") process.exit(1);
+  if (value.state.availableActions.length !== 0 || value.error?.code !== "INTERNAL_ERROR") process.exit(1);
+' "$ADAPTER_LOCK_FIXTURE/failure.json"
+[ "$ADAPTER_LOCK_FAILURE_BEFORE" = "$(/usr/bin/shasum -a 256 "$ADAPTER_LOCK_FAILURE_STATE"):$((8#$(/usr/bin/stat -f '%Lp' "$ADAPTER_LOCK_FAILURE_STATE")))" ] \
+  || { printf 'Failed lock acquisition changed the state-root sentinel.\n' >&2; exit 1; }
+
 snapshot() {
   /usr/bin/find "$TEST_HOME" -print0 | /usr/bin/sort -z | while IFS= read -r -d '' path; do
     if [ -f "$path" ]; then
@@ -121,11 +489,23 @@ assert_error() {
   "$NODE" -e 'if (JSON.parse(process.argv[1]).error?.code !== process.argv[2]) process.exit(1)' "$ADAPTER_JSON" "$code"
 }
 
+assert_operation() {
+  "$NODE" -e 'if (JSON.parse(process.argv[1]).operation !== process.argv[2]) process.exit(1)' \
+    "$ADAPTER_JSON" "$1"
+}
+
 assert_recovery() {
   "$NODE" -e '
     const actions = JSON.parse(process.argv[1]).error?.recoveryActions || [];
     if (!actions.includes(process.argv[2]) || (process.argv[3] && actions.includes(process.argv[3]))) process.exit(1);
   ' "$ADAPTER_JSON" "$1" "${2:-}"
+}
+
+assert_requires_restart() {
+  "$NODE" -e '
+    const value = JSON.parse(process.argv[1]);
+    if (value.state?.requiresRestart !== true) process.exit(1);
+  ' "$ADAPTER_JSON"
 }
 
 VALID_NATIVE_HELPER="$TMP/valid-dream-skin-config-restore"
@@ -236,17 +616,33 @@ run_adapter status
   if (!value.ok || value.state.install !== "ready" || value.state.verified !== null) process.exit(1);
 ' "$ADAPTER_JSON"
 
-INVALID_JSON="$TMP/invalid.json"
-if /usr/bin/env HOME="$TEST_HOME" "$ROOT/scripts/studio-adapter-macos.sh" nope >"$INVALID_JSON"; then
-  printf 'unknown operation unexpectedly succeeded.\n' >&2
-  exit 1
-else
-  [ "$?" -eq 2 ] || { printf 'unknown operation did not exit 2.\n' >&2; exit 1; }
-fi
+/usr/bin/printf '{"port":%s,"session":"active","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 1 ] || { printf 'incomplete active status did not fail safely.\n' >&2; exit 1; }
 "$NODE" -e '
-  const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-  if (value.error?.code !== "INVALID_REQUEST") process.exit(1);
-' "$INVALID_JSON"
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.session !== "stale" || value.error?.code !== "STATE_UNSAFE") process.exit(1);
+' "$ADAPTER_JSON"
+/usr/bin/printf '{"port":%s,"session":"paused","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
+
+invalid_index=0
+for invalid_operation in nope 'bad"quote' $'bad\nline' $'bad\xff'; do
+  INVALID_JSON="$TMP/invalid-$invalid_index.json"
+  set +e
+  /usr/bin/env HOME="$TEST_HOME" "$ROOT/scripts/studio-adapter-macos.sh" "$invalid_operation" >"$INVALID_JSON"
+  invalid_exit="$?"
+  set -e
+  [ "$invalid_exit" -eq 2 ] || { printf 'unknown operation did not exit 2.\n' >&2; exit 1; }
+  "$NODE" -e '
+    const bytes = require("node:fs").readFileSync(process.argv[1]);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const lines = text.split("\n").filter(Boolean);
+    if (lines.length !== 1) process.exit(1);
+    const value = JSON.parse(lines[0]);
+    if (value.operation !== "status" || value.error?.code !== "INVALID_REQUEST") process.exit(1);
+  ' "$INVALID_JSON"
+  invalid_index=$((invalid_index + 1))
+done
 
 FIXTURE="$TMP/lifecycle"
 FIXTURE_HOME="$FIXTURE/home"
@@ -303,15 +699,17 @@ STUB
 }
 
 for root in "$BUNDLED" "$INSTALLED"; do
-  for script in install-dream-skin-macos.sh start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh common-macos.sh theme-config.mjs injector.mjs; do
+  for script in install-dream-skin-macos.sh start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh theme-config.mjs injector.mjs; do
     make_stub "$root/scripts/$script"
   done
+  /bin/cp "$ROOT/scripts/common-macos.sh" "$root/scripts/common-macos.sh"
 done
 
 run_fixture_adapter() {
   TEST_HOME="$FIXTURE_HOME"
+  ADAPTER_STDERR_FILE="$FIXTURE/adapter.stderr"
   set +e
-  ADAPTER_JSON="$(/usr/bin/env HOME="$TEST_HOME" "$BUNDLED/scripts/studio-adapter-macos.sh" "$@")"
+  ADAPTER_JSON="$(/usr/bin/env HOME="$TEST_HOME" "$BUNDLED/scripts/studio-adapter-macos.sh" "$@" 2>"$ADAPTER_STDERR_FILE")"
   ADAPTER_EXIT="$?"
   set -e
 }
@@ -338,12 +736,20 @@ run_fixture_adapter apply --restart-authorized --force-authorized
 : > "$MARKER"
 run_fixture_adapter apply --force-authorized
 assert_error INVALID_REQUEST 2
+assert_operation apply
 [ ! -s "$MARKER" ] || { printf 'invalid force authorization invoked a script.\n' >&2; exit 1; }
 
 : > "$MARKER"
 run_fixture_adapter pause --delete-user-themes
 assert_error INVALID_REQUEST 2
+assert_operation pause
 [ ! -s "$MARKER" ] || { printf 'invalid theme deletion invoked a script.\n' >&2; exit 1; }
+
+: > "$MARKER"
+run_fixture_adapter verify --unknown-flag
+assert_error INVALID_REQUEST 2
+assert_operation verify
+[ ! -s "$MARKER" ] || { printf 'invalid verify flag invoked a script.\n' >&2; exit 1; }
 
 # Authorization flags are accepted request metadata, but pause and verify
 # must never receive force-stop authority they cannot use.
@@ -353,6 +759,15 @@ run_fixture_adapter pause --restart-authorized --force-authorized
 [ "$ADAPTER_EXIT" -eq 0 ] || { printf 'authorized pause failed.\n' >&2; exit 1; }
 /usr/bin/grep -Fx 'pause-dream-skin-macos.sh ' "$MARKER" >/dev/null
 ! /usr/bin/grep -q -- '--force-stop-authorized' "$MARKER"
+/usr/bin/grep -Fx 'DREAM_SKIN_PROGRESS=pausing' "$ADAPTER_STDERR_FILE" >/dev/null
+! /usr/bin/grep -Fq 'DREAM_SKIN_PROGRESS ' "$ADAPTER_STDERR_FILE"
+
+make_failure_stub "$INSTALLED/scripts/pause-dream-skin-macos.sh" \
+  'Could not remove the live skin from Codex; pause state was not written.'
+run_fixture_adapter pause
+assert_error LIVE_REMOVE_FAILED
+assert_recovery restore retry
+make_stub "$INSTALLED/scripts/pause-dream-skin-macos.sh"
 
 : > "$MARKER"
 run_fixture_adapter verify --restart-authorized --force-authorized
@@ -368,6 +783,7 @@ make_failure_stub "$BUNDLED/scripts/install-dream-skin-macos.sh" \
 run_fixture_adapter install
 assert_error CODEX_CLOSE_REQUIRED
 assert_recovery authorize-restart authorize-force-stop
+assert_requires_restart
 make_stub "$BUNDLED/scripts/install-dream-skin-macos.sh"
 
 make_failure_stub "$INSTALLED/scripts/start-dream-skin-macos.sh" \
@@ -375,20 +791,22 @@ make_failure_stub "$INSTALLED/scripts/start-dream-skin-macos.sh" \
 run_fixture_adapter apply
 assert_error RESTART_REQUIRED
 assert_recovery authorize-restart authorize-force-stop
+assert_requires_restart
 make_stub "$INSTALLED/scripts/start-dream-skin-macos.sh"
 
-make_failure_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh" \
+make_failure_stub "$BUNDLED/scripts/restore-dream-skin-macos.sh" \
   'Explicit restart authorization is required before Studio can close Codex.'
 run_fixture_adapter restore
 assert_error RESTART_REQUIRED
 assert_recovery authorize-restart authorize-force-stop
+assert_requires_restart
 
-make_failure_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh" \
+make_failure_stub "$BUNDLED/scripts/restore-dream-skin-macos.sh" \
   'Codex did not close within 15 seconds; explicit restart authorization is required for a forced stop.'
 run_fixture_adapter restore --restart-authorized
 assert_error FORCE_STOP_REQUIRED
 assert_recovery authorize-force-stop
-make_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh"
+make_stub "$BUNDLED/scripts/restore-dream-skin-macos.sh"
 
 write_status ready running official true null
 : > "$MARKER"
@@ -425,12 +843,12 @@ PROTECTED_BEFORE="$(/usr/bin/shasum -a 256 \
   "$FIXTURE_HOME/.codex/config.toml" \
   "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/state.json" \
   "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/theme-backup.json")"
-/usr/bin/sed > "$INSTALLED/scripts/restore-dream-skin-macos.sh" <<'STUB'
+/usr/bin/sed > "$BUNDLED/scripts/restore-dream-skin-macos.sh" <<'STUB'
 #!/bin/bash
 printf 'Codex did not close within 15 seconds; explicit restart authorization is required for a forced stop.\n' >&2
 exit 1
 STUB
-/bin/chmod 755 "$INSTALLED/scripts/restore-dream-skin-macos.sh"
+/bin/chmod 755 "$BUNDLED/scripts/restore-dream-skin-macos.sh"
 : > "$MARKER"
 run_fixture_adapter restore --restart-authorized
 assert_error FORCE_STOP_REQUIRED
@@ -439,7 +857,7 @@ assert_error FORCE_STOP_REQUIRED
   "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/state.json" \
   "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/theme-backup.json")" ] \
   || { printf 'normal-quit timeout changed protected state.\n' >&2; exit 1; }
-make_stub "$INSTALLED/scripts/restore-dream-skin-macos.sh"
+make_stub "$BUNDLED/scripts/restore-dream-skin-macos.sh"
 
 : > "$MARKER"
 run_fixture_adapter restore --restart-authorized
@@ -470,7 +888,7 @@ THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
 THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="__HOME__/.codex/config.toml"
 INJECTOR="__HOME__/injector.mjs"
-NODE=/usr/bin/true
+NODE="__SCRIPTS__/node-stub"
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
 discover_codex_app() { :; }
 require_macos_runtime() { :; }
@@ -485,8 +903,22 @@ verified_cdp_endpoint() { return 1; }
 stop_codex() { printf 'stop:%s\n' "$1" >> "__MARKER__"; }
 stop_recorded_injector() { printf 'injector\n' >> "__MARKER__"; }
 release_codex_launchd_job() { printf 'release\n' >> "__MARKER__"; }
-launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
+launch_codex_normally() {
+  printf 'launch\n' >> "__MARKER__"
+  [ "${DREAM_SKIN_TEST_LAUNCH_FAIL:-false}" != "true" ]
+}
+acquire_lifecycle_lock() { LIFECYCLE_LOCK_BORROWED="true"; return 0; }
+require_lifecycle_lock() { acquire_lifecycle_lock; }
+release_lifecycle_lock() { return 0; }
 STUB
+/usr/bin/sed > "$RESTORE_REAL/scripts/node-stub" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+[ "${2:-}" = "restore" ] || exit 0
+[ -f "${4:-}" ] || { printf 'No selective pre-install theme backup is available.\n' >&2; exit 1; }
+/bin/rm -f "$4"
+STUB
+/bin/chmod 755 "$RESTORE_REAL/scripts/node-stub"
 : > "$RESTORE_REAL_MARKER"
 set +e
 /usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
@@ -502,6 +934,224 @@ set -e
 /usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
   "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized >/dev/null
 /usr/bin/grep -Fx 'stop:false' "$RESTORE_REAL_MARKER" >/dev/null
+
+/usr/bin/printf 'state sentinel\n' > "$RESTORE_REAL_HOME/state/state.json"
+/usr/bin/printf 'backup sentinel\n' > "$RESTORE_REAL_HOME/state/theme-backup.json"
+: > "$RESTORE_REAL_MARKER"
+set +e
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true DREAM_SKIN_TEST_LAUNCH_FAIL=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
+  >"$RESTORE_REAL/launch-failure.out" 2>"$RESTORE_REAL/launch-failure.err"
+RESTORE_LAUNCH_EXIT="$?"
+set -e
+[ "$RESTORE_LAUNCH_EXIT" -eq 0 ] || { printf 'completed restore treated relaunch failure as transactional.\n' >&2; exit 1; }
+[ ! -e "$RESTORE_REAL_HOME/state/state.json" ] || { printf 'completed restore retained stale state after relaunch failure.\n' >&2; exit 1; }
+
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --uninstall --restart-authorized \
+  >/dev/null
+
+# Restore and uninstall must stay adapter-to-native-helper complete when the
+# installed engine is partial and every Node candidate is unavailable or unsafe.
+RECOVERY_FIXTURE="$TMP/native-adapter-recovery"
+RECOVERY_HOME="$RECOVERY_FIXTURE/home"
+RECOVERY_BUNDLED="$RECOVERY_FIXTURE/bundled"
+RECOVERY_INSTALLED="$RECOVERY_HOME/.codex/codex-dream-skin-studio"
+RECOVERY_STATE="$RECOVERY_HOME/Library/Application Support/CodexDreamSkinStudio"
+RECOVERY_CONFIG="$RECOVERY_HOME/.codex/config.toml"
+RECOVERY_BACKUP="$RECOVERY_STATE/theme-backup.json"
+RECOVERY_NODE_MARKER="$RECOVERY_FIXTURE/node-executed"
+/bin/mkdir -p "$RECOVERY_BUNDLED/bin" "$RECOVERY_BUNDLED/scripts" "$RECOVERY_HOME/.codex" "$RECOVERY_STATE"
+/bin/cp "$ROOT/VERSION" "$RECOVERY_BUNDLED/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$RECOVERY_BUNDLED/bin/"
+/bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$RECOVERY_BUNDLED/scripts/"
+NO_NODE_CANDIDATE="$RECOVERY_FIXTURE/no-candidate"
+/usr/bin/sed \
+  -e "s|/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node|$NO_NODE_CANDIDATE|g" \
+  -e "s|/Applications/Codex.app/Contents/Resources/cua_node/bin/node|$NO_NODE_CANDIDATE|g" \
+  "$ROOT/scripts/studio-adapter-macos.sh" > "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh"
+/usr/bin/sed "s|__ROOT__|$RECOVERY_BUNDLED|g; s|__HOME__|$RECOVERY_HOME|g" \
+  > "$RECOVERY_BUNDLED/scripts/common-macos.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="__ROOT__/scripts"
+PROJECT_ROOT="__ROOT__"
+INSTALL_ROOT="__HOME__/.codex/codex-dream-skin-studio"
+STATE_ROOT="__HOME__/Library/Application Support/CodexDreamSkinStudio"
+STATE_PATH="$STATE_ROOT/state.json"
+THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
+THEME_DIR="$STATE_ROOT/theme"
+CONFIG_PATH="__HOME__/.codex/config.toml"
+INJECTOR="$SCRIPT_DIR/injector.mjs"
+CODEX_APP_VALIDATED="false"
+CODEX_APP_CONTROL_VALIDATED="false"
+NODE_RUNTIME_VALIDATED="false"
+fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
+try_discover_codex_app() { CODEX_BUNDLE=/fixture/Codex.app; CODEX_EXE=/usr/bin/true; CODEX_VERSION=fixture; return 0; }
+try_validate_codex_app_identity() { return 1; }
+try_validate_codex_app_control_identity() { CODEX_APP_CONTROL_VALIDATED=true; return 0; }
+try_require_macos_node_runtime() { return 1; }
+native_restore_helper_identity() {
+  local root="$1" helper="$2"
+  [ "$helper" = "$root/bin/dream-skin-config-restore" ] || return 1
+  [ -d "$root/bin" ] && [ ! -L "$root/bin" ] || return 1
+  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -x "$helper" ] || return 1
+  /usr/bin/stat -f '%d:%i' "$helper"
+}
+ensure_state_root() { /bin/mkdir -p "$STATE_ROOT"; }
+codex_is_running() { return 1; }
+verified_cdp_endpoint() { return 1; }
+stop_recorded_injector() { return 0; }
+release_codex_launchd_job() { return 0; }
+launch_codex_normally() { return 0; }
+acquire_lifecycle_lock() { LIFECYCLE_LOCK_BORROWED="true"; return 0; }
+require_lifecycle_lock() { acquire_lifecycle_lock; }
+release_lifecycle_lock() { return 0; }
+STUB
+/usr/bin/sed > "$RECOVERY_BUNDLED/scripts/status-dream-skin-macos.sh" <<'STUB'
+#!/bin/bash
+operation=status
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--operation" ]; then operation="$2"; shift 2; else shift; fi
+done
+printf '{"schemaVersion":1,"ok":true,"operation":"%s","state":{"install":"not-installed","codex":"stopped","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":["install"],"verified":null},"error":null}\n' "$operation"
+STUB
+for script in theme-config.mjs injector.mjs; do : > "$RECOVERY_BUNDLED/scripts/$script"; done
+/bin/chmod 755 "$RECOVERY_BUNDLED/scripts/"*.sh "$RECOVERY_BUNDLED/bin/dream-skin-config-restore"
+
+NONEXEC_NODE="$RECOVERY_FIXTURE/non-executable-node"
+TAMPERED_NODE="$RECOVERY_FIXTURE/tampered-node"
+: > "$NONEXEC_NODE"
+/usr/bin/sed "s|__MARKER__|$RECOVERY_NODE_MARKER|g" > "$TAMPERED_NODE" <<'STUB'
+#!/bin/bash
+/usr/bin/touch "__MARKER__"
+exit 99
+STUB
+/bin/chmod 600 "$NONEXEC_NODE"
+/bin/chmod 700 "$TAMPERED_NODE"
+
+recreate_native_recovery() {
+  /bin/mkdir -p "$RECOVERY_INSTALLED" "$RECOVERY_STATE"
+  /usr/bin/printf 'partial engine\n' > "$RECOVERY_INSTALLED/partial"
+  /usr/bin/printf '[desktop]\nappearanceTheme = "dark"\n' > "$RECOVERY_CONFIG"
+  "$NODE" -e '
+    const fs = require("node:fs");
+    fs.writeFileSync(process.argv[1], `${JSON.stringify({
+      schemaVersion: 1,
+      platform: "darwin",
+      configPath: process.argv[2],
+      values: {
+        appearanceTheme: `appearanceTheme = "system"`,
+        appearanceDarkCodeThemeId: null,
+      },
+    })}\n`);
+  ' "$RECOVERY_BACKUP" "$RECOVERY_CONFIG"
+}
+
+for recovery_operation in restore uninstall; do
+  for node_case in missing non-executable tampered; do
+    recreate_native_recovery
+    /bin/rm -f "$RECOVERY_NODE_MARKER"
+    case "$node_case" in
+      missing) RECOVERY_NODE="$RECOVERY_FIXTURE/missing-node" ;;
+      non-executable) RECOVERY_NODE="$NONEXEC_NODE" ;;
+      tampered) RECOVERY_NODE="$TAMPERED_NODE" ;;
+    esac
+    set +e
+    /usr/bin/env HOME="$RECOVERY_HOME" NODE="$RECOVERY_NODE" \
+      "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" "$recovery_operation" \
+      > "$RECOVERY_FIXTURE/$recovery_operation-$node_case.json" \
+      2> "$RECOVERY_FIXTURE/$recovery_operation-$node_case.stderr"
+    RECOVERY_EXIT="$?"
+    set -e
+    [ "$RECOVERY_EXIT" -eq 0 ] || {
+      printf '%s with %s Node did not complete native recovery.\n' "$recovery_operation" "$node_case" >&2
+      exit 1
+    }
+    "$NODE" -e '
+      const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+      if (!value.ok || value.operation !== process.argv[2]) process.exit(1);
+    ' "$RECOVERY_FIXTURE/$recovery_operation-$node_case.json" "$recovery_operation"
+    /usr/bin/grep -Fx 'appearanceTheme = "system"' "$RECOVERY_CONFIG" >/dev/null
+    [ ! -e "$RECOVERY_BACKUP" ]
+    [ ! -e "$RECOVERY_NODE_MARKER" ] || { printf 'unsafe Node was executed during native recovery.\n' >&2; exit 1; }
+  done
+done
+
+# The production deploy-and-exec upgrade path must transition verified-stopped
+# watcher state before the new engine is installed.
+UPGRADE_FIXTURE="$TMP/production-upgrade"
+UPGRADE_HOME="$UPGRADE_FIXTURE/home"
+UPGRADE_BUNDLED="$UPGRADE_FIXTURE/bundled"
+UPGRADE_INSTALLED="$UPGRADE_HOME/.codex/codex-dream-skin-studio"
+UPGRADE_STATE="$UPGRADE_HOME/Library/Application Support/CodexDreamSkinStudio"
+UPGRADE_MARKER="$UPGRADE_FIXTURE/stops"
+/bin/mkdir -p "$UPGRADE_BUNDLED/bin" "$UPGRADE_BUNDLED/scripts" "$UPGRADE_INSTALLED" \
+  "$UPGRADE_STATE/theme" "$UPGRADE_HOME/.codex"
+/bin/cp "$ROOT/VERSION" "$UPGRADE_BUNDLED/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$UPGRADE_BUNDLED/bin/"
+/bin/cp "$ROOT/scripts/studio-adapter-macos.sh" "$ROOT/scripts/install-dream-skin-macos.sh" \
+  "$UPGRADE_BUNDLED/scripts/"
+/usr/bin/sed "s|__MARKER__|$UPGRADE_MARKER|g" > "$UPGRADE_BUNDLED/scripts/common-macos.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+INSTALL_ROOT="$HOME/.codex/codex-dream-skin-studio"
+STATE_ROOT="$HOME/Library/Application Support/CodexDreamSkinStudio"
+STATE_PATH="$STATE_ROOT/state.json"
+THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
+THEME_DIR="$STATE_ROOT/theme"
+CONFIG_PATH="$HOME/.codex/config.toml"
+INJECTOR="$SCRIPT_DIR/injector.mjs"
+NODE=/usr/bin/true
+SKIN_VERSION=1.3.0
+CODEX_VERSION=fixture
+NODE_VERSION=v20.0.0
+fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
+discover_codex_app() { return 0; }
+require_macos_runtime() { return 0; }
+codex_is_running() { return 1; }
+stop_recorded_injector() { printf 'verified-stop\n' >> "__MARKER__"; return 0; }
+ensure_state_root() { /bin/mkdir -p "$STATE_ROOT"; }
+seed_bundled_presets() { /bin/mkdir -p "$THEME_DIR"; [ -f "$THEME_DIR/theme.json" ] || printf '{"name":"Fixture"}\n' > "$THEME_DIR/theme.json"; }
+acquire_lifecycle_lock() { LIFECYCLE_LOCK_BORROWED="true"; return 0; }
+require_lifecycle_lock() { acquire_lifecycle_lock; }
+release_lifecycle_lock() { return 0; }
+STUB
+/usr/bin/sed > "$UPGRADE_BUNDLED/scripts/status-dream-skin-macos.sh" <<'STUB'
+#!/bin/bash
+operation=status
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--operation" ]; then operation="$2"; shift 2; else shift; fi
+done
+state="$HOME/Library/Application Support/CodexDreamSkinStudio/state.json"
+if [ -e "$state" ]; then
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"stopped","session":"stale","operation":"idle","themeName":"Fixture","requiresRestart":false,"availableActions":["install"],"verified":null},"error":{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["restore","diagnostics","cancel"]}}\n' "$operation"
+  exit 1
+fi
+printf '{"schemaVersion":1,"ok":true,"operation":"%s","state":{"install":"ready","codex":"stopped","session":"official","operation":"idle","themeName":"Fixture","requiresRestart":false,"availableActions":["apply","restore","uninstall"],"verified":null},"error":null}\n' "$operation"
+STUB
+for script in start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-skin-macos.sh verify-dream-skin-macos.sh; do
+  /usr/bin/sed > "$UPGRADE_BUNDLED/scripts/$script" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+done
+for script in theme-config.mjs injector.mjs; do : > "$UPGRADE_BUNDLED/scripts/$script"; done
+/bin/chmod 755 "$UPGRADE_BUNDLED/scripts/"*.sh "$UPGRADE_BUNDLED/bin/dream-skin-config-restore"
+/usr/bin/printf '[desktop]\n' > "$UPGRADE_HOME/.codex/config.toml"
+/usr/bin/printf '{}\n' > "$UPGRADE_STATE/theme-backup.json"
+/usr/bin/printf '{"name":"Fixture"}\n' > "$UPGRADE_STATE/theme/theme.json"
+/usr/bin/printf '{"port":9341,"session":"active","injectorPid":4242}\n' > "$UPGRADE_STATE/state.json"
+set +e
+/usr/bin/env HOME="$UPGRADE_HOME" "$UPGRADE_BUNDLED/scripts/studio-adapter-macos.sh" install \
+  > "$UPGRADE_FIXTURE/install.json" 2> "$UPGRADE_FIXTURE/install.stderr"
+UPGRADE_EXIT="$?"
+set -e
+[ "$UPGRADE_EXIT" -eq 0 ] || { printf 'production upgrade fixture failed.\n' >&2; exit 1; }
+/usr/bin/grep -Fx 'verified-stop' "$UPGRADE_MARKER" >/dev/null
+[ ! -e "$UPGRADE_STATE/state.json" ] || { printf 'successful production upgrade retained old watcher state.\n' >&2; exit 1; }
 
 write_status ready stopped paused false false
 : > "$MARKER"
@@ -547,12 +1197,12 @@ run_fixture_adapter uninstall --restart-authorized --delete-user-themes
 for script in start-dream-skin-macos.sh pause-dream-skin-macos.sh verify-dream-skin-macos.sh status-dream-skin-macos.sh common-macos.sh theme-config.mjs injector.mjs; do
   make_stub "$INSTALLED/scripts/$script"
 done
-/usr/bin/sed "s|__MARKER__|$MARKER|g" > "$INSTALLED/scripts/restore-dream-skin-macos.sh" <<'STUB'
+/usr/bin/sed "s|__MARKER__|$MARKER|g" > "$BUNDLED/scripts/restore-dream-skin-macos.sh" <<'STUB'
 #!/bin/bash
 /usr/bin/printf 'restore-dream-skin-macos.sh %s\n' "$*" >> "__MARKER__"
 exit 1
 STUB
-/bin/chmod 755 "$INSTALLED/scripts/restore-dream-skin-macos.sh"
+/bin/chmod 755 "$BUNDLED/scripts/restore-dream-skin-macos.sh"
 : > "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/themes/saved"
 : > "$MARKER"
 run_fixture_adapter uninstall --restart-authorized --delete-user-themes

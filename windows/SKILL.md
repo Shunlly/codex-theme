@@ -9,7 +9,11 @@ Apply a reversible renderer skin through Chromium DevTools Protocol while launch
 
 ## Ordinary-user workflow (Studio)
 
-1. Download and install the signed Studio artifact `CodexDreamSkinStudio-Setup.exe`; no PowerShell, PATH Node, or administrator elevation is required.
+No trusted Studio binary is currently claimed as published or accepted. Production
+installers must pass Authenticode signing and SmartScreen acceptance before publication;
+unsigned development builds carry the `-UNSIGNED` suffix.
+
+1. After a production release, download and install `CodexDreamSkinStudio-1.3.0-win-x64.exe` or `CodexDreamSkinStudio-1.3.0-win-arm64.exe` for the matching architecture; no PowerShell, PATH Node, or administrator elevation is required.
 2. Complete Studio preflight and authorize a single restart only when requested.
 3. Wait for strict verified success. Use **Pause** for soft-off and **Complete Restore** to remove the live skin and close CDP.
 

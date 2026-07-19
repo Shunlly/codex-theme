@@ -32,6 +32,8 @@ while [ "$#" -gt 0 ]; do
 done
 case "$PORT" in ''|*[!0-9]*) fail "Invalid port: $PORT" ;; esac
 [ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || fail "Port must be between 1024 and 65535."
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
 
 discover_codex_app
 require_macos_runtime
@@ -82,6 +84,10 @@ if [ "$DEBUG_READY" = "false" ]; then
 fi
 
 if [ "$FOREGROUND_INJECTOR" = "true" ]; then
+  release_lifecycle_lock || fail "Could not release the lifecycle lock before starting the foreground watcher."
+  [ ! -e "$LIFECYCLE_LOCK_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_PATH" ] \
+    || fail "The lifecycle lock was reacquired before the foreground watcher could start."
+  trap - EXIT
   exec "$NODE" "$INJECTOR" --watch --port "$PORT" --theme-dir "$THEME_DIR"
 fi
 
@@ -99,7 +105,7 @@ write_state "$PORT" "$INJECTOR_PID" "$INJECTOR_STARTED_AT" "$CODEX_PID"
 VERIFY_OUTPUT="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dream-skin-verify.XXXXXX")"
 /bin/chmod 600 "$VERIFY_OUTPUT"
 cleanup_verify_output() { /bin/rm -f "$VERIFY_OUTPUT"; }
-trap cleanup_verify_output EXIT
+trap 'cleanup_verify_output; release_lifecycle_lock' EXIT
 if "$NODE" "$INJECTOR" --verify --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 20000 >"$VERIFY_OUTPUT" 2>/dev/null; then
   verify_code=0
 else
@@ -120,7 +126,6 @@ if [ "$verify_code" -ne 0 ]; then
     && /usr/bin/grep -q '"installed": true' "$VERIFY_OUTPUT" 2>/dev/null; then
     printf 'Codex Dream Skin Studio %s is active (soft verify) on port %s.\n' "$SKIN_VERSION" "$PORT"
     cleanup_verify_output
-    trap - EXIT
     exit 0
   fi
   # The watcher is normally launched directly (launchctl is only a fallback),
@@ -130,7 +135,6 @@ if [ "$verify_code" -ne 0 ]; then
   # closed instead of leaving an orphan watcher that can reinject later.
   if ! stop_recorded_injector; then
     cleanup_verify_output
-    trap - EXIT
     fail "Injection verification failed and the recorded injector could not be stopped safely; state was preserved. See $INJECTOR_ERROR_LOG"
   fi
   if [ "$STUDIO_STRICT_VERIFY" = "true" ]; then
@@ -145,10 +149,8 @@ if [ "$verify_code" -ne 0 ]; then
     launch_codex_normally
   fi
   cleanup_verify_output
-  trap - EXIT
   fail "Injection verification failed. The injector was stopped; see $INJECTOR_ERROR_LOG"
 fi
 cleanup_verify_output
-trap - EXIT
 
 printf 'Codex Dream Skin Studio %s is active on loopback port %s.\n' "$SKIN_VERSION" "$PORT"

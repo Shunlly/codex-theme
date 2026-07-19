@@ -55,7 +55,7 @@
   <sub>暗色 · 真实注入截图（未发送输入已在截图时遮蔽，仅预览）</sub>
 </p>
 
-Studio 首次安装会预置「桥本有菜」主题；成功后在 Studio 中选择主题或导入自己的纯背景即可。
+Studio 首次安装会预置「桥本有菜」主题。Milestone 1 的原生 Studio 只负责安装、应用、暂停、恢复、验证与卸载；本地主题切换和导入仍通过 macOS SwiftBar/脚本或 Windows 系统托盘完成。
 
 > 可下载的用户源图是 [`docs/images/presets/romantic-rose-source.png`](./docs/images/presets/romantic-rose-source.png)（`1672 × 941`）；macOS 一键预设使用 [`macos/presets/preset-romantic-rose/background.jpg`](./macos/presets/preset-romantic-rose/background.jpg)（规范化派生 `2560 × 1440`）。上面两个效果图包含真实 UI，**只作预览，绝不能当背景导入**。背景为用户提供的 AI 生成示例，不代表 OpenAI/Codex 官方视觉或背书；公开再分发前请确认人物与素材权利。
 
@@ -114,7 +114,9 @@ Studio 首次安装会预置「桥本有菜」主题；成功后在 Studio 中�
 
 ## 快速开始
 
-1. 下载对应平台的**已签名 Studio artifact**，打开或安装它。
+当前仓库不声称已有通过生产信任验收的 Studio 二进制发布。下面是 Developer ID/公证/装订/Gatekeeper 或 Authenticode/SmartScreen 全部通过并正式发布后的普通用户流程。
+
+1. 生产发布完成后，下载对应平台的 Studio 产物，打开或安装它。
 2. 完成 Studio 的 preflight；仅在 Studio 请求时授权一次 Codex 重启。
 3. 等待严格验证的成功状态；用 **Pause** 暂时关闭，用 **Complete Restore** 移除实时皮肤并关闭受管 CDP。
 
@@ -123,7 +125,9 @@ Studio 首次安装会预置「桥本有菜」主题；成功后在 Studio 中�
 | 平台 | Studio artifact | 高级恢复 |
 |------|------|------|
 | Apple Silicon / Intel Mac | `CodexDreamSkinStudio.dmg` | [`macos/README.md`](./macos/README.md) |
-| Windows | `CodexDreamSkinStudio-Setup.exe` | [`windows/SKILL.md`](./windows/SKILL.md) |
+| Windows x64 / arm64 | `CodexDreamSkinStudio-1.3.0-win-x64.exe` / `CodexDreamSkinStudio-1.3.0-win-arm64.exe` | [`windows/SKILL.md`](./windows/SKILL.md) |
+
+本地开发产物会明确标记为 `macos/release/adhoc/CodexDreamSkinStudio-1.3.0-macos-universal-ADHOC.dmg` 或带 `-UNSIGNED` 的 Windows 安装包，不能当作生产信任验收结果。
 
 ### 高级恢复
 

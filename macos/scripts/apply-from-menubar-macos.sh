@@ -79,6 +79,8 @@ else
   fi
 fi
 
+require_lifecycle_lock
+trap release_lifecycle_lock EXIT
 progress "检查 Codex…"
 if ! discover_codex_app >>"$LOG_OUT" 2>&1; then
   alert "未找到官方 Codex。"

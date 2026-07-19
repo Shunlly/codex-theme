@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import DreamSkinStudioCore
 
@@ -18,6 +19,7 @@ struct ContentView: View {
         }
         .padding(24)
         .frame(minWidth: 500, minHeight: 390, alignment: .topLeading)
+        .background(WindowClosePolicy(allowsClose: model.menuState.allowsTermination).frame(width: 0, height: 0))
         .sheet(isPresented: presentationBinding) {
             if let presentation = model.presentation {
                 ConfirmationSheet(
@@ -209,6 +211,35 @@ struct ContentView: View {
         case .restoring: "Restoring Codex"
         case .uninstalling: "Removing Dream Skin"
         }
+    }
+}
+
+private struct WindowClosePolicy: NSViewRepresentable {
+    let allowsClose: Bool
+
+    func makeNSView(context: Context) -> WindowClosePolicyView {
+        let view = WindowClosePolicyView()
+        view.allowsClose = allowsClose
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowClosePolicyView, context: Context) {
+        nsView.allowsClose = allowsClose
+    }
+}
+
+private final class WindowClosePolicyView: NSView {
+    var allowsClose = true {
+        didSet { applyPolicy() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyPolicy()
+    }
+
+    private func applyPolicy() {
+        window?.standardWindowButton(.closeButton)?.isEnabled = allowsClose
     }
 }
 
