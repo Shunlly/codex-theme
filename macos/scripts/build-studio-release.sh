@@ -64,6 +64,21 @@ release_input_error() {
   exit 1
 }
 
+SNAPSHOT_PATHS=(
+  macos/studio
+  macos/assets
+  macos/presets
+  macos/scripts
+  macos/LICENSE
+  macos/NOTICE.md
+  macos/VERSION
+  studio/assets/app-icon-source.png
+  studio/protocol/README.md
+  studio/protocol/fixtures-v1.json
+  studio/release/check-contents.mjs
+  studio/release/allowlist-macos.json
+)
+
 verify_tracked_regular_file() {
   local source="$1"
   local absolute="$REPO_ROOT/$source"
@@ -80,15 +95,16 @@ verify_tracked_regular_file() {
     | /usr/bin/cmp -s - "$absolute" || release_input_error
 }
 
-verify_index_package_modes() {
+verify_index_snapshot_modes() {
   local entry=""
   local mode=""
-  /usr/bin/git -C "$REPO_ROOT" ls-tree -r -z "$INDEX_TREE" -- macos/studio >/dev/null 2>&1 \
+  /usr/bin/git -C "$REPO_ROOT" ls-tree -r -z "$INDEX_TREE" -- "${SNAPSHOT_PATHS[@]}" \
+    >/dev/null 2>&1 \
     || release_input_error
   while IFS= read -r -d '' entry; do
     mode="${entry%% *}"
     case "$mode" in 100644|100755) ;; *) release_input_error ;; esac
-  done < <(/usr/bin/git -C "$REPO_ROOT" ls-tree -r -z "$INDEX_TREE" -- macos/studio)
+  done < <(/usr/bin/git -C "$REPO_ROOT" ls-tree -r -z "$INDEX_TREE" -- "${SNAPSHOT_PATHS[@]}")
 }
 
 verify_swift_build_inputs() {
@@ -109,7 +125,7 @@ verify_swift_build_inputs() {
 }
 
 verify_swift_build_inputs
-verify_index_package_modes
+verify_index_snapshot_modes
 [ "$(/usr/bin/git -C "$REPO_ROOT" write-tree 2>/dev/null)" = "$INDEX_TREE" ] \
   || release_input_error
 
@@ -124,9 +140,10 @@ cleanup() {
 trap cleanup EXIT
 
 SNAPSHOT_ROOT="$TMP/index"
+SNAPSHOT_SOURCE_ROOT="$SNAPSHOT_ROOT"
 SNAPSHOT_PACKAGE="$SNAPSHOT_ROOT/macos/studio"
 /bin/mkdir -p "$SNAPSHOT_ROOT"
-/usr/bin/git -C "$REPO_ROOT" archive --format=tar "$INDEX_TREE" -- macos/studio \
+/usr/bin/git -C "$REPO_ROOT" archive --format=tar "$INDEX_TREE" -- "${SNAPSHOT_PATHS[@]}" \
   | /usr/bin/tar -xf - -C "$SNAPSHOT_ROOT" || release_input_error
 [ -f "$SNAPSHOT_PACKAGE/Package.swift" ] && [ ! -L "$SNAPSHOT_PACKAGE/Package.swift" ] \
   && [ -d "$SNAPSHOT_PACKAGE/Sources" ] && [ ! -L "$SNAPSHOT_PACKAGE/Sources" ] \
@@ -143,12 +160,13 @@ DMG_ROOT="$TMP/dmg-root"
 /bin/mkdir -p "$CONTENTS/MacOS" "$ENGINE/bin" "$ENGINE/scripts" \
   "$ENGINE/protocol" "$ICONSET" "$DMG_ROOT" "$PUBLISH"
 
-copy_tracked_file() {
+copy_snapshot_file() {
   local source="$1"
   local destination="$2"
-  verify_tracked_regular_file "$source"
+  local source_path="$SNAPSHOT_SOURCE_ROOT/$source"
+  [ -f "$source_path" ] && [ ! -L "$source_path" ] || release_input_error
   /bin/mkdir -p "$(/usr/bin/dirname "$destination")"
-  /bin/cp -P "$REPO_ROOT/$source" "$destination"
+  /bin/cp -P "$source_path" "$destination"
   [ -f "$destination" ] && [ ! -L "$destination" ] || release_input_error
   /usr/bin/git -C "$REPO_ROOT" cat-file blob "$INDEX_TREE:$source" 2>/dev/null \
     | /usr/bin/cmp -s - "$destination" || release_input_error
@@ -206,8 +224,8 @@ do
   case "$archs" in *' x86_64 '*) ;; *) printf 'Universal binary is missing x86_64.\n' >&2; exit 1 ;; esac
 done
 
-copy_tracked_file macos/studio/Resources/Info.plist "$CONTENTS/Info.plist"
-copy_tracked_file studio/assets/app-icon-source.png "$TMP/app-icon-source.png"
+copy_snapshot_file macos/studio/Resources/Info.plist "$CONTENTS/Info.plist"
+copy_snapshot_file studio/assets/app-icon-source.png "$TMP/app-icon-source.png"
 if /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$CONTENTS/Info.plist" >/dev/null 2>&1; then
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$CONTENTS/Info.plist"
 else
@@ -234,10 +252,11 @@ done
 /usr/bin/iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
 /bin/chmod 644 "$RESOURCES/AppIcon.icns"
 
-while IFS= read -r source; do
+while IFS= read -r -d '' source; do
   relative="${source#macos/}"
-  copy_tracked_file "$source" "$ENGINE/$relative"
-done < <(/usr/bin/git -C "$REPO_ROOT" ls-files -- macos/assets macos/presets)
+  copy_snapshot_file "$source" "$ENGINE/$relative"
+done < <(/usr/bin/git -C "$REPO_ROOT" ls-tree -r -z --name-only \
+  "$INDEX_TREE" -- macos/assets macos/presets)
 
 RUNTIME_SCRIPTS=(
   common-macos.sh
@@ -255,14 +274,14 @@ RUNTIME_SCRIPTS=(
   verify-dream-skin-macos.sh
 )
 for script in "${RUNTIME_SCRIPTS[@]}"; do
-  copy_tracked_file "macos/scripts/$script" "$ENGINE/scripts/$script"
+  copy_snapshot_file "macos/scripts/$script" "$ENGINE/scripts/$script"
   case "$script" in *.sh) /bin/chmod 755 "$ENGINE/scripts/$script" ;; esac
 done
-copy_tracked_file macos/LICENSE "$ENGINE/LICENSE"
-copy_tracked_file macos/NOTICE.md "$ENGINE/NOTICE.md"
-copy_tracked_file macos/VERSION "$ENGINE/VERSION"
-copy_tracked_file studio/protocol/README.md "$ENGINE/protocol/README.md"
-copy_tracked_file studio/protocol/fixtures-v1.json "$ENGINE/protocol/fixtures-v1.json"
+copy_snapshot_file macos/LICENSE "$ENGINE/LICENSE"
+copy_snapshot_file macos/NOTICE.md "$ENGINE/NOTICE.md"
+copy_snapshot_file macos/VERSION "$ENGINE/VERSION"
+copy_snapshot_file studio/protocol/README.md "$ENGINE/protocol/README.md"
+copy_snapshot_file studio/protocol/fixtures-v1.json "$ENGINE/protocol/fixtures-v1.json"
 
 /usr/bin/xattr -cr "$APP"
 /usr/bin/find "$APP" -type f \( -name '.DS_Store' -o -name '._*' \) -delete
@@ -274,8 +293,8 @@ else
   /usr/bin/codesign --force --sign "$IDENTITY" \
     "$ENGINE/bin/dream-skin-config-restore"
 fi
-"$NODE" "$REPO_ROOT/studio/release/check-contents.mjs" \
-  --root "$APP" --allowlist "$REPO_ROOT/studio/release/allowlist-macos.json"
+"$NODE" "$SNAPSHOT_ROOT/studio/release/check-contents.mjs" \
+  --root "$APP" --allowlist "$SNAPSHOT_ROOT/studio/release/allowlist-macos.json"
 if [ "$MODE" = "notarize" ]; then
   /usr/bin/codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP"
 else

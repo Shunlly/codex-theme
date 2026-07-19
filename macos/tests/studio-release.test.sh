@@ -22,9 +22,9 @@ NODE="${NODE:-$(command -v node || true)}"
 [ "$(/usr/bin/sips -g pixelHeight "$ICON_SOURCE" | /usr/bin/awk '/pixelHeight:/ { print $2 }')" = '1024' ]
 "$NODE" -e '
   const source = require("node:fs").readFileSync(process.argv[1], "utf8");
-  const helper = source.match(/copy_tracked_file\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+  const helper = source.match(/copy_snapshot_file\(\) \{[\s\S]*?\n\}/)?.[0] || "";
   const steps = [
-    "verify_tracked_regular_file \"$source\"",
+    "[ -f \"$source_path\" ] && [ ! -L \"$source_path\" ]",
     "/bin/cp -P",
     "[ -f \"$destination\" ] && [ ! -L \"$destination\" ]",
     "| /usr/bin/cmp -s - \"$destination\"",
@@ -33,8 +33,29 @@ NODE="${NODE:-$(command -v node || true)}"
   let offset = -1;
   for (const step of steps) {
     const next = helper.indexOf(step, offset + 1);
-    if (next < 0) throw new Error(`copy_tracked_file is missing ordered safety step: ${step}`);
+    if (next < 0) throw new Error(`copy_snapshot_file is missing ordered safety step: ${step}`);
     offset = next;
+  }
+' "$BUILD"
+"$NODE" -e '
+  const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+  for (const required of [
+    "SNAPSHOT_SOURCE_ROOT=",
+    "copy_snapshot_file()",
+    `while IFS= read -r -d ${String.fromCharCode(39, 39)} source`,
+    "ls-tree -r -z --name-only",
+    "\"$INDEX_TREE\" -- macos/assets macos/presets",
+    "\"$SNAPSHOT_ROOT/studio/release/check-contents.mjs\"",
+    "\"$SNAPSHOT_ROOT/studio/release/allowlist-macos.json\"",
+  ]) {
+    if (!source.includes(required)) throw new Error(`builder is missing snapshot release input: ${required}`);
+  }
+  const afterSnapshot = source.slice(source.indexOf("SNAPSHOT_SOURCE_ROOT="));
+  if (/\bgit\b[^\n]*\bls-files\b/.test(afterSnapshot)) {
+    throw new Error("post-snapshot release enumeration still reads the live index");
+  }
+  if (afterSnapshot.includes("copy_tracked_file")) {
+    throw new Error("post-snapshot release copy still reads the live worktree");
   }
 ' "$BUILD"
 "$NODE" -e '
@@ -59,7 +80,7 @@ NODE="${NODE:-$(command -v node || true)}"
   if (!/case "\$index_mode" in 100644\|100755\) ;; \*\) release_input_error ;; esac/.test(guard)) {
     throw new Error("tracked input guard does not restrict index modes to regular blobs");
   }
-  if (!source.includes("ls-tree -r -z \"$INDEX_TREE\" -- macos/studio")) {
+  if (!source.includes("ls-tree -r -z \"$INDEX_TREE\" -- \"${SNAPSHOT_PATHS[@]}\"")) {
     throw new Error("index mode guard does not cover every archived package entry");
   }
   for (const required of ["git -C \"$REPO_ROOT\" write-tree", "git -C \"$REPO_ROOT\" archive", "SNAPSHOT_PACKAGE="]) {
