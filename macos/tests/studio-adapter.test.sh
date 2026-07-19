@@ -35,6 +35,7 @@ WATCHER_FIXTURE="$TMP/watcher-guard"
 WATCHER_HOME="$WATCHER_FIXTURE/home"
 WATCHER_MARKER="$WATCHER_FIXTURE/commands"
 /bin/mkdir -p "$WATCHER_HOME/Library/Application Support/CodexDreamSkinStudio"
+/bin/cp "$SOURCE_ROOT/VERSION" "$WATCHER_FIXTURE/VERSION"
 /usr/bin/sed \
   -e "s|/usr/bin/nohup|$WATCHER_FIXTURE/nohup|g" \
   -e "s|/bin/launchctl|$WATCHER_FIXTURE/launchctl|g" \
