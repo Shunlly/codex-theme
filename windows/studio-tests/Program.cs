@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodexDreamSkinStudio;
 
 static void Assert(bool condition, string message)
@@ -19,6 +21,51 @@ static async Task ThrowsAsync<T>(Func<Task> action, string message) where T : Ex
   try { await action(); }
   catch (T) { return; }
   throw new InvalidOperationException(message);
+}
+
+static string Mutate(string json, Action<JsonObject> mutation)
+{
+  var root = JsonNode.Parse(json)!.AsObject();
+  mutation(root);
+  return root.ToJsonString();
+}
+
+static async Task RunChildAsync(string[] arguments)
+{
+  switch (arguments[0])
+  {
+    case "--engine-child-progress":
+      Console.Error.Write("DREAM_SKIN_PRO");
+      Console.Error.Flush();
+      await Task.Delay(50);
+      Console.Error.WriteLine("GRESS checking");
+      Console.Error.WriteLine("DREAM_SKIN_PROGRESS applying");
+      Console.Write("child-ok");
+      return;
+    case "--engine-child-oversized":
+      Console.Write(new string('x', 1024 * 1024 + 1));
+      return;
+    case "--engine-child-tree":
+      var grandchild = Process.Start(new ProcessStartInfo
+      {
+        FileName = Environment.ProcessPath!,
+        UseShellExecute = false,
+        ArgumentList = { "--engine-grandchild", arguments[1] }
+      })!;
+      await File.WriteAllTextAsync(arguments[1], grandchild.Id.ToString());
+      await Task.Delay(Timeout.InfiniteTimeSpan);
+      return;
+    case "--engine-grandchild":
+      await Task.Delay(Timeout.InfiniteTimeSpan);
+      return;
+  }
+  throw new InvalidOperationException("Unknown controlled child mode.");
+}
+
+if (args.Length > 0)
+{
+  await RunChildAsync(args);
+  return;
 }
 
 var fixtures = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "fixtures-v1.json")));
@@ -44,6 +91,22 @@ Throws<InvalidDataException>(() => EngineProtocol.Parse(valid.Replace("\"pause\"
 Throws<InvalidDataException>(() => EngineProtocol.Parse(valid.Replace("\"error\": null", "\"error\": {\"code\":\"X\",\"message\":\"x\",\"recoveryActions\":[\"cancel\"]}"), EngineOperation.Apply), "Invalid success shape was accepted.");
 Throws<InvalidDataException>(() => EngineProtocol.Parse(valid.Replace("\"themeName\": \"午夜极光\",", ""), EngineOperation.Apply), "Missing state field was accepted.");
 
+var installed = fixtures.RootElement[2].GetProperty("response").GetRawText();
+var paused = fixtures.RootElement[4].GetProperty("response").GetRawText();
+var restartRequired = fixtures.RootElement[6].GetProperty("response").GetRawText();
+var restored = fixtures.RootElement[9].GetProperty("response").GetRawText();
+var uninstalled = fixtures.RootElement[10].GetProperty("response").GetRawText();
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(installed, root => root["state"]!["requiresRestart"] = true), EngineOperation.Install), "Restart-required stopped state was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(installed, root => root["state"]!["availableActions"]!.AsArray().Add("install")), EngineOperation.Install), "Install action for a ready engine was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(uninstalled, root => root["state"]!["availableActions"] = new JsonArray("apply")), EngineOperation.Uninstall), "Ready-only action for a missing engine was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(restartRequired, root => { root["state"]!["operation"] = "busy"; root["state"]!["availableActions"] = new JsonArray(); }), EngineOperation.Apply), "Busy state without OPERATION_BUSY was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(restartRequired, root => root["error"]!["code"] = "OPERATION_BUSY"), EngineOperation.Apply), "OPERATION_BUSY with idle state was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(paused, root => { root["state"]!["install"] = "not-installed"; root["state"]!["themeName"] = null; root["state"]!["availableActions"] = new JsonArray("install"); }), EngineOperation.Pause), "Managed session without a ready install was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(installed, root => root["state"]!["availableActions"]!.AsArray().Add("pause")), EngineOperation.Install), "Pause outside an active session was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(valid, root => root["state"]!["availableActions"]!.AsArray().Add("apply")), EngineOperation.Apply), "Apply action for an active session was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(paused, root => root["state"]!["session"] = "official"), EngineOperation.Pause), "Successful pause without a paused session was accepted.");
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(restored, root => root["state"]!["session"] = "paused"), EngineOperation.Restore), "Successful restore without an official session was accepted.");
+
 Assert(EngineOperation.Uninstall.ToArgument() == "uninstall", "Operation mapping was not lowercase.");
 var adapterPath = Path.Combine(AppContext.BaseDirectory, "engine", "scripts", "studio-adapter.ps1");
 var argv = EngineClient.BuildArguments(EngineOperation.Uninstall, adapterPath, true, true, true, false);
@@ -61,15 +124,17 @@ Assert(progress.SequenceEqual(new[] { EngineProgress.Checking, EngineProgress.Ap
 Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("raw error\n", null), "Raw stderr was accepted.");
 Throws<InvalidDataException>(() => EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS mystery\n", null), "Unknown progress was accepted.");
 
-foreach (var exitCode in new[] { 0, 1, 2 })
+var invalidRequest = Mutate(restartRequired, root =>
 {
-  var response = exitCode == 0 ? valid : fixtures.RootElement[6].GetProperty("response").GetRawText();
-  var operation = exitCode == 0 ? EngineOperation.Apply : EngineOperation.Apply;
-  var runner = new FakeRunner(new EngineProcessResult(exitCode, response, ""));
-  var client = new EngineClient(runner, "C:\\Windows");
-  var result = await client.RunAsync(operation, deep: false);
-  Assert(result.SchemaVersion == 1, $"Domain envelope at exit {exitCode} was rejected.");
-}
+  root["state"] = JsonNode.Parse("{\"install\":\"not-installed\",\"codex\":\"not-installed\",\"session\":\"official\",\"operation\":\"idle\",\"themeName\":null,\"requiresRestart\":false,\"availableActions\":[],\"verified\":null}");
+  root["error"]!["code"] = "INVALID_REQUEST";
+  root["error"]!["recoveryActions"] = new JsonArray("cancel");
+});
+Throws<InvalidDataException>(() => EngineProtocol.Parse(Mutate(invalidRequest, root => root["state"]!["availableActions"] = new JsonArray("install")), EngineOperation.Apply), "INVALID_REQUEST with a non-empty state projection was accepted.");
+foreach (var accepted in new[] { new EngineProcessResult(0, valid, ""), new EngineProcessResult(1, restartRequired, ""), new EngineProcessResult(2, invalidRequest, "") })
+  Assert((await new EngineClient(new FakeRunner(accepted), "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false)).SchemaVersion == 1, $"Valid exit {accepted.ExitCode} was rejected.");
+await ThrowsAsync<InvalidDataException>(async () => await new EngineClient(new FakeRunner(new EngineProcessResult(1, invalidRequest, "")), "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false), "INVALID_REQUEST at exit 1 was accepted.");
+await ThrowsAsync<InvalidDataException>(async () => await new EngineClient(new FakeRunner(new EngineProcessResult(2, restartRequired, "")), "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false), "Domain error at exit 2 was accepted.");
 var pathRunner = new FakeRunner(new EngineProcessResult(0, valid, ""));
 await new EngineClient(pathRunner, "C:\\Windows").RunAsync(EngineOperation.Apply, deep: false);
 Assert(pathRunner.FileName == "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "The fixed Windows PowerShell path was not used.");
@@ -93,6 +158,35 @@ await cancelling.Started.Task;
 cancellation.Cancel();
 await ThrowsAsync<OperationCanceledException>(async () => await cancelled, "Cancellation did not propagate.");
 Assert(cancelling.Cancelled, "Cancellation did not reach the process boundary.");
+
+var realRunner = new EngineProcessRunner();
+var realProgress = new List<EngineProgress>();
+var realResult = await realRunner.RunAsync(Environment.ProcessPath!, ["--engine-child-progress"], new InlineProgress<EngineProgress>(realProgress.Add), CancellationToken.None);
+Assert(realResult.ExitCode == 0 && realResult.StandardOutput == "child-ok", "The production runner did not capture controlled stdout.");
+Assert(realProgress.SequenceEqual(new[] { EngineProgress.Checking, EngineProgress.Applying }), "The production runner did not parse chunked progress.");
+await ThrowsAsync<InvalidDataException>(async () => await realRunner.RunAsync(Environment.ProcessPath!, ["--engine-child-oversized"], null, CancellationToken.None), "The production runner accepted oversized output.");
+
+var marker = Path.Combine(Path.GetTempPath(), $"dream-skin-runner-{Guid.NewGuid():N}.pid");
+try
+{
+  using var realCancellation = new CancellationTokenSource();
+  var realCancelled = realRunner.RunAsync(Environment.ProcessPath!, ["--engine-child-tree", marker], null, realCancellation.Token);
+  var markerDeadline = DateTime.UtcNow.AddSeconds(5);
+  var grandchildId = 0;
+  while (grandchildId == 0 && DateTime.UtcNow < markerDeadline)
+  {
+    if (File.Exists(marker)) int.TryParse(await File.ReadAllTextAsync(marker), out grandchildId);
+    if (grandchildId == 0) await Task.Delay(20);
+  }
+  Assert(grandchildId > 0, "The controlled process tree did not start.");
+  realCancellation.Cancel();
+  var elapsed = Stopwatch.StartNew();
+  await ThrowsAsync<OperationCanceledException>(async () => await realCancelled.WaitAsync(TimeSpan.FromSeconds(10)), "Runner cancellation did not preserve OperationCanceledException.");
+  Assert(elapsed.Elapsed < TimeSpan.FromSeconds(10), "Runner cancellation did not reap within its bound.");
+  await Task.Delay(250);
+  Throws<ArgumentException>(() => Process.GetProcessById(grandchildId), "Runner cancellation left the controlled grandchild alive.");
+}
+finally { if (File.Exists(marker)) File.Delete(marker); }
 
 Console.WriteLine("PASS: Dream Skin Studio engine client.");
 

@@ -24,6 +24,7 @@ public partial class MainWindow : Window
   public MainWindow()
   {
     InitializeComponent();
+    BoundToWorkArea(this, 580, 720);
     _tray = CreateTray();
     Loaded += async (_, _) => await InitializeAsync();
     StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) Hide(); };
@@ -170,6 +171,10 @@ public partial class MainWindow : Window
     var state = _envelope?.State;
     StatusText.Text = state is null ? "正在检查当前状态…" : StateText(state);
     ThemeText.Text = state?.ThemeName is { Length: > 0 } name ? $"主题：{name}" : "主题：尚未选择";
+    StatusText.ToolTip = StatusText.Text;
+    ThemeText.ToolTip = ThemeText.Text;
+    AutomationProperties.SetHelpText(StatusText, StatusText.Text);
+    AutomationProperties.SetHelpText(ThemeText, ThemeText.Text);
     PrimaryButton.Content = PrimaryOperation() switch
     {
       EngineOperation.Install => "安装梦幻皮肤",
@@ -297,15 +302,37 @@ public partial class MainWindow : Window
 
   private void DiagnosticsButton_Click(object sender, RoutedEventArgs e)
   {
-    var diagnostics = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexDreamSkin");
-    Directory.CreateDirectory(diagnostics);
-    Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = false, ArgumentList = { diagnostics } });
+    try
+    {
+      var diagnostics = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexDreamSkin");
+      Directory.CreateDirectory(diagnostics);
+      Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = false, ArgumentList = { diagnostics } });
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or InvalidOperationException)
+    {
+      ShowSafeOperationFailure();
+    }
   }
 
   private async void UninstallButton_Click(object sender, RoutedEventArgs e)
   {
     var dialog = new UninstallDialog { Owner = this };
     if (dialog.ShowDialog() == true) await DispatchAsync(EngineOperation.Uninstall, dialog.DeleteUserThemes);
+  }
+
+  private void ShowSafeOperationFailure()
+  {
+    ProgressText.Text = "操作未能完成。请打开诊断信息后重试。";
+    System.Windows.MessageBox.Show(this, "操作未能完成。请打开诊断信息后重试。", "Codex 梦幻皮肤", MessageBoxButton.OK, MessageBoxImage.Warning);
+  }
+
+  internal static void BoundToWorkArea(Window window, double preferredWidth, double preferredHeight)
+  {
+    var workArea = SystemParameters.WorkArea;
+    window.MaxWidth = Math.Max(1, workArea.Width - 32);
+    window.MaxHeight = Math.Max(1, workArea.Height - 32);
+    window.Width = Math.Min(preferredWidth, window.MaxWidth);
+    window.Height = Math.Min(preferredHeight, window.MaxHeight);
   }
 }
 
@@ -317,9 +344,8 @@ internal sealed class UninstallDialog : Window
   internal UninstallDialog()
   {
     Title = "卸载梦幻皮肤";
-    Width = 460;
-    SizeToContent = SizeToContent.Height;
-    ResizeMode = ResizeMode.NoResize;
+    MainWindow.BoundToWorkArea(this, 460, 260);
+    ResizeMode = ResizeMode.CanResizeWithGrip;
     WindowStartupLocation = WindowStartupLocation.CenterOwner;
     _deleteThemes = new System.Windows.Controls.CheckBox
     {
@@ -346,6 +372,11 @@ internal sealed class UninstallDialog : Window
     content.Children.Add(warning);
     content.Children.Add(_deleteThemes);
     content.Children.Add(buttons);
-    Content = content;
+    Content = new ScrollViewer
+    {
+      Content = content,
+      VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+      HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+    };
   }
 }

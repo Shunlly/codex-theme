@@ -94,6 +94,7 @@ internal static class EngineProtocol
       if (envelope.State.Install == "not-installed" && envelope.State.ThemeName is not null) Invalid();
       if (envelope.State.Verified == true && envelope.State.Session != "active") Invalid();
       if (envelope.Ok && requestedOperation is EngineOperation.Apply or EngineOperation.Resume or EngineOperation.Verify && envelope.State.Verified != true) Invalid();
+      ValidateSemantics(envelope, requestedOperation);
       return envelope;
     }
   }
@@ -143,6 +144,50 @@ internal static class EngineProtocol
     var seen = new HashSet<string>(StringComparer.Ordinal);
     foreach (var value in values.EnumerateArray())
       if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } text || !allowed.Contains(text) || !seen.Add(text)) Invalid();
+  }
+
+  private static void ValidateSemantics(EngineEnvelope envelope, EngineOperation requestedOperation)
+  {
+    var state = envelope.State;
+    var actions = state.AvailableActions;
+    if (state.RequiresRestart && (state.Codex != "running" || state.Session != "official")) Invalid();
+    if (state.Session != "official" && state.Install != "ready") Invalid();
+    if (state.Operation == "busy")
+    {
+      if (envelope.Ok || envelope.Error?.Code != "OPERATION_BUSY" || actions.Length != 0) Invalid();
+    }
+    else if (envelope.Error?.Code == "OPERATION_BUSY") Invalid();
+    if (envelope.Error?.Code == "INVALID_REQUEST" && (state.Install != "not-installed" || state.Codex != "not-installed" ||
+        state.Session != "official" || state.Operation != "idle" || state.ThemeName is not null || state.RequiresRestart ||
+        state.Verified is not null || actions.Length != 0)) Invalid();
+
+    if (state.Install == "ready")
+    {
+      if (actions.Contains("install")) Invalid();
+    }
+    else
+    {
+      if (actions.Any(action => action != "install") || state.ThemeName is not null || state.Verified is not null) Invalid();
+    }
+    if (actions.Contains("pause") && state.Session != "active") Invalid();
+    if (actions.Contains("resume") && state.Session is not ("active" or "paused")) Invalid();
+    if (actions.Contains("apply") && state.Session == "active") Invalid();
+
+    if (!envelope.Ok) return;
+    if (state.Operation != "idle") Invalid();
+    switch (requestedOperation)
+    {
+      case EngineOperation.Install when state.Install != "ready":
+      case EngineOperation.Pause when state.Session != "paused":
+      case EngineOperation.Restore when state.Session != "official":
+        Invalid();
+        break;
+      case EngineOperation.Uninstall when state.Install != "not-installed" || state.Codex != "stopped" ||
+        state.Session != "official" || state.ThemeName is not null || state.Verified is not null ||
+        !actions.SequenceEqual(["install"]):
+        Invalid();
+        break;
+    }
   }
 
   private static void Invalid() => throw new InvalidDataException("The engine response violates Protocol v1.");

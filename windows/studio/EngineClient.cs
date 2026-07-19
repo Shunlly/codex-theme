@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Text;
 
 namespace CodexDreamSkinStudio;
@@ -44,7 +45,14 @@ internal sealed class EngineClient
       if (result.ExitCode is not (0 or 1 or 2)) throw new InvalidDataException("The engine process failed without a domain response.");
       EngineProtocol.ParseProgress(result.StandardError, null);
       var envelope = EngineProtocol.Parse(result.StandardOutput, operation);
-      if ((result.ExitCode == 0) != envelope.Ok) throw new InvalidDataException("The engine exit code does not match its response.");
+      var exitMatches = result.ExitCode switch
+      {
+        0 => envelope.Ok,
+        1 => !envelope.Ok && envelope.Error?.Code != "INVALID_REQUEST",
+        2 => !envelope.Ok && envelope.Error?.Code == "INVALID_REQUEST",
+        _ => false
+      };
+      if (!exitMatches) throw new InvalidDataException("The engine exit code does not match its response.");
       return envelope;
     }
     finally { Volatile.Write(ref _busy, 0); }
@@ -76,6 +84,7 @@ internal sealed class EngineClient
 internal sealed class EngineProcessRunner : IEngineProcessRunner
 {
   private const int OutputLimit = 1024 * 1024;
+  private static readonly TimeSpan ReapTimeout = TimeSpan.FromSeconds(3);
 
   public async Task<EngineProcessResult> RunAsync(string fileName, IReadOnlyList<string> arguments, IProgress<EngineProgress>? progress, CancellationToken cancellationToken)
   {
@@ -96,12 +105,13 @@ internal sealed class EngineProcessRunner : IEngineProcessRunner
     var stdoutTask = ReadStandardOutputAsync(process.StandardOutput.BaseStream);
     var stderrTask = ReadProgressAsync(process.StandardError.BaseStream, progress);
     try { await process.WaitForExitAsync(cancellationToken); }
-    catch (OperationCanceledException)
+    catch (OperationCanceledException cancellation)
     {
-      try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-      await process.WaitForExitAsync(CancellationToken.None);
-      try { await Task.WhenAll(stdoutTask, stderrTask); } catch { }
-      throw;
+      try { process.Kill(entireProcessTree: true); } catch { }
+      try { await ObserveWithinAsync(process.WaitForExitAsync(CancellationToken.None)); } catch { }
+      try { await ObserveWithinAsync(Task.WhenAll(stdoutTask, stderrTask)); } catch { }
+      ExceptionDispatchInfo.Capture(cancellation).Throw();
+      throw new UnreachableException();
     }
     var outputs = await Task.WhenAll(stdoutTask, stderrTask);
     return new EngineProcessResult(process.ExitCode, outputs[0], outputs[1]);
@@ -166,5 +176,11 @@ internal sealed class EngineProcessRunner : IEngineProcessRunner
     }
     if (protocolError is not null) throw protocolError;
     return Encoding.ASCII.GetString(result.ToArray());
+  }
+
+  private static async Task ObserveWithinAsync(Task task)
+  {
+    try { await task.WaitAsync(ReapTimeout); }
+    catch { _ = task.ContinueWith(completed => _ = completed.Exception, TaskContinuationOptions.OnlyOnFaulted); }
   }
 }
