@@ -124,24 +124,39 @@ function Get-DreamSkinStudioRecoveryState {
     throw 'The Dream Skin active theme is not a safe directory.'
   }
 
-  $liveBackup = Test-Path -LiteralPath $backup -PathType Leaf
+  $liveBackup = $false
+  $liveBackupInvalid = $false
+  try {
+    $liveBackup = Test-DreamSkinLiveConfigBackup -BackupPath $backup
+  } catch {
+    $liveBackupInvalid = $true
+  }
   $backupMarkerPresent = Test-Path -LiteralPath $backupMarker -PathType Leaf
   $statePresent = Test-Path -LiteralPath $state -PathType Leaf
   $pausedPresent = Test-Path -LiteralPath $paused -PathType Leaf
   $activeThemePresent = Test-DreamSkinStudioPathEntry -Path $activeThemeRoot
-  $completionEvidence = Test-DreamSkinConfigCompletionEvidence -ArchivePath $archive
-  $completed = $completionEvidence -and -not $liveBackup -and -not $backupMarkerPresent -and
-    -not $statePresent -and -not $pausedPresent
+  $completionEvidence = $false
+  $completionEvidenceInvalid = $false
+  try {
+    $completionEvidence = Test-DreamSkinConfigCompletionEvidence -ArchivePath $archive
+  } catch {
+    $completionEvidenceInvalid = $true
+  }
+  $completed = -not $liveBackupInvalid -and -not $completionEvidenceInvalid -and
+    (Test-DreamSkinRestoreCompleted -StateRoot $StateRoot -CompletionEvidence $completionEvidence -BackupPath $backup)
 
   $configManaged = $false
   if (-not $liveBackup -and -not $completed -and -not $statePresent -and -not $pausedPresent) {
     $configManaged = Test-DreamSkinBaseThemeManaged -ConfigPath (Join-Path $env:USERPROFILE '.codex\config.toml')
   }
-  $neverApplied = -not $liveBackup -and -not $backupMarkerPresent -and -not $completionEvidence -and
+  $neverApplied = -not $liveBackupInvalid -and -not $completionEvidenceInvalid -and
+    -not $liveBackup -and -not $backupMarkerPresent -and -not $completionEvidence -and
     -not $statePresent -and -not $pausedPresent -and -not $activeThemePresent -and -not $configManaged
-  $unsafe = -not $liveBackup -and -not $completed -and -not $neverApplied
+  $recoveryEvidenceInvalid = $liveBackupInvalid -or $completionEvidenceInvalid
+  $unsafe = $recoveryEvidenceInvalid -or (-not $liveBackup -and -not $completed -and -not $neverApplied)
   return [pscustomobject]@{
     LiveBackup = $liveBackup
+    RecoveryEvidenceInvalid = $recoveryEvidenceInvalid
     BackupMarkerPresent = $backupMarkerPresent
     CompletionEvidence = $completionEvidence
     StatePresent = $statePresent
@@ -155,14 +170,17 @@ function Get-DreamSkinStudioRecoveryState {
 }
 
 function script:Test-DreamSkinStudioInstalled {
-  param([Parameter(Mandatory = $true)][string]$StateRoot)
+  param(
+    [Parameter(Mandatory = $true)][string]$StateRoot,
+    [Parameter(Mandatory = $true)][bool]$LiveBackup
+  )
+  if (-not $LiveBackup) { return $false }
   if (-not (Test-DreamSkinStudioVersion)) { return $false }
   foreach ($path in @(
     (Join-Path $EngineRoot 'runtime\node.exe'),
     (Join-Path $PSScriptRoot 'studio-adapter.ps1'),
     (Join-Path $PSScriptRoot 'start-dream-skin.ps1'),
     (Join-Path $PSScriptRoot 'restore-dream-skin.ps1'),
-    (Join-Path $StateRoot 'config.before-dream-skin.toml'),
     (Join-Path $StateRoot 'active-theme\theme.json')
   )) {
     if (-not (Test-DreamSkinStudioReadableFile -Path $path)) { return $false }
@@ -229,7 +247,9 @@ function Get-DreamSkinStudioStatus {
 
   $stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   $recovery = Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot
-  $install = if (Test-DreamSkinStudioInstalled -StateRoot $stateRoot) { 'ready' } else { 'not-installed' }
+  $install = if (Test-DreamSkinStudioInstalled -StateRoot $stateRoot -LiveBackup $recovery.LiveBackup) {
+    'ready'
+  } else { 'not-installed' }
   $statePath = Join-Path $stateRoot 'state.json'
   $savedState = $null
   $stateDamaged = $false

@@ -110,6 +110,25 @@ try {
     throw 'Retry after marker publication failure replaced recovery bytes or omitted the marker.'
   }
 
+  $managedMissingRoot = Join-Path $temporaryRoot 'managed-missing-recovery'
+  New-Item -ItemType Directory -Path $managedMissingRoot | Out-Null
+  $managedMissingConfig = Join-Path $managedMissingRoot 'config.toml'
+  $managedMissingBackup = Join-Path $managedMissingRoot 'config.before-dream-skin.toml'
+  $managedMissingContent = "[desktop]`r`n$($script:DreamSkinManagedLightCodeTheme)`r`n"
+  [IO.File]::WriteAllText($managedMissingConfig, $managedMissingContent, $utf8NoBom)
+  $managedMissingBytes = [IO.File]::ReadAllBytes($managedMissingConfig)
+  $managedMissingRejected = $false
+  try {
+    Install-DreamSkinBaseTheme -ConfigPath $managedMissingConfig -BackupPath $managedMissingBackup
+  } catch {
+    $managedMissingRejected = $true
+  }
+  if (-not $managedMissingRejected -or
+    -not (Test-DreamSkinBytesEqual -Left $managedMissingBytes -Right ([IO.File]::ReadAllBytes($managedMissingConfig))) -or
+    (Test-Path -LiteralPath $managedMissingBackup)) {
+    throw 'managed-missing-recovery created a new baseline or changed managed config without prior completion proof.'
+  }
+
   $written = [System.IO.File]::ReadAllBytes($configPath)
   if ($written.Length -ge 3 -and $written[0] -eq 0xEF -and $written[1] -eq 0xBB -and $written[2] -eq 0xBF) {
     throw 'Config writer added an unexpected UTF-8 BOM.'

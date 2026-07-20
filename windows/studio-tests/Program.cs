@@ -112,6 +112,15 @@ static async Task RunChildAsync(string[] arguments)
               }
               File.AppendAllText(tracePath, "mutation-entered" + Environment.NewLine);
             }
+            if (mode == "delivery-failure")
+            {
+              if (!reservation.TryBegin(busy: false, confirming: false)) {
+                return new SingleInstanceResponse(1, Environment.ProcessId, false);
+              }
+              File.AppendAllText(tracePath, "handler-ready" + Environment.NewLine);
+              while (File.Exists(tracePath + ".gate")) await Task.Delay(20);
+              return new SingleInstanceResponse(0, Environment.ProcessId, true);
+            }
             var releaseOwner = request.Command == "prepare-uninstall" && mode == "success" ||
               request.Command == "activate" && mode == "version-handoff" &&
               !String.Equals(request.ExecutablePath, Environment.ProcessPath, StringComparison.OrdinalIgnoreCase);
@@ -326,6 +335,41 @@ try
       "Owner mutation started after the prepare-uninstall client disconnected.");
   }
   finally { StopControlledProcess(disconnectOwner); }
+
+  var deliveryFailureScope = $"delivery-failure-{Guid.NewGuid():N}";
+  var deliveryFailureTrace = Path.Combine(instanceRoot, "delivery-failure.trace");
+  var deliveryFailureGate = deliveryFailureTrace + ".gate";
+  File.WriteAllText(deliveryFailureGate, "wait");
+  var deliveryFailureOwner = await StartInstanceOwnerAsync(deliveryFailureScope, "delivery-failure",
+    Path.Combine(instanceRoot, "delivery-failure.ready"), deliveryFailureTrace);
+  try
+  {
+    using (var client = new NamedPipeClientStream(".", SingleInstanceCoordinator.GetPipeName(deliveryFailureScope),
+      PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+    {
+      await client.ConnectAsync(5000);
+      using var writer = new StreamWriter(client, new UTF8Encoding(false), 1024, leaveOpen: true);
+      await writer.WriteLineAsync(JsonSerializer.Serialize(new SingleInstanceRequest("prepare-uninstall", Environment.ProcessPath!)));
+      await writer.FlushAsync();
+      var deadline = DateTime.UtcNow.AddSeconds(5);
+      while ((!File.Exists(deliveryFailureTrace) || !File.ReadAllText(deliveryFailureTrace).Contains("handler-ready")) &&
+        DateTime.UtcNow < deadline) await Task.Delay(20);
+      Assert(File.Exists(deliveryFailureTrace) && File.ReadAllText(deliveryFailureTrace).Contains("handler-ready"),
+        "Delivery-failure handler did not reserve the handoff before client disconnect.");
+    }
+    File.Delete(deliveryFailureGate);
+    var cancelledDeadline = DateTime.UtcNow.AddSeconds(5);
+    while ((!File.Exists(deliveryFailureTrace) || !File.ReadAllText(deliveryFailureTrace).Contains("reservation-cancelled")) &&
+      DateTime.UtcNow < cancelledDeadline) await Task.Delay(20);
+    Assert(File.ReadAllText(deliveryFailureTrace).Contains("reservation-cancelled"),
+      "Failed response delivery did not cancel the reserved handoff.");
+    Assert(!deliveryFailureOwner.HasExited, "Failed response delivery terminated the owner.");
+  }
+  finally
+  {
+    if (File.Exists(deliveryFailureGate)) File.Delete(deliveryFailureGate);
+    StopControlledProcess(deliveryFailureOwner);
+  }
 }
 finally { Directory.Delete(instanceRoot, recursive: true); }
 

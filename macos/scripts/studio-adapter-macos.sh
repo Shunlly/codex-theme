@@ -146,8 +146,7 @@ fi
 status_error="$(json_field error.code 2>/dev/null || true)"
 status_install="$(json_field state.install 2>/dev/null || true)"
 live_recovery_backup_is_safe() {
-  [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
-    && [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]
+  live_theme_backup_is_valid
 }
 status_has_action() {
   local expected="$1"

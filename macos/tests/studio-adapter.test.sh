@@ -612,9 +612,12 @@ for script in common-macos.sh injector.mjs theme-config.mjs; do
   : > "$INSTALL_ROOT/scripts/$script"
 done
 : > "$TEST_HOME/.codex/config.toml"
-: > "$STATE_ROOT/theme-backup.json"
 /usr/bin/printf '%s\n' '{"name":"Fixture"}' > "$STATE_ROOT/theme/theme.json"
 /usr/bin/printf '{"port":%s,"session":"paused","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
+"$NODE" "$ROOT/scripts/theme-config.mjs" install \
+  "$TEST_HOME/.codex/config.toml" "$STATE_ROOT/theme-backup.json" >/dev/null
+VALID_THEME_BACKUP="$TMP/valid-theme-backup.json"
+/bin/cp "$STATE_ROOT/theme-backup.json" "$VALID_THEME_BACKUP"
 run_adapter status
 [ "$ADAPTER_EXIT" -eq 0 ] || {
   printf 'ready Studio status did not succeed.\n' >&2
@@ -624,6 +627,16 @@ run_adapter status
   const value = JSON.parse(process.argv[1]);
   if (!value.ok || value.state.install !== "ready" || value.state.verified !== null) process.exit(1);
 ' "$ADAPTER_JSON"
+
+/usr/bin/printf '{}\n' > "$STATE_ROOT/theme-backup.json"
+run_adapter status
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  const forbidden = new Set(["apply", "resume", "restore", "uninstall"]);
+  if (value.state.install === "ready") process.exit(1);
+  if (value.state.availableActions.some((action) => forbidden.has(action))) process.exit(1);
+' "$ADAPTER_JSON" || { printf 'malformed live backup enabled lifecycle actions.\n' >&2; exit 1; }
+/bin/cp "$VALID_THEME_BACKUP" "$STATE_ROOT/theme-backup.json"
 
 /usr/bin/printf '{"port":%s,"session":"active","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
 run_adapter status
@@ -689,11 +702,20 @@ run_adapter status
     platform: "darwin",
     configPath: process.argv[2],
     values: {
-      appearanceTheme: null,
+      appearanceTheme: "garbage",
       appearanceDarkCodeThemeId: null,
     },
   })}\n`);
 ' "$STATE_ROOT/theme-backup.restored.json" "$TEST_HOME/.codex/config.toml"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 1 ] || { printf 'malformed restore assignment was accepted as completion proof.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.session !== "stale" || value.error?.code !== "STATE_UNSAFE") process.exit(1);
+  if (value.state.availableActions.includes("uninstall")) process.exit(1);
+' "$ADAPTER_JSON"
+
+/bin/cp "$VALID_THEME_BACKUP" "$STATE_ROOT/theme-backup.restored.json"
 run_adapter status
 [ "$ADAPTER_EXIT" -eq 0 ] || { printf 'valid restored installed-engine status failed.\n' >&2; exit 1; }
 "$NODE" -e '
@@ -708,6 +730,27 @@ run_adapter status
   const value = JSON.parse(process.argv[1]);
   if (value.state.availableActions.join(",") !== "install,uninstall") process.exit(1);
 ' "$ADAPTER_JSON"
+
+/bin/rm -f "$STATE_ROOT/theme-backup.restored.json"
+/bin/cp "$VALID_THEME_BACKUP" "$STATE_ROOT/theme-backup.json"
+/usr/bin/printf '{"port":%s,"session":"paused","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'paused partial-engine status failed.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.install !== "not-installed" || value.state.session !== "paused") process.exit(1);
+  if (value.state.availableActions.join(",") !== "restore,uninstall") process.exit(1);
+' "$ADAPTER_JSON" || { printf 'paused partial engine did not expose recovery actions.\n' >&2; exit 1; }
+
+/bin/rm -f "$STATE_ROOT/state.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'official partial-engine status failed.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.install !== "not-installed" || value.state.session !== "official") process.exit(1);
+  if (value.state.availableActions.join(",") !== "restore,uninstall") process.exit(1);
+' "$ADAPTER_JSON" || { printf 'official partial engine did not expose recovery actions.\n' >&2; exit 1; }
+/bin/rm -f "$STATE_ROOT/theme-backup.json"
 : > "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh"
 /bin/chmod 755 "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh"
 
@@ -1247,35 +1290,41 @@ recreate_native_recovery() {
   ' "$RECOVERY_BACKUP" "$RECOVERY_CONFIG"
 }
 
-recreate_native_recovery
-RECOVERY_STATE_BEFORE="$(/usr/bin/shasum -a 256 "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")"
-"$NODE" "$RECOVERY_BUNDLED/scripts/injector.mjs" --watch --port 9341 --browser-id Browser-A \
-  --theme-dir "$RECOVERY_STATE/theme" &
-RECOVERY_WATCHER_PID="$!"
-/bin/sleep 0.1
-set +e
-/usr/bin/env HOME="$RECOVERY_HOME" \
-  "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
-  > "$RECOVERY_FIXTURE/unsafe-identity.json" 2> "$RECOVERY_FIXTURE/unsafe-identity.stderr"
-RECOVERY_UNSAFE_EXIT="$?"
-set -e
-[ "$RECOVERY_UNSAFE_EXIT" -eq 1 ] || { printf 'unsafe live identity did not fail closed.\n' >&2; exit 1; }
-"$NODE" -e '
-  const text = require("node:fs").readFileSync(process.argv[1], "utf8").trim();
-  const lines = text.split("\n");
-  if (lines.length !== 1 || JSON.parse(lines[0]).error?.code !== "STATE_UNSAFE") {
-    throw new Error(`unsafe recovery returned an unexpected envelope: ${text}`);
-  }
-' "$RECOVERY_FIXTURE/unsafe-identity.json"
-[ "$RECOVERY_STATE_BEFORE" = "$(/usr/bin/shasum -a 256 "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")" ] \
-  || { printf 'unsafe live identity changed recovery artifacts.\n' >&2; exit 1; }
-/bin/kill -0 "$RECOVERY_WATCHER_PID" 2>/dev/null \
-  || { printf 'unsafe recovery signalled the unverified watcher candidate.\n' >&2; exit 1; }
-/usr/bin/grep -F 'live injector candidate' "$RECOVERY_STATE/studio-operation.log" >/dev/null \
-  || { printf 'unsafe recovery never reached production watcher classification.\n' >&2; exit 1; }
-/bin/kill -TERM "$RECOVERY_WATCHER_PID" 2>/dev/null || true
-wait "$RECOVERY_WATCHER_PID" 2>/dev/null || true
-RECOVERY_WATCHER_PID=""
+for watcher_protocol in 2 3; do
+  recreate_native_recovery
+  RECOVERY_STATE_BEFORE="$(/usr/bin/shasum -a 256 "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")"
+  watcher_args=(--watch --port 9341)
+  [ "$watcher_protocol" != "3" ] || watcher_args+=(--browser-id Browser-A)
+  watcher_args+=(--theme-dir "$RECOVERY_STATE/theme")
+  "$NODE" "$RECOVERY_BUNDLED/scripts/injector.mjs" "${watcher_args[@]}" &
+  RECOVERY_WATCHER_PID="$!"
+  /bin/sleep 0.1
+  set +e
+  /usr/bin/env HOME="$RECOVERY_HOME" \
+    "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+    > "$RECOVERY_FIXTURE/unsafe-identity-$watcher_protocol.json" \
+    2> "$RECOVERY_FIXTURE/unsafe-identity-$watcher_protocol.stderr"
+  RECOVERY_UNSAFE_EXIT="$?"
+  set -e
+  [ "$RECOVERY_UNSAFE_EXIT" -eq 1 ] \
+    || { printf 'protocol-%s live identity did not fail closed.\n' "$watcher_protocol" >&2; exit 1; }
+  "$NODE" -e '
+    const text = require("node:fs").readFileSync(process.argv[1], "utf8").trim();
+    const lines = text.split("\n");
+    if (lines.length !== 1 || JSON.parse(lines[0]).error?.code !== "STATE_UNSAFE") {
+      throw new Error(`unsafe recovery returned an unexpected envelope: ${text}`);
+    }
+  ' "$RECOVERY_FIXTURE/unsafe-identity-$watcher_protocol.json"
+  [ "$RECOVERY_STATE_BEFORE" = "$(/usr/bin/shasum -a 256 "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")" ] \
+    || { printf 'protocol-%s live identity changed recovery artifacts.\n' "$watcher_protocol" >&2; exit 1; }
+  /bin/kill -0 "$RECOVERY_WATCHER_PID" 2>/dev/null \
+    || { printf 'unsafe recovery signalled protocol-%s watcher candidate.\n' "$watcher_protocol" >&2; exit 1; }
+  /usr/bin/grep -F 'live injector candidate' "$RECOVERY_STATE/studio-operation.log" >/dev/null \
+    || { printf 'protocol-%s recovery skipped watcher classification.\n' "$watcher_protocol" >&2; exit 1; }
+  /bin/kill -TERM "$RECOVERY_WATCHER_PID" 2>/dev/null || true
+  wait "$RECOVERY_WATCHER_PID" 2>/dev/null || true
+  RECOVERY_WATCHER_PID=""
+done
 
 for recovery_operation in restore uninstall; do
   for node_case in missing non-executable tampered; do
@@ -1343,7 +1392,18 @@ set -e
   if (value.error?.code !== "STATE_UNSAFE") process.exit(1);
 ' "$RECOVERY_FIXTURE/missing-proof-uninstall.json"
 
-/usr/bin/printf 'invalid completion proof\n' > "$RECOVERY_STATE/theme-backup.restored.json"
+"$NODE" -e '
+  const fs = require("node:fs");
+  fs.writeFileSync(process.argv[1], `${JSON.stringify({
+    schemaVersion: 1,
+    platform: "darwin",
+    configPath: process.argv[2],
+    values: {
+      appearanceTheme: "garbage",
+      appearanceDarkCodeThemeId: null,
+    },
+  })}\n`);
+' "$RECOVERY_STATE/theme-backup.restored.json" "$RECOVERY_CONFIG"
 set +e
 /usr/bin/env HOME="$RECOVERY_HOME" "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" uninstall \
   > "$RECOVERY_FIXTURE/invalid-proof-uninstall.json" 2> "$RECOVERY_FIXTURE/invalid-proof-uninstall.stderr"

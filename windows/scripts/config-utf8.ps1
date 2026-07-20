@@ -358,18 +358,72 @@ function Write-DreamSkinAppearanceMarker {
   Write-DreamSkinUtf8FileAtomically -Path $markerPath -Content ($marker + "`r`n")
 }
 
+function Test-DreamSkinLiveConfigBackup {
+  param([Parameter(Mandatory = $true)][string]$BackupPath)
+
+  $markerPath = Get-DreamSkinAppearanceMarkerPath -BackupPath $BackupPath
+  if (Get-Command Assert-DreamSkinNoReparseComponents -ErrorAction SilentlyContinue) {
+    Assert-DreamSkinNoReparseComponents -Path $BackupPath
+    Assert-DreamSkinNoReparseComponents -Path $markerPath
+  }
+  if (-not (Test-Path -LiteralPath $BackupPath)) { return $false }
+  if (-not (Test-Path -LiteralPath $BackupPath -PathType Leaf)) {
+    throw "Dream Skin config backup is not a safe file: $BackupPath"
+  }
+  if ((Test-Path -LiteralPath $markerPath) -and -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+    throw "Dream Skin appearance marker is not a safe file: $markerPath"
+  }
+
+  $content = Read-DreamSkinUtf8File -Path $BackupPath
+  Assert-DreamSkinDesktopShapeSupported -Content $content
+  $null = Read-DreamSkinAppearanceMarker -BackupPath $BackupPath
+  return $true
+}
+
 function Test-DreamSkinConfigCompletionEvidence {
   param([Parameter(Mandatory = $true)][string]$ArchivePath)
+  $markerPath = Get-DreamSkinAppearanceMarkerPath -BackupPath $ArchivePath
   if (Get-Command Assert-DreamSkinNoReparseComponents -ErrorAction SilentlyContinue) {
     Assert-DreamSkinNoReparseComponents -Path $ArchivePath
-    Assert-DreamSkinNoReparseComponents -Path (Get-DreamSkinAppearanceMarkerPath -BackupPath $ArchivePath)
+    Assert-DreamSkinNoReparseComponents -Path $markerPath
   }
-  if (-not (Test-Path -LiteralPath $ArchivePath)) { return $false }
+  if (-not (Test-Path -LiteralPath $ArchivePath)) {
+    if (Test-Path -LiteralPath $markerPath) {
+      throw "Dream Skin completion evidence marker exists without its archive: $markerPath"
+    }
+    return $false
+  }
   if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
     throw "Dream Skin completion evidence is not a safe file: $ArchivePath"
   }
-  $null = Read-DreamSkinUtf8File -Path $ArchivePath
+  if ((Test-Path -LiteralPath $markerPath) -and -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+    throw "Dream Skin completion evidence marker is not a safe file: $markerPath"
+  }
+  $content = Read-DreamSkinUtf8File -Path $ArchivePath
+  Assert-DreamSkinDesktopShapeSupported -Content $content
+  $null = Read-DreamSkinAppearanceMarker -BackupPath $ArchivePath
   return $true
+}
+
+function Test-DreamSkinRestoreCompleted {
+  param(
+    [Parameter(Mandatory = $true)][string]$StateRoot,
+    [Parameter(Mandatory = $true)][bool]$CompletionEvidence,
+    [string]$BackupPath = (Join-Path $StateRoot 'config.before-dream-skin.toml')
+  )
+
+  $paths = @(
+    $BackupPath,
+    (Get-DreamSkinAppearanceMarkerPath -BackupPath $BackupPath),
+    (Join-Path $StateRoot 'state.json'),
+    (Join-Path $StateRoot 'paused')
+  )
+  if (Get-Command Assert-DreamSkinNoReparseComponents -ErrorAction SilentlyContinue) {
+    Assert-DreamSkinNoReparseComponents -Path $StateRoot
+    foreach ($path in $paths) { Assert-DreamSkinNoReparseComponents -Path $path }
+  }
+  if (-not $CompletionEvidence) { return $false }
+  return @($paths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0
 }
 
 function Remove-DreamSkinConfigCompletionEvidence {
@@ -405,9 +459,19 @@ function Install-DreamSkinBaseTheme {
   }
   $originalBytes = [System.IO.File]::ReadAllBytes($ConfigPath)
   $content = ConvertFrom-DreamSkinUtf8Bytes -Bytes $originalBytes -Path $ConfigPath
+  $liveBackup = Test-DreamSkinLiveConfigBackup -BackupPath $BackupPath
+  if (-not $liveBackup -and (Test-DreamSkinBaseThemeManaged -ConfigPath $ConfigPath)) {
+    $stateRoot = Split-Path -Parent $BackupPath
+    $archivePath = Join-Path $stateRoot 'config.restored.toml'
+    $completionEvidence = Test-DreamSkinConfigCompletionEvidence -ArchivePath $archivePath
+    if (-not (Test-DreamSkinRestoreCompleted -StateRoot $stateRoot `
+      -CompletionEvidence $completionEvidence -BackupPath $BackupPath)) {
+      throw 'Dream Skin managed settings exist without a recoverable baseline; config was preserved.'
+    }
+  }
   $appearanceMarker = Read-DreamSkinAppearanceMarker -BackupPath $BackupPath
   $backupCreated = $false
-  if (-not (Test-Path -LiteralPath $BackupPath)) {
+  if (-not $liveBackup) {
     Write-DreamSkinBytesAtomically -Path $BackupPath -Bytes $originalBytes -ExpectedBytes $null
     $backupCreated = $true
   }

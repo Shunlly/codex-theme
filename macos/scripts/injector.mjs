@@ -129,9 +129,14 @@ class CdpSession {
       }
       this.pending.clear();
     });
-    await this.send("Runtime.enable");
-    await this.send("Page.enable");
-    return this;
+    try {
+      await this.send("Runtime.enable");
+      await this.send("Page.enable");
+      return this;
+    } catch (error) {
+      this.close();
+      throw error;
+    }
   }
 
   onMessage(event) {
@@ -290,6 +295,7 @@ async function listAppTargets(port, expectedBrowserId) {
   await requireBrowserIdentity(port, expectedBrowserId);
   const targets = await fetchCdpJson(port, "/json/list");
   if (!Array.isArray(targets)) throw new Error("CDP target list was not an array");
+  await requireBrowserIdentity(port, expectedBrowserId);
   return targets.filter((item) => isValidCdpPageTarget(item, port));
 }
 
@@ -330,28 +336,30 @@ async function connectTarget(target, port, commandGuard = null) {
   return new CdpSession(target, port, commandGuard).open();
 }
 
-async function connectCodexTargets(port, timeoutMs, expectedBrowserId) {
+async function connectCodexTargets(port, timeoutMs, expectedBrowserId, commandGuard = null) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
+    const connected = [];
     try {
       const targets = await listAppTargets(port, expectedBrowserId);
-      const connected = [];
       for (const target of targets) {
         let session;
         try {
-          session = await connectTarget(target, port);
+          session = await connectTarget(target, port, commandGuard);
           const probe = await probeSession(session);
           if (probe?.codex) connected.push({ target, session, probe });
           else session.close();
         } catch (error) {
           session?.close();
+          if (error instanceof CdpIdentityMismatchError) throw error;
           lastError = error;
         }
       }
       if (connected.length) return connected;
       lastError = new Error("No page matched the expected Codex shell markers");
     } catch (error) {
+      for (const item of connected) item.session.close();
       if (error instanceof CdpIdentityMismatchError) throw error;
       lastError = error;
     }
@@ -721,14 +729,22 @@ async function capture(session, outputPath) {
 }
 
 async function runOneShot(options) {
-  const connected = await connectCodexTargets(options.port, options.timeoutMs, options.browserId);
-  const loaded = (options.mode === "once" || options.reload) ? await loadPayload(options.themeDir) : null;
-  const payload = loaded?.payload ?? null;
-  const results = [];
-  let screenshotCaptured = false;
+  const identityAnchor = await connectBrowserIdentityAnchor(options.port, options.browserId);
+  const assertIdentityAnchorOpen = () => identityAnchor.assertOpen();
+  let connected = [];
+  try {
+    connected = await connectCodexTargets(
+      options.port,
+      options.timeoutMs,
+      options.browserId,
+      assertIdentityAnchorOpen,
+    );
+    const loaded = (options.mode === "once" || options.reload) ? await loadPayload(options.themeDir) : null;
+    const payload = loaded?.payload ?? null;
+    const results = [];
+    let screenshotCaptured = false;
 
-  for (const { target, session, probe } of connected) {
-    try {
+    for (const { target, session, probe } of connected) {
       if (options.mode === "remove") await removeFromSession(session);
       else if (options.mode === "once") await applyToSession(session, payload);
 
@@ -747,14 +763,15 @@ async function runOneShot(options) {
         await capture(session, options.screenshot);
         screenshotCaptured = true;
       }
-    } finally {
-      session.close();
     }
-  }
 
-  console.log(JSON.stringify({ mode: options.mode, version: SKIN_VERSION, port: options.port, targets: results }, null, 2));
-  const failed = results.length === 0 || results.some((item) => options.mode === "remove" ? item.result !== true : !item.result?.pass);
-  if (failed) process.exitCode = 2;
+    console.log(JSON.stringify({ mode: options.mode, version: SKIN_VERSION, port: options.port, targets: results }, null, 2));
+    const failed = results.length === 0 || results.some((item) => options.mode === "remove" ? item.result !== true : !item.result?.pass);
+    if (failed) process.exitCode = 2;
+  } finally {
+    for (const item of connected) item.session.close();
+    identityAnchor.close();
+  }
 }
 
 export function earlyPayloadFor(payload, revision) {

@@ -159,6 +159,26 @@ assert.doesNotMatch(window, /_operationCancellation\.Cancel\(\)/, "normal UI ter
 assert.doesNotMatch(app, /DeleteUserThemes/);
 
 const config = read("windows/scripts/config-utf8.ps1");
+const windowsTests = read("windows/tests/run-tests.ps1");
+const studioProtocolTests = read("windows/tests/studio-protocol.tests.ps1");
+const studioProgramTests = read("windows/studio-tests/Program.cs");
+for (const regression of [
+  "malformed-regular-backup", "malformed-regular-marker", "direct-restore-orphan-marker",
+  "orphan-archive-marker",
+  "real-restore-backup-unlink-fail", "real-restore-archive-marker-publish-fail",
+  "real-restore-archive-marker-unlink-fail",
+]) contains(studioProtocolTests, regression, `Windows recovery regression is missing: ${regression}`);
+for (const fault of [
+  "real-restore-backup-unlink-fail", "real-restore-archive-marker-publish-fail",
+  "real-restore-archive-marker-unlink-fail",
+]) contains(studioProtocolTests, `-Scenario '${fault}' -Arguments`,
+  `Windows recovery fault is injected but never exercised: ${fault}`);
+contains(windowsTests, "managed-missing-recovery", "direct install missing-recovery regression is absent");
+contains(studioProgramTests, 'mode == "delivery-failure"', "real pipe delivery-failure regression is absent");
+contains(config, "function Test-DreamSkinLiveConfigBackup", "live config recovery evidence has no shared strict validator");
+contains(config, "function Test-DreamSkinRestoreCompleted", "completed restore state has no shared predicate");
+contains(config, "completion evidence marker exists without its archive",
+  "an orphan archive marker can be classified as never-applied");
 contains(config, "$configCommitted = $false", "config transaction does not track config commit");
 contains(config, "$configCommitted = $true", "config transaction never records config commit");
 contains(config, "$backupCreated -and -not $configCommitted", "marker failure can delete the only recovery backup after config commit");
@@ -177,6 +197,7 @@ contains(restore, "Codex could not be reopened automatically. The restore is com
 contains(restore, "Get-DreamSkinRecoveryArtifactSnapshot", "restore cannot roll lifecycle artifacts back exactly");
 contains(restore, "Restore-DreamSkinRecoveryArtifactSnapshot", "restore does not restore entry artifacts on failure");
 contains(restore, "Publish-DreamSkinConfigBackupArchive", "restore consumes its live backup before publishing completion evidence");
+contains(restore, "Test-DreamSkinRestoreCompleted", "direct restore does not share the completed-state predicate");
 const stateCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path $StatePath");
 const pauseCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')");
 const archiveCommit = restore.indexOf("Publish-DreamSkinConfigBackupArchive");
@@ -197,9 +218,12 @@ const studioWindows = read("windows/scripts/studio-windows.ps1");
 contains(studioWindows, "Get-DreamSkinSafeThemeDisplayName", "theme names are not sanitized at the protocol boundary");
 contains(studioWindows, "[char]0x2028", "Unicode line separators are not redacted from theme display names");
 contains(studioWindows, "Get-DreamSkinStudioRecoveryState", "status and adapter do not share recovery classification");
+contains(studioWindows, "Test-DreamSkinLiveConfigBackup", "status treats an unvalidated live backup as recovery evidence");
+contains(studioWindows, "Test-DreamSkinRestoreCompleted", "status duplicates or weakens completed-state classification");
 contains(studioWindows, "'stale' { $availableActions = @('restore', 'uninstall') }",
   "stale status still advertises Apply or Verify");
-contains(studioWindows, "$completed = $completionEvidence -and -not $liveBackup -and -not $backupMarkerPresent",
+contains(studioWindows, "$completed = -not $liveBackupInvalid", "invalid live backup can be classified as completed");
+contains(studioWindows, "Test-DreamSkinRestoreCompleted -StateRoot $StateRoot",
   "fixed completion evidence ignores a leftover live backup marker");
 contains(studioWindows, "$activeThemePresent = Test-DreamSkinStudioPathEntry -Path $activeThemeRoot",
   "never-applied recovery ignores an orphan active-theme entry");

@@ -17,6 +17,8 @@ let browserId = "Browser-A";
 let versionPayload = null;
 let targets = [];
 let closeAnchorOnList = false;
+let switchBrowserAfterList = false;
+let closeAnchorDuringPageOpen = false;
 const requests = [];
 const browserSockets = new Set();
 const pageSockets = new Set();
@@ -92,6 +94,10 @@ const server = http.createServer((request, response) => {
       setTimeout(() => response.end(JSON.stringify(targets)), 75);
     } else {
       response.end(JSON.stringify(targets));
+      if (switchBrowserAfterList) {
+        switchBrowserAfterList = false;
+        browserId = "Browser-B";
+      }
     }
   } else {
     response.statusCode = 404;
@@ -104,7 +110,7 @@ server.on("upgrade", (request, socket, head) => {
   const accept = createHash("sha1")
     .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
     .digest("base64");
-  socket.write([
+  const acceptUpgrade = () => socket.write([
     "HTTP/1.1 101 Switching Protocols",
     "Upgrade: websocket",
     "Connection: Upgrade",
@@ -113,13 +119,24 @@ server.on("upgrade", (request, socket, head) => {
     "",
   ].join("\r\n"));
   if (request.url?.startsWith("/devtools/browser/")) {
+    acceptUpgrade();
     browserSockets.add(socket);
     socket.on("data", () => socket.destroy());
     socket.once("close", () => browserSockets.delete(socket));
   } else {
     pageSockets.add(socket);
     socket.once("close", () => pageSockets.delete(socket));
-    attachCdpSocket(socket, head);
+    if (closeAnchorDuringPageOpen) {
+      closeAnchorDuringPageOpen = false;
+      for (const browserSocket of browserSockets) browserSocket.destroy();
+      setTimeout(() => {
+        acceptUpgrade();
+        attachCdpSocket(socket, head);
+      }, 100);
+    } else {
+      acceptUpgrade();
+      attachCdpSocket(socket, head);
+    }
   }
 });
 
@@ -128,6 +145,7 @@ await new Promise((resolve, reject) => {
   server.listen(0, "127.0.0.1", resolve);
 });
 const port = server.address().port;
+const activeChildren = new Set();
 
 function launch(args) {
   const child = spawn(process.execPath, [injector, ...args], { stdio: ["ignore", "pipe", "pipe"] });
@@ -141,11 +159,33 @@ function launch(args) {
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal, get stdout() { return stdout; }, get stderr() { return stderr; } }));
   });
-  return { child, completed, output: () => ({ stdout, stderr }) };
+  const handle = { child, completed, output: () => ({ stdout, stderr }) };
+  activeChildren.add(handle);
+  completed.then(
+    () => activeChildren.delete(handle),
+    () => activeChildren.delete(handle),
+  );
+  return handle;
 }
 
-async function run(args) {
-  return launch(args).completed;
+async function cleanupChild(handle) {
+  if (handle.child.exitCode === null && handle.child.signalCode === null) {
+    handle.child.kill("SIGKILL");
+  }
+  await withDeadline(handle.completed, "injector child did not terminate during cleanup", 2000);
+}
+
+async function waitForCompletion(handle, message, timeoutMs = 5000) {
+  return withDeadline(handle.completed, message, timeoutMs);
+}
+
+async function run(args, timeoutMs = 5000) {
+  const handle = launch(args);
+  try {
+    return await waitForCompletion(handle, "injector child exceeded its deadline", timeoutMs);
+  } finally {
+    await cleanupChild(handle);
+  }
 }
 
 async function waitFor(predicate, message, timeoutMs = 5000) {
@@ -209,6 +249,49 @@ try {
 
   requests.length = 0;
   mutationCommands.length = 0;
+  browserId = "Browser-A";
+  targets = [{
+    type: "page",
+    id: "Replacement-One-Shot",
+    title: "Replacement Codex",
+    url: "app://codex/",
+    webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/Replacement-One-Shot`,
+  }];
+  switchBrowserAfterList = true;
+  result = await run([
+    "--remove", "--port", String(port), "--browser-id", "Browser-A", "--timeout-ms", "750",
+  ]);
+  assert.notEqual(result.code, 0, "one-shot remove accepted a replacement browser");
+  assert.deepEqual(mutationCommands, [], "replacement one-shot browser received CDP commands");
+
+  browserId = "Browser-A";
+  requests.length = 0;
+  mutationCommands.length = 0;
+  targets = [{
+    type: "page",
+    id: "Startup-Page",
+    title: "Startup Codex",
+    url: "app://codex/",
+    webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/Startup-Page`,
+  }];
+  closeAnchorDuringPageOpen = true;
+  const startupWatcher = launch([
+    "--watch", "--port", String(port), "--browser-id", "Browser-A", "--theme-dir", themeDir,
+  ]);
+  try {
+    result = await waitForCompletion(
+      startupWatcher,
+      "watcher did not exit after Browser identity closed during page startup",
+      2500,
+    );
+    assert.notEqual(result.code, 0, "watcher accepted identity loss during page startup");
+    await waitFor(() => pageSockets.size === 0, "page socket leaked after guarded startup failed", 1000);
+  } finally {
+    await cleanupChild(startupWatcher);
+  }
+
+  requests.length = 0;
+  mutationCommands.length = 0;
   targets = [{
     type: "page",
     id: "Original-Page",
@@ -219,41 +302,49 @@ try {
   const validWatcher = launch([
     "--watch", "--port", String(port), "--browser-id", "Browser-A", "--theme-dir", themeDir,
   ]);
-  await waitFor(
-    () => validWatcher.output().stdout.includes("injected verified Codex target Original-Page"),
-    "valid watcher did not inject its anchored target",
-  );
-  const themePath = path.join(themeDir, "theme.json");
-  const theme = JSON.parse(await fs.readFile(themePath, "utf8"));
-  theme.tagline = "Browser anchored hot reload";
-  await fs.writeFile(themePath, `${JSON.stringify(theme, null, 2)}\n`);
-  await waitFor(
-    () => validWatcher.output().stdout.includes("refreshed theme"),
-    "same-browser watcher did not hot reload",
-  );
-  const removalsBeforeShutdown = mutationCommands
-    .filter((command) => command === "Page.removeScriptToEvaluateOnNewDocument").length;
-  validWatcher.child.kill("SIGTERM");
-  result = await validWatcher.completed;
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(
-    mutationCommands.filter((command) => command === "Page.removeScriptToEvaluateOnNewDocument").length,
-    removalsBeforeShutdown + 1,
-    "normal watcher shutdown did not remove its registered early script",
-  );
+  try {
+    await waitFor(
+      () => validWatcher.output().stdout.includes("injected verified Codex target Original-Page"),
+      "valid watcher did not inject its anchored target",
+    );
+    const themePath = path.join(themeDir, "theme.json");
+    const theme = JSON.parse(await fs.readFile(themePath, "utf8"));
+    theme.tagline = "Browser anchored hot reload";
+    await fs.writeFile(themePath, `${JSON.stringify(theme, null, 2)}\n`);
+    await waitFor(
+      () => validWatcher.output().stdout.includes("refreshed theme"),
+      "same-browser watcher did not hot reload",
+    );
+    const removalsBeforeShutdown = mutationCommands
+      .filter((command) => command === "Page.removeScriptToEvaluateOnNewDocument").length;
+    validWatcher.child.kill("SIGTERM");
+    result = await waitForCompletion(validWatcher, "valid watcher did not stop after SIGTERM");
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(
+      mutationCommands.filter((command) => command === "Page.removeScriptToEvaluateOnNewDocument").length,
+      removalsBeforeShutdown + 1,
+      "normal watcher shutdown did not remove its registered early script",
+    );
+  } finally {
+    await cleanupChild(validWatcher);
+  }
 
   requests.length = 0;
   targets = [];
   const replacedWatcher = launch([
     "--watch", "--port", String(port), "--browser-id", "Browser-A", "--theme-dir", themeDir,
   ]);
-  await waitFor(() => requests.includes("/json/list"), "replacement fixture watcher did not start");
-  const listsBeforeReplacement = requests.filter((item) => item === "/json/list").length;
-  browserId = "Browser-B";
-  result = await replacedWatcher.completed;
-  assert.notEqual(result.code, 0, "watcher accepted a replacement browser");
-  assert.equal(requests.filter((item) => item === "/json/list").length, listsBeforeReplacement);
-  assert.match(result.stderr, /identity changed from Browser-A to Browser-B/);
+  try {
+    await waitFor(() => requests.includes("/json/list"), "replacement fixture watcher did not start");
+    const listsBeforeReplacement = requests.filter((item) => item === "/json/list").length;
+    browserId = "Browser-B";
+    result = await waitForCompletion(replacedWatcher, "replacement watcher did not stop");
+    assert.notEqual(result.code, 0, "watcher accepted a replacement browser");
+    assert.equal(requests.filter((item) => item === "/json/list").length, listsBeforeReplacement);
+    assert.match(result.stderr, /identity changed from Browser-A to Browser-B/);
+  } finally {
+    await cleanupChild(replacedWatcher);
+  }
 
   browserId = "Browser-A";
   requests.length = 0;
@@ -283,20 +374,16 @@ try {
     assert.match(result.stderr, /browser identity.*closed/i);
     assert.deepEqual(mutationCommands, [], "replacement browser received CDP mutation commands");
   } finally {
-    if (reusedIdWatcher.child.exitCode === null && reusedIdWatcher.child.signalCode === null) {
-      reusedIdWatcher.child.kill("SIGKILL");
-    }
-    await withDeadline(
-      reusedIdWatcher.completed,
-      "reuse fixture watcher did not terminate during cleanup",
-      2000,
-    ).catch(() => {});
+    await cleanupChild(reusedIdWatcher);
   }
 
   console.log("PASS: macOS injector anchors Browser ID before discovery and across hot reloads.");
 } finally {
+  const childCleanup = await Promise.allSettled([...activeChildren].map(cleanupChild));
   for (const socket of browserSockets) socket.destroy();
   for (const socket of pageSockets) socket.destroy();
   await new Promise((resolve) => server.close(resolve));
   await fs.rm(temporary, { recursive: true, force: true });
+  const cleanupFailure = childCleanup.find((entry) => entry.status === "rejected");
+  if (cleanupFailure) throw cleanupFailure.reason;
 }

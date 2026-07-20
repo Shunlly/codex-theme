@@ -298,7 +298,7 @@ foreach ($required in @(
   '$PrivateNodePath = Join-Path $EngineRoot ''runtime\node.exe''',
   '$powershellPath = Join-Path $PSHOME ''powershell.exe''',
   "'install-dream-skin.ps1'", "@('-NoShortcuts', '-NodePath', `$PrivateNodePath)",
-  "'pause-dream-skin.ps1'", "@('-RestoreBaseTheme', '-Uninstall')",
+  "'pause-dream-skin.ps1'", "@('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')",
   "[Console]::Error.WriteLine(\"DREAM_SKIN_PROGRESS=`$progress\")",
   "Get-DreamSkinNodeRuntime -NodePath `$PrivateNodePath -ExpectedVersion '22.23.1'",
   "`$childArguments += '-AdapterLockHeld'",
@@ -307,8 +307,7 @@ foreach ($required in @(
   "New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official'",
   'Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot',
   '$recovery.Completed -or $recovery.NeverApplied',
-  '$status.State.codex -ne ''running''',
-  'Assert-DreamSkinNoReparseComponents -Path $stateRoot'
+  '$status.State.codex -ne ''running'''
 )) {
   if (-not $adapterSource.Contains($required)) { throw "Studio adapter contract is missing: $required" }
 }
@@ -417,6 +416,9 @@ foreach ($required in @('[string]$ExpectedVersion', '$version -cne $ExpectedVers
   if (-not $commonSourceContract.Contains($required)) { throw "Shared lifecycle contract is missing: $required" }
 }
 $studioSourceContract = [IO.File]::ReadAllText((Join-Path $Root 'scripts\studio-windows.ps1'))
+if (-not $studioSourceContract.Contains('Assert-DreamSkinNoReparseComponents -Path $StateRoot')) {
+  throw 'Shared Studio recovery classification does not validate the state root.'
+}
 if (-not $studioSourceContract.Contains(
     "Get-DreamSkinNodeRuntime -NodePath (Join-Path `$EngineRoot 'runtime\node.exe') -ExpectedVersion '22.23.1'")) {
   throw 'Deep Studio status does not require the exact private Node runtime.'
@@ -724,7 +726,9 @@ function Get-DreamSkinCodexProcesses {
     $env:DREAM_SKIN_TEST_SCENARIO -in @(
       'real-restore-unauthorized', 'real-restore-timeout', 'real-restore-force',
       'real-restore-state-unlink-fail', 'real-restore-paused-unlink-fail',
-      'real-restore-archive-fail', 'real-restore-marker-unlink-fail',
+      'real-restore-archive-fail', 'real-restore-archive-marker-publish-fail',
+      'real-restore-archive-marker-unlink-fail', 'real-restore-marker-unlink-fail',
+      'real-restore-backup-unlink-fail',
       'real-restore-launch-fail', 'real-restore-post-launch-write',
       'real-uninstall-force'
     )) {
@@ -793,6 +797,13 @@ function Write-DreamSkinBytesAtomically {
   if ([IO.Path]::GetFileName($Path) -ceq 'config.restored.toml') {
     Add-RealLifecycleTrace 'archive-backup'
     if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-archive-fail') { throw 'fixture archive failure' }
+  } elseif ([IO.Path]::GetFileName($Path) -ceq 'config.restored.toml.appearance.json') {
+    Add-RealLifecycleTrace 'archive-marker'
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-archive-marker-publish-fail' -and
+      -not $script:DreamSkinArchiveMarkerPublishFailed) {
+      $script:DreamSkinArchiveMarkerPublishFailed = $true
+      throw 'fixture archive marker publication failure'
+    }
   } elseif ([IO.Path]::GetFileName($Path) -ceq 'config.toml') {
     Add-RealLifecycleTrace 'config-rollback'
   }
@@ -819,6 +830,14 @@ function Remove-Item {
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-marker-unlink-fail' -and
     [IO.Path]::GetFileName($LiteralPath) -ceq 'config.before-dream-skin.toml.appearance.json') {
     throw 'fixture backup marker unlink failure'
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-backup-unlink-fail' -and
+    [IO.Path]::GetFileName($LiteralPath) -ceq 'config.before-dream-skin.toml') {
+    throw 'fixture live backup unlink failure'
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-archive-marker-unlink-fail' -and
+    [IO.Path]::GetFileName($LiteralPath) -ceq 'config.restored.toml.appearance.json') {
+    throw 'fixture archive marker unlink failure'
   }
   $testRoot = [IO.Path]::GetFullPath($env:DREAM_SKIN_REAL_CASE_ROOT).TrimEnd('\') + '\'
   if ([IO.Path]::GetFullPath($LiteralPath).StartsWith($testRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -877,7 +896,8 @@ function New-RealLifecycleCase {
   New-Item -ItemType Directory -Path $appData -Force | Out-Null
   [IO.File]::WriteAllText((Join-Path $userProfile '.codex\config.toml'), 'original', $utf8NoBom)
   [IO.File]::WriteAllText((Join-Path $stateRoot 'config.before-dream-skin.toml'), 'backup', $utf8NoBom)
-  [IO.File]::WriteAllText((Join-Path $stateRoot 'config.before-dream-skin.toml.appearance.json'), 'marker', $utf8NoBom)
+  [IO.File]::WriteAllText((Join-Path $stateRoot 'config.before-dream-skin.toml.appearance.json'),
+    '{"schemaVersion":1,"appearanceThemeManaged":false}', $utf8NoBom)
   [IO.File]::WriteAllText((Join-Path $stateRoot 'state.json'), 'preserve-state', $utf8NoBom)
   $codexExecutable = Join-Path $caseRoot 'Codex.exe'
   [IO.File]::WriteAllText($codexExecutable, 'fixture executable', $utf8NoBom)
@@ -892,7 +912,8 @@ function New-RealRestoreRollbackBaseline {
   $archive = Join-Path $Case.StateRoot 'config.restored.toml'
   [IO.File]::WriteAllText((Join-Path $Case.StateRoot 'paused'), 'paused-before', $utf8NoBom)
   [IO.File]::WriteAllText($archive, 'prior-archive', $utf8NoBom)
-  [IO.File]::WriteAllText("$archive.appearance.json", 'prior-archive-marker', $utf8NoBom)
+  [IO.File]::WriteAllText("$archive.appearance.json",
+    '{"schemaVersion":1,"appearanceThemeManaged":false}', $utf8NoBom)
   return [pscustomobject]@{
     ConfigBytes = [IO.File]::ReadAllBytes((Join-Path $Case.UserProfile '.codex\config.toml'))
     StateSnapshot = @(Get-StateSnapshot -Root $Case.StateRoot)
@@ -1024,6 +1045,41 @@ try {
       -Codex $definition.Codex -Session $definition.Session -ThemeName '午夜极光' -RequiresRestart $definition.Restart `
       -Verified $null -AvailableActions $definition.Actions -ErrorCode $definition.Error -RecoveryActions $definition.Recovery
   }
+
+  foreach ($malformedDefinition in @(
+    @{ Name = 'malformed-regular-backup'; Marker = $false },
+    @{ Name = 'malformed-regular-marker'; Marker = $true }
+  )) {
+    $malformed = New-CaseRoot -Name $malformedDefinition.Name -NoState
+    $malformedBackup = Join-Path $malformed.StateRoot 'config.before-dream-skin.toml'
+    if ($malformedDefinition.Marker) {
+      [IO.File]::WriteAllText((Get-DreamSkinAppearanceMarkerPath -BackupPath $malformedBackup), '{}', $utf8NoBom)
+    } else {
+      [IO.File]::WriteAllBytes($malformedBackup, [byte[]](0x66, 0x6f, 0x80))
+    }
+    $before = Get-ProtectedSnapshot -Case $malformed
+    $result = Invoke-Studio -Case $malformed -Scenario 'stopped'
+    Assert-StudioResult -Result $result -ExitCode 1 -Ok $false -Install 'not-installed' `
+      -Codex 'stopped' -Session 'stale' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+      -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
+    Assert-Equal (Get-ProtectedSnapshot -Case $malformed) $before `
+      "Malformed recovery evidence changed protected bytes for $($malformedDefinition.Name)."
+    Assert-NoChildOrLog -Case $malformed
+  }
+
+  $orphanArchiveMarker = New-CaseRoot -Name 'orphan-archive-marker' -NoState
+  Remove-Item -LiteralPath (Join-Path $orphanArchiveMarker.StateRoot 'config.before-dream-skin.toml') -Force
+  Remove-Item -LiteralPath (Join-Path $orphanArchiveMarker.StateRoot 'active-theme') -Recurse -Force
+  $orphanArchive = Join-Path $orphanArchiveMarker.StateRoot 'config.restored.toml'
+  [IO.File]::WriteAllText("$orphanArchive.appearance.json", '{}', $utf8NoBom)
+  $before = Get-ProtectedSnapshot -Case $orphanArchiveMarker
+  $result = Invoke-Studio -Case $orphanArchiveMarker -Scenario 'stopped'
+  Assert-StudioResult -Result $result -ExitCode 1 -Ok $false -Install 'not-installed' `
+    -Codex 'stopped' -Session 'stale' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $orphanArchiveMarker) $before `
+    'Orphan archive marker status changed protected bytes.'
+  Assert-NoChildOrLog -Case $orphanArchiveMarker
 
   foreach ($unsafeThemeName in @(
     '../private-theme', 'C:\private-theme', "line$([char]0x1f)break", "line$([char]0x85)break",
@@ -1840,6 +1896,30 @@ try {
   Assert-TraceOrder -Trace $realResult.Trace -Expected @('stop:True', 'ensure', 'restore-config', 'archive-backup') `
     -Message 'Production restore did not propagate force before restore writes.'
 
+  $directOrphanMarker = New-RealLifecycleCase -Name 'direct-restore-orphan-marker'
+  $directConfig = Join-Path $directOrphanMarker.UserProfile '.codex\config.toml'
+  $directBackup = Join-Path $directOrphanMarker.StateRoot 'config.before-dream-skin.toml'
+  $directMarker = "$directBackup.appearance.json"
+  $directArchive = Join-Path $directOrphanMarker.StateRoot 'config.restored.toml'
+  $directState = Join-Path $directOrphanMarker.StateRoot 'state.json'
+  [IO.File]::WriteAllText($directArchive, 'completed-backup', $utf8NoBom)
+  Remove-Item -LiteralPath $directBackup -Force
+  Remove-Item -LiteralPath $directState -Force
+  $directConfigBytes = [IO.File]::ReadAllBytes($directConfig)
+  $directStateSnapshot = @(Get-StateSnapshot -Root $directOrphanMarker.StateRoot)
+  $realResult = Invoke-RealLifecycle -Case $directOrphanMarker -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'direct-restore-orphan-marker' -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'restore-config' -or
+    $realResult.Trace -contains 'archive-backup' -or -not (Test-Path -LiteralPath $directMarker)) {
+    throw 'Direct restore treated archive plus an orphan live marker as a completed restore.'
+  }
+  if ([Convert]::ToBase64String($directConfigBytes) -cne
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($directConfig))) {
+    throw 'Direct restore with an orphan live marker changed config bytes.'
+  }
+  Assert-Equal (Get-StateSnapshot -Root $directOrphanMarker.StateRoot) $directStateSnapshot `
+    'Direct restore with an orphan live marker changed marker or archive bytes.'
+
   $realStateFailure = New-RealLifecycleCase -Name 'restore-state-unlink-failure'
   $realConfig = Join-Path $realStateFailure.UserProfile '.codex\config.toml'
   $realBackup = Join-Path $realStateFailure.StateRoot 'config.before-dream-skin.toml'
@@ -1935,6 +2015,70 @@ try {
     "remove:$realBackupMarker", 'config-rollback'
   ) -Message 'Backup marker cleanup failure crossed or escaped the restore transaction.'
 
+  $realBackupFailure = New-RealLifecycleCase -Name 'restore-backup-unlink-failure'
+  $realBackup = Join-Path $realBackupFailure.StateRoot 'config.before-dream-skin.toml'
+  $realBackupMarker = "$realBackup.appearance.json"
+  $realState = Join-Path $realBackupFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realBackupFailure.StateRoot 'paused'
+  $realBaseline = New-RealRestoreRollbackBaseline -Case $realBackupFailure
+  $realMarkerBytes = [IO.File]::ReadAllBytes($realBackupMarker)
+  $realResult = Invoke-RealLifecycle -Case $realBackupFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-backup-unlink-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'start-process' -or
+    -not (Test-Path -LiteralPath $realBackupMarker) -or
+    [Convert]::ToBase64String($realMarkerBytes) -cne
+      [Convert]::ToBase64String([IO.File]::ReadAllBytes($realBackupMarker))) {
+    throw 'Live-backup cleanup failure did not restore the already-removed live marker exactly.'
+  }
+  Assert-RealRestoreRolledBack -Case $realBackupFailure -Baseline $realBaseline `
+    -Message 'Live-backup cleanup failure did not restore every entry artifact exactly.'
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'restore-config', 'archive-backup', 'archive-marker', "remove:$realState", "remove:$realPaused",
+    "remove:$realBackupMarker", "remove:$realBackup", 'config-rollback'
+  ) -Message 'Live-backup cleanup failure crossed or escaped the restore transaction.'
+
+  $realArchiveMarkerPublishFailure = New-RealLifecycleCase -Name 'restore-archive-marker-publish-failure'
+  $realState = Join-Path $realArchiveMarkerPublishFailure.StateRoot 'state.json'
+  $realBaseline = New-RealRestoreRollbackBaseline -Case $realArchiveMarkerPublishFailure
+  $realResult = Invoke-RealLifecycle -Case $realArchiveMarkerPublishFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-archive-marker-publish-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realState" -or
+    $realResult.Trace -contains 'start-process') {
+    throw 'Archive-marker publication failure crossed the restore cleanup or relaunch boundary.'
+  }
+  Assert-RealRestoreRolledBack -Case $realArchiveMarkerPublishFailure -Baseline $realBaseline `
+    -Message 'Archive-marker publication failure did not restore every entry artifact exactly.'
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'restore-config', 'archive-backup', 'archive-marker', 'config-rollback'
+  ) -Message 'Archive-marker publication failure did not roll back before cleanup or relaunch.'
+
+  $realArchiveMarkerUnlinkFailure = New-RealLifecycleCase -Name 'restore-archive-marker-unlink-failure'
+  $realBackup = Join-Path $realArchiveMarkerUnlinkFailure.StateRoot 'config.before-dream-skin.toml'
+  $realBackupMarker = "$realBackup.appearance.json"
+  $realArchive = Join-Path $realArchiveMarkerUnlinkFailure.StateRoot 'config.restored.toml'
+  $realArchiveMarker = "$realArchive.appearance.json"
+  $realState = Join-Path $realArchiveMarkerUnlinkFailure.StateRoot 'state.json'
+  Remove-Item -LiteralPath $realBackupMarker -Force
+  $realBaseline = New-RealRestoreRollbackBaseline -Case $realArchiveMarkerUnlinkFailure
+  $realResult = Invoke-RealLifecycle -Case $realArchiveMarkerUnlinkFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-archive-marker-unlink-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realState" -or
+    $realResult.Trace -contains 'start-process') {
+    throw 'Archive-marker removal failure crossed the restore cleanup or relaunch boundary.'
+  }
+  Assert-RealRestoreRolledBack -Case $realArchiveMarkerUnlinkFailure -Baseline $realBaseline `
+    -Message 'Archive-marker removal failure did not restore every entry artifact exactly.'
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'restore-config', 'archive-backup', "remove:$realArchiveMarker", 'config-rollback'
+  ) -Message 'Archive-marker removal failure did not roll back before cleanup or relaunch.'
+
+  $realConfig = Join-Path $realMarkerFailure.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realMarkerFailure.StateRoot 'config.before-dream-skin.toml'
+  $realBackupMarker = "$realBackup.appearance.json"
+  $realArchive = Join-Path $realMarkerFailure.StateRoot 'config.restored.toml'
+  $realArchiveMarker = "$realArchive.appearance.json"
+  $realState = Join-Path $realMarkerFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realMarkerFailure.StateRoot 'paused'
   $realResult = Invoke-RealLifecycle -Case $realMarkerFailure -ScriptName 'restore-dream-skin.ps1' `
     -Scenario 'real-restore-marker-retry' -Arguments @('-RestoreBaseTheme')
   if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or

@@ -207,25 +207,10 @@ native_restore_helper_is_safe() {
   [ "$bin_real" = "$root_real/bin" ]
 }
 
-restored_theme_backup_is_valid() {
-  local keys=""
-  local value_type=""
-  [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
-    && [ -f "$RESTORED_THEME_BACKUP_PATH" ] && [ ! -L "$RESTORED_THEME_BACKUP_PATH" ] \
-    || return 1
-  [ "$(/usr/bin/plutil -extract schemaVersion raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "1" ] \
-    && [ "$(/usr/bin/plutil -extract platform raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "darwin" ] \
-    && [ "$(/usr/bin/plutil -extract configPath raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "$HOME/.codex/config.toml" ] \
-    || return 1
-  keys="$(/usr/bin/plutil -extract values raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null \
-    | LC_ALL=C /usr/bin/sort)" || return 1
-  [ "$keys" = $'appearanceDarkCodeThemeId\nappearanceTheme' ] || return 1
-  for key in appearanceTheme appearanceDarkCodeThemeId; do
-    value_type="$(/usr/bin/plutil -type "values.$key" "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" \
-      || return 1
-    case "$value_type" in string|'(any)') ;; *) return 1 ;; esac
-  done
-}
+status_theme_backup_is_valid() (
+  . "$PROJECT_ROOT/scripts/common-macos.sh" >/dev/null 2>&1
+  theme_backup_is_valid "$1"
+)
 
 installed_engine_is_present() {
   [ -d "$INSTALL_ROOT" ] && [ ! -L "$INSTALL_ROOT" ]
@@ -259,14 +244,14 @@ if [ "$STUDIO_JSON" = "true" ]; then
   ENGINE_COMPLETE="false"
   ENGINE_PRESENT="false"
   RESTORE_PROOF_VALID="false"
-  LIVE_BACKUP_SAFE="false"
+  LIVE_BACKUP_VALID="false"
 
   if installed_engine_is_complete; then ENGINE_COMPLETE="true"; fi
   if installed_engine_is_present; then ENGINE_PRESENT="true"; fi
-  if restored_theme_backup_is_valid; then RESTORE_PROOF_VALID="true"; fi
-  if [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]; then LIVE_BACKUP_SAFE="true"; fi
+  if status_theme_backup_is_valid "$RESTORED_THEME_BACKUP_PATH"; then RESTORE_PROOF_VALID="true"; fi
+  if status_theme_backup_is_valid "$THEME_BACKUP_PATH"; then LIVE_BACKUP_VALID="true"; fi
   if [ "$ENGINE_COMPLETE" = "true" ] \
-    && [ "$LIVE_BACKUP_SAFE" = "true" ] \
+    && [ "$LIVE_BACKUP_VALID" = "true" ] \
     && [ -f "$THEME_DIR/theme.json" ] && [ ! -L "$THEME_DIR/theme.json" ]; then
     INSTALL="ready"
   fi
@@ -309,8 +294,10 @@ if [ "$STUDIO_JSON" = "true" ]; then
         fi
         ;;
       esac
+  elif [ "$LIVE_BACKUP_VALID" = "true" ]; then
+    ACTIONS='["restore","uninstall"]'
   elif [ "$ENGINE_PRESENT" = "true" ] && [ "$STUDIO_SESSION" = "stale" ] \
-    && { [ "$LIVE_BACKUP_SAFE" = "true" ] || [ "$RESTORE_PROOF_VALID" = "true" ]; }; then
+    && [ "$RESTORE_PROOF_VALID" = "true" ]; then
     ACTIONS='["restore","uninstall"]'
   elif [ "$ENGINE_PRESENT" = "true" ] && [ "$STUDIO_SESSION" = "official" ] \
     && [ ! -e "$STATE_PATH" ] && [ ! -L "$STATE_PATH" ] \

@@ -362,24 +362,121 @@ native_restore_helper_identity() {
   /usr/bin/stat -f '%d:%i' "$helper"
 }
 
-restored_theme_backup_is_valid() {
+theme_backup_assignment_is_valid() {
+  local key="$1"
+  local backup_path="$2"
+  /usr/bin/plutil -extract "values.$key" raw -o - "$backup_path" 2>/dev/null \
+    | LC_ALL=C /usr/bin/awk -v expected="$key" '
+      function hex_value(character, position) {
+        position = index("0123456789abcdef", tolower(character))
+        return position ? position - 1 : -1
+      }
+      BEGIN {
+        for (value = 1; value < 256; value += 1) ordinal[sprintf("%c", value)] = value
+      }
+      {
+        if (NR != 1) invalid = 1
+        line = $0
+      }
+      END {
+        if (invalid || NR != 1) exit 1
+        length_bytes = length(line)
+        for (index_byte = 1; index_byte <= length_bytes; index_byte += 1) {
+          byte = ordinal[substr(line, index_byte, 1)]
+          if (byte <= 8 || (byte >= 10 && byte <= 31) || byte == 127) exit 1
+          next_byte = ordinal[substr(line, index_byte + 1, 1)]
+          third_byte = ordinal[substr(line, index_byte + 2, 1)]
+          if (byte == 194 && next_byte >= 128 && next_byte <= 159) exit 1
+          if (byte == 226 && next_byte == 128 && (third_byte == 168 || third_byte == 169)) exit 1
+        }
+
+        expected_length = length(expected)
+        if (substr(line, 1, expected_length) != expected) exit 1
+        cursor = expected_length + 1
+        while (cursor <= length_bytes && (substr(line, cursor, 1) == " " || substr(line, cursor, 1) == "\t")) cursor += 1
+        if (substr(line, cursor, 1) != "=") exit 1
+        cursor += 1
+        while (cursor <= length_bytes && (substr(line, cursor, 1) == " " || substr(line, cursor, 1) == "\t")) cursor += 1
+        quote = substr(line, cursor, 1)
+        if (quote != "\"" && quote != "\047") exit 1
+        cursor += 1
+        closed = 0
+        while (cursor <= length_bytes) {
+          character = substr(line, cursor, 1)
+          if (character == quote) {
+            cursor += 1
+            closed = 1
+            break
+          }
+          if (quote == "\"" && character == "\\") {
+            cursor += 1
+            if (cursor > length_bytes) exit 1
+            escape = substr(line, cursor, 1)
+            if (index("\"\\btnfr", escape)) {
+              cursor += 1
+              continue
+            }
+            if (escape != "u" && escape != "U") exit 1
+            digits = escape == "u" ? 4 : 8
+            if (cursor + digits > length_bytes) exit 1
+            scalar = 0
+            for (offset = 1; offset <= digits; offset += 1) {
+              digit = hex_value(substr(line, cursor + offset, 1))
+              if (digit < 0) exit 1
+              scalar = (scalar * 16) + digit
+            }
+            if (scalar > 1114111 || (scalar >= 55296 && scalar <= 57343)) exit 1
+            cursor += digits + 1
+            continue
+          }
+          cursor += 1
+        }
+        if (!closed) exit 1
+        while (cursor <= length_bytes && (substr(line, cursor, 1) == " " || substr(line, cursor, 1) == "\t")) cursor += 1
+        if (cursor <= length_bytes && substr(line, cursor, 1) != "#") exit 1
+      }
+    '
+}
+
+theme_backup_is_valid() {
+  local backup_path="$1"
+  local expected_config_path="${2:-$CONFIG_PATH}"
   local keys=""
+  local schema_type=""
+  local schema_value=""
   local value_type=""
   [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
-    && [ -f "$RESTORED_THEME_BACKUP_PATH" ] && [ ! -L "$RESTORED_THEME_BACKUP_PATH" ] \
+    && [ -f "$backup_path" ] && [ ! -L "$backup_path" ] \
     || return 1
-  [ "$(/usr/bin/plutil -extract schemaVersion raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "1" ] \
-    && [ "$(/usr/bin/plutil -extract platform raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "darwin" ] \
-    && [ "$(/usr/bin/plutil -extract configPath raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "$CONFIG_PATH" ] \
+  schema_type="$(/usr/bin/plutil -type schemaVersion "$backup_path" 2>/dev/null)" || return 1
+  schema_value="$(/usr/bin/plutil -extract schemaVersion raw -o - "$backup_path" 2>/dev/null)" || return 1
+  case "$schema_type:$schema_value" in integer:1|float:1.000000) ;; *) return 1 ;; esac
+  [ "$(/usr/bin/plutil -type platform "$backup_path" 2>/dev/null)" = "string" ] \
+    && [ "$(/usr/bin/plutil -extract platform raw -o - "$backup_path" 2>/dev/null)" = "darwin" ] \
+    && [ "$(/usr/bin/plutil -type configPath "$backup_path" 2>/dev/null)" = "string" ] \
+    && [ "$(/usr/bin/plutil -extract configPath raw -o - "$backup_path" 2>/dev/null)" = "$expected_config_path" ] \
+    && [ "$(/usr/bin/plutil -type values "$backup_path" 2>/dev/null)" = "dictionary" ] \
     || return 1
-  keys="$(/usr/bin/plutil -extract values raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null \
+  keys="$(/usr/bin/plutil -extract values raw -o - "$backup_path" 2>/dev/null \
     | LC_ALL=C /usr/bin/sort)" || return 1
   [ "$keys" = $'appearanceDarkCodeThemeId\nappearanceTheme' ] || return 1
   for key in appearanceTheme appearanceDarkCodeThemeId; do
-    value_type="$(/usr/bin/plutil -type "values.$key" "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" \
+    value_type="$(/usr/bin/plutil -type "values.$key" "$backup_path" 2>/dev/null)" \
       || return 1
-    case "$value_type" in string|'(any)') ;; *) return 1 ;; esac
+    case "$value_type" in
+      '(any)') ;;
+      string) theme_backup_assignment_is_valid "$key" "$backup_path" || return 1 ;;
+      *) return 1 ;;
+    esac
   done
+}
+
+live_theme_backup_is_valid() {
+  theme_backup_is_valid "$THEME_BACKUP_PATH"
+}
+
+restored_theme_backup_is_valid() {
+  theme_backup_is_valid "$RESTORED_THEME_BACKUP_PATH"
 }
 
 codex_main_pids() {
@@ -1033,6 +1130,7 @@ live_injector_candidate_pids() {
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     [ "$pid" != "$$" ] || continue
     case "$command_line" in
+      *"/injector.mjs --watch --port "*" --theme-dir $THEME_DIR"*|\
       *"/injector.mjs --watch --port "*" --browser-id "*" --theme-dir $THEME_DIR"*)
         /bin/kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
         ;;

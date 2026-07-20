@@ -154,11 +154,8 @@ try {
   $config = Join-Path $HOME '.codex\config.toml'
   $restoreRequested = $RecoverConfigBackup -or $RestoreBaseTheme
   $completionEvidence = Test-DreamSkinConfigCompletionEvidence -ArchivePath $archivePath
-  $restoreAlreadyCommitted = $restoreRequested -and
-    -not (Test-Path -LiteralPath $backup) -and
-    $completionEvidence -and
-    -not (Test-Path -LiteralPath $StatePath) -and
-    -not (Test-Path -LiteralPath $pausedPath)
+  $restoreAlreadyCommitted = $restoreRequested -and (Test-DreamSkinRestoreCompleted `
+    -StateRoot $StateRoot -CompletionEvidence $completionEvidence -BackupPath $backup)
   $artifactSnapshots = @(
     (Get-DreamSkinRecoveryArtifactSnapshot -Path $StatePath),
     (Get-DreamSkinRecoveryArtifactSnapshot -Path $pausedPath),
@@ -169,13 +166,15 @@ try {
   )
   $configBeforeRestoreBytes = $null
   if ($RecoverConfigBackup -and -not $restoreAlreadyCommitted) {
-    if (-not (Test-Path -LiteralPath $backup)) { throw 'No pre-install config backup is available.' }
-    $null = Read-DreamSkinUtf8File -Path $backup
+    if (-not (Test-DreamSkinLiveConfigBackup -BackupPath $backup)) {
+      throw 'No pre-install config backup is available.'
+    }
     $configBeforeRestoreBytes = [IO.File]::ReadAllBytes($config)
     $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBeforeRestoreBytes -Path $config
   } elseif ($RestoreBaseTheme -and -not $restoreAlreadyCommitted) {
-    if (-not (Test-Path -LiteralPath $backup)) { throw 'No pre-install config backup is available.' }
-    $null = Read-DreamSkinUtf8File -Path $backup
+    if (-not (Test-DreamSkinLiveConfigBackup -BackupPath $backup)) {
+      throw 'No pre-install config backup is available.'
+    }
     $null = Read-DreamSkinUtf8File -Path $config
     $configBeforeRestoreBytes = [IO.File]::ReadAllBytes($config)
   }
