@@ -129,6 +129,13 @@ struct ContentView: View {
                     .lineLimit(2)
             }
             Spacer()
+            Button(action: controller.refreshStatus) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .disabled(!model.menuState.statusEnabled)
+            .accessibilityLabel("Check Status")
+            .help("Check Status / Retry")
+
             Button(role: .destructive, action: { controller.request(.uninstall) }) {
                 Label("Remove Dream Skin", systemImage: "trash")
             }

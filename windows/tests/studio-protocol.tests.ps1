@@ -395,7 +395,8 @@ if (-not $restoreSourceContract.Contains("Join-Path `$StateRoot 'config.restored
   $restoreBackupCleanup -le $restoreMarkerCleanup -or $restoreCommit -le $restoreBackupCleanup -or
   $restoreRelaunch -le $restoreCommit -or $shortcutCleanup -le $restorePublish -or
   -not $restoreSourceContract.Contains('if (-not $transactionCommitted -and $configChanged') -or
-  -not $restoreSourceContract.Contains('Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreBytes')) {
+  -not $restoreSourceContract.Contains('Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreSnapshot.Bytes') -or
+  -not $restoreSourceContract.Contains('-ExpectedSnapshot $currentConfigSnapshot')) {
   throw 'Restore does not publish proof, clean lifecycle state, remove live recovery artifacts, commit, and only then relaunch.'
 }
 
@@ -472,11 +473,13 @@ switch ($name) {
   'restore-dream-skin.ps1' {
     Remove-Item -LiteralPath (Join-Path $stateRoot 'state.json') -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $stateRoot 'paused') -Force -ErrorAction SilentlyContinue
-    if ($scenario -ne 'uninstall-incomplete') {
+    $liveBackup = Join-Path $stateRoot 'config.before-dream-skin.toml'
+    if ($scenario -ne 'uninstall-incomplete' -and (Test-Path -LiteralPath $liveBackup -PathType Leaf)) {
       Move-Item -LiteralPath (Join-Path $stateRoot 'config.before-dream-skin.toml') `
         -Destination (Join-Path $stateRoot 'config.restored.toml') -Force
     }
-    if ($args -contains '-NoRelaunch') {
+    $configMissing = -not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.codex\config.toml'))
+    if ($args -contains '-NoRelaunch' -or $configMissing) {
       [IO.File]::WriteAllText((Join-Path $stateRoot 'test-codex-stopped'), 'stopped')
     }
   }
@@ -578,7 +581,9 @@ function Get-DreamSkinCodexProcesses {
     'lifecycle-apply-timeout', 'lifecycle-pause', 'pause-remove-fail', 'resume-hot', 'resume-cold-paused',
     'lifecycle-resume', 'lifecycle-resume-timeout', 'lifecycle-restore',
     'lifecycle-restore-timeout', 'restore-fail', 'stale-restore-fail', 'lifecycle-verify', 'verify-fail',
-    'lifecycle-uninstall', 'lifecycle-uninstall-timeout', 'uninstall-fail'
+    'lifecycle-uninstall', 'lifecycle-uninstall-timeout', 'uninstall-fail', 'running-missing-config',
+    'missing-config-restore-running-unauthorized', 'missing-config-restore-running-authorized',
+    'missing-config-uninstall-running-unauthorized', 'missing-config-uninstall-running-authorized'
   )
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'secondary-install') { $running = $Codex.PackageRoot -like '*Secondary' }
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'saved-stopped') { $running = $Codex.PackageRoot -like '*Primary' }
@@ -730,7 +735,9 @@ function Get-DreamSkinCodexProcesses {
       'real-restore-archive-marker-unlink-fail', 'real-restore-marker-unlink-fail',
       'real-restore-backup-unlink-fail',
       'real-restore-launch-fail', 'real-restore-post-launch-write',
-      'real-uninstall-force'
+      'real-uninstall-force',
+      'missing-config-restore-running-unauthorized', 'missing-config-restore-running-authorized',
+      'missing-config-uninstall-running-unauthorized', 'missing-config-uninstall-running-authorized'
     )) {
     return @([pscustomobject]@{ ProcessId = 5151 })
   }
@@ -793,7 +800,7 @@ function Restore-DreamSkinConfigBackup {
   Restore-DreamSkinBaseTheme -ConfigPath $ConfigPath -BackupPath $BackupPath
 }
 function Write-DreamSkinBytesAtomically {
-  param([string]$Path, [byte[]]$Bytes, [byte[]]$ExpectedBytes)
+  param([string]$Path, [byte[]]$Bytes, [byte[]]$ExpectedBytes, [object]$ExpectedSnapshot)
   if ([IO.Path]::GetFileName($Path) -ceq 'config.restored.toml') {
     Add-RealLifecycleTrace 'archive-backup'
     if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-archive-fail') { throw 'fixture archive failure' }
@@ -858,7 +865,6 @@ function Get-DreamSkinThemePaths {
     Images = (Join-Path $StateRoot 'images'); PauseFile = (Join-Path $StateRoot 'paused'); State = (Join-Path $StateRoot 'state.json')
   }
 }
-function Assert-DreamSkinNoReparseComponents { param([string]$Path) }
 function Ensure-DreamSkinManagedDirectory {
   param([string]$Path, [string]$Root)
   Add-RealThemeTrace 'ensure'
@@ -931,6 +937,27 @@ function Assert-RealRestoreRolledBack {
     throw "$Message Config bytes changed."
   }
   Assert-Equal (Get-StateSnapshot -Root $Case.StateRoot) @($Baseline.StateSnapshot) $Message
+}
+
+function Assert-RealMissingConfigCompletion {
+  param(
+    [Parameter(Mandatory = $true)][object]$Case,
+    [Parameter(Mandatory = $true)][object]$Result,
+    [Parameter(Mandatory = $true)][string]$Message,
+    [switch]$ExpectedClose
+  )
+  $config = Join-Path $Case.UserProfile '.codex\config.toml'
+  $backup = Join-Path $Case.StateRoot 'config.before-dream-skin.toml'
+  $archive = Join-Path $Case.StateRoot 'config.restored.toml'
+  $state = Join-Path $Case.StateRoot 'state.json'
+  if ($Result.ExitCode -ne 0 -or (Test-Path -LiteralPath $config) -or
+    (Test-Path -LiteralPath $backup) -or (Test-Path -LiteralPath "$backup.appearance.json") -or
+    (Test-Path -LiteralPath $state) -or -not (Test-Path -LiteralPath $archive -PathType Leaf) -or
+    -not (Test-Path -LiteralPath "$archive.appearance.json" -PathType Leaf) -or
+    $Result.Trace -contains 'restore-config' -or $Result.Trace -contains 'start-process' -or
+    ($ExpectedClose -and $Result.Trace -notcontains 'stop:False')) {
+    throw $Message
+  }
 }
 
 function Invoke-RealLifecycle {
@@ -1026,6 +1053,7 @@ try {
   $cases = @(
     @{ Name = 'missing-codex'; Args = @{ NoState = $true }; Exit = 1; Ok = $false; Codex = 'not-installed'; Session = 'official'; Restart = $false; Actions = @('apply', 'restore', 'uninstall'); Error = 'CODEX_NOT_INSTALLED'; Recovery = @('cancel') },
     @{ Name = 'missing-config'; Args = @{ NoConfig = $true; NoState = $true }; Exit = 1; Ok = $false; Codex = 'needs-first-run'; Session = 'official'; Restart = $false; Actions = @('apply', 'restore', 'uninstall'); Error = 'CODEX_FIRST_RUN_REQUIRED'; Recovery = @('open-codex', 'retry', 'cancel') },
+    @{ Name = 'running-missing-config'; Args = @{ NoConfig = $true; NoState = $true }; Exit = 1; Ok = $false; Codex = 'needs-first-run'; Session = 'official'; Restart = $true; Actions = @('apply', 'restore', 'uninstall'); Error = 'CODEX_FIRST_RUN_REQUIRED'; Recovery = @('open-codex', 'retry', 'cancel') },
     @{ Name = 'stopped'; Args = @{ NoState = $true }; Exit = 0; Ok = $true; Codex = 'stopped'; Session = 'official'; Restart = $false; Actions = @('apply', 'restore', 'uninstall'); Error = $null; Recovery = @() },
     @{ Name = 'running'; Args = @{ NoState = $true }; Exit = 0; Ok = $true; Codex = 'running'; Session = 'official'; Restart = $true; Actions = @('apply', 'restore', 'verify', 'uninstall'); Error = $null; Recovery = @() },
     @{ Name = 'active'; Args = @{}; Exit = 0; Ok = $true; Codex = 'running'; Session = 'active'; Restart = $false; Actions = @('pause', 'resume', 'restore', 'verify', 'uninstall'); Error = $null; Recovery = @() },
@@ -1431,6 +1459,49 @@ try {
     -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
   Assert-NoChildOrLog -Case $missingCodexWithoutBackup
 
+  $missingConfigRestoreStopped = New-CaseRoot -Name 'missing-config-restore-stopped-first' `
+    -NoConfig -NoState
+  $missingConfigPath = Join-Path $missingConfigRestoreStopped.UserProfile '.codex\config.toml'
+  $result = Invoke-Studio -Case $missingConfigRestoreStopped -Scenario 'stopped' -Operation 'restore'
+  if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath $missingConfigPath) -or
+    -not (Test-Path -LiteralPath (Join-Path $missingConfigRestoreStopped.StateRoot 'config.restored.toml') -PathType Leaf)) {
+    throw 'missing-config-restore-stopped-first did not complete without creating config.'
+  }
+  Assert-ChildInvocation -Case $missingConfigRestoreStopped `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-AdapterLockHeld'
+  $restoreInvocationCount = @([IO.File]::ReadAllLines($missingConfigRestoreStopped.ArgvPath)).Count
+  $result = Invoke-Studio -Case $missingConfigRestoreStopped `
+    -Scenario 'missing-config-restore-stopped-retry' -Operation 'restore'
+  if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath $missingConfigPath) -or
+    @([IO.File]::ReadAllLines($missingConfigRestoreStopped.ArgvPath)).Count -ne ($restoreInvocationCount + 1)) {
+    throw 'missing-config-restore-stopped-retry was not idempotent.'
+  }
+
+  $missingConfigRestoreUnauthorized = New-CaseRoot `
+    -Name 'missing-config-restore-running-unauthorized' -NoConfig -NoState
+  $before = Get-ProtectedSnapshot -Case $missingConfigRestoreUnauthorized
+  $result = Invoke-Studio -Case $missingConfigRestoreUnauthorized `
+    -Scenario 'missing-config-restore-running-unauthorized' -Operation 'restore'
+  Assert-StudioResult -Result $result -Operation 'restore' -ExitCode 1 -Ok $false -Install 'ready' `
+    -Codex 'needs-first-run' -Session 'official' -ThemeName '午夜极光' -RequiresRestart $true -Verified $null `
+    -AvailableActions @('apply', 'restore', 'uninstall') -ErrorCode 'RESTART_REQUIRED' `
+    -RecoveryActions @('authorize-restart', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $missingConfigRestoreUnauthorized) $before `
+    'missing-config-restore-running-unauthorized changed protected state.'
+  Assert-NoChildOrLog -Case $missingConfigRestoreUnauthorized
+
+  $missingConfigRestoreAuthorized = New-CaseRoot `
+    -Name 'missing-config-restore-running-authorized' -NoConfig -NoState
+  $missingConfigPath = Join-Path $missingConfigRestoreAuthorized.UserProfile '.codex\config.toml'
+  $result = Invoke-Studio -Case $missingConfigRestoreAuthorized `
+    -Scenario 'missing-config-restore-running-authorized' -Operation 'restore' `
+    -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath $missingConfigPath)) {
+    throw 'missing-config-restore-running-authorized failed or created config.'
+  }
+  Assert-ChildInvocation -Case $missingConfigRestoreAuthorized `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning|-AdapterLockHeld'
+
   $restoreUnauthorized = New-CaseRoot -Name 'restore-unauthorized' -NoState
   $before = Get-StateSnapshot -Root $restoreUnauthorized.StateRoot
   $result = Invoke-Studio -Case $restoreUnauthorized -Scenario 'lifecycle-restore' -Operation 'restore'
@@ -1515,11 +1586,17 @@ try {
   Remove-Item -LiteralPath (Join-Path $neverApplied.StateRoot 'config.before-dream-skin.toml') -Force
   Remove-Item -LiteralPath (Join-Path $neverApplied.StateRoot 'active-theme') -Recurse -Force
   $before = Get-ProtectedSnapshot -Case $neverApplied
-  $result = Invoke-Studio -Case $neverApplied -Scenario 'stopped' -Operation 'uninstall'
-  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
-    -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
-    -AvailableActions @('install') -ErrorCode $null
+  $configBefore = (Get-FileHash -LiteralPath (Join-Path $neverApplied.UserProfile '.codex\config.toml') -Algorithm SHA256).Hash
+  foreach ($attempt in 1..2) {
+    $result = Invoke-Studio -Case $neverApplied -Scenario 'stopped' -Operation 'uninstall'
+    Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
+      -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+      -AvailableActions @('install') -ErrorCode $null
+  }
   Assert-Equal (Get-ProtectedSnapshot -Case $neverApplied) $before 'Never-applied uninstall changed retained theme state.'
+  if ((Get-FileHash -LiteralPath (Join-Path $neverApplied.UserProfile '.codex\config.toml') -Algorithm SHA256).Hash -cne $configBefore) {
+    throw 'Repeated never-applied uninstall reran config restore.'
+  }
   Assert-NoChildOrLog -Case $neverApplied
 
   $lostManagedRecovery = New-CaseRoot -Name 'uninstall-lost-managed-recovery' -NoState
@@ -1540,11 +1617,15 @@ try {
   Move-Item -LiteralPath (Join-Path $alreadyRestored.StateRoot 'config.before-dream-skin.toml') `
     -Destination (Join-Path $alreadyRestored.StateRoot 'config.restored.toml')
   $before = Get-ProtectedSnapshot -Case $alreadyRestored
+  $configBefore = (Get-FileHash -LiteralPath (Join-Path $alreadyRestored.UserProfile '.codex\config.toml') -Algorithm SHA256).Hash
   foreach ($attempt in 1..2) {
     $result = Invoke-Studio -Case $alreadyRestored -Scenario 'stopped' -Operation 'uninstall'
     if ($result.ExitCode -ne 0 -or -not $result.Envelope.ok) { throw 'Repeated already-restored uninstall failed.' }
   }
   Assert-Equal (Get-ProtectedSnapshot -Case $alreadyRestored) $before 'Repeated uninstall changed restored state.'
+  if ((Get-FileHash -LiteralPath (Join-Path $alreadyRestored.UserProfile '.codex\config.toml') -Algorithm SHA256).Hash -cne $configBefore) {
+    throw 'Repeated already-restored uninstall reran config restore.'
+  }
   Assert-NoChildOrLog -Case $alreadyRestored
 
   $incompleteRestored = New-CaseRoot -Name 'uninstall-incomplete-restored-marker' -NoState
@@ -1663,6 +1744,49 @@ try {
     }
   }
   Assert-NoChildOrLog -Case $neverAppliedDelete
+
+  $missingConfigUninstallStopped = New-CaseRoot -Name 'missing-config-uninstall-stopped-first' `
+    -NoConfig -NoState
+  $missingConfigPath = Join-Path $missingConfigUninstallStopped.UserProfile '.codex\config.toml'
+  $result = Invoke-Studio -Case $missingConfigUninstallStopped -Scenario 'stopped' -Operation 'uninstall'
+  if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath $missingConfigPath) -or
+    -not (Test-Path -LiteralPath (Join-Path $missingConfigUninstallStopped.StateRoot 'config.restored.toml') -PathType Leaf)) {
+    throw 'missing-config-uninstall-stopped-first did not complete without creating config.'
+  }
+  Assert-ChildInvocation -Case $missingConfigUninstallStopped `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-AdapterLockHeld'
+  $uninstallInvocationCount = @([IO.File]::ReadAllLines($missingConfigUninstallStopped.ArgvPath)).Count
+  $result = Invoke-Studio -Case $missingConfigUninstallStopped `
+    -Scenario 'missing-config-uninstall-stopped-retry' -Operation 'uninstall'
+  if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath $missingConfigPath) -or
+    @([IO.File]::ReadAllLines($missingConfigUninstallStopped.ArgvPath)).Count -ne $uninstallInvocationCount) {
+    throw 'missing-config-uninstall-stopped-retry reran config restore or created config.'
+  }
+
+  $missingConfigUninstallUnauthorized = New-CaseRoot `
+    -Name 'missing-config-uninstall-running-unauthorized' -NoConfig -NoState
+  $before = Get-ProtectedSnapshot -Case $missingConfigUninstallUnauthorized
+  $result = Invoke-Studio -Case $missingConfigUninstallUnauthorized `
+    -Scenario 'missing-config-uninstall-running-unauthorized' -Operation 'uninstall'
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 1 -Ok $false -Install 'ready' `
+    -Codex 'needs-first-run' -Session 'official' -ThemeName '午夜极光' -RequiresRestart $true -Verified $null `
+    -AvailableActions @('apply', 'restore', 'uninstall') -ErrorCode 'RESTART_REQUIRED' `
+    -RecoveryActions @('authorize-restart', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $missingConfigUninstallUnauthorized) $before `
+    'missing-config-uninstall-running-unauthorized changed protected state.'
+  Assert-NoChildOrLog -Case $missingConfigUninstallUnauthorized
+
+  $missingConfigUninstallAuthorized = New-CaseRoot `
+    -Name 'missing-config-uninstall-running-authorized' -NoConfig -NoState
+  $missingConfigPath = Join-Path $missingConfigUninstallAuthorized.UserProfile '.codex\config.toml'
+  $result = Invoke-Studio -Case $missingConfigUninstallAuthorized `
+    -Scenario 'missing-config-uninstall-running-authorized' -Operation 'uninstall' `
+    -ExtraArguments @('-RestartAuthorized')
+  if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath $missingConfigPath)) {
+    throw 'missing-config-uninstall-running-authorized failed or created config.'
+  }
+  Assert-ChildInvocation -Case $missingConfigUninstallAuthorized `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-CloseRunning|-AdapterLockHeld'
 
   $missingCodexUninstall = New-CaseRoot -Name 'uninstall-missing-codex' -NoState
   $result = Invoke-Studio -Case $missingCodexUninstall -Scenario 'missing-codex' -Operation 'uninstall'
@@ -1895,6 +2019,99 @@ try {
   }
   Assert-TraceOrder -Trace $realResult.Trace -Expected @('stop:True', 'ensure', 'restore-config', 'archive-backup') `
     -Message 'Production restore did not propagate force before restore writes.'
+
+  $missingConfigRestoreStopped = New-RealLifecycleCase -Name 'missing-config-restore-stopped-first'
+  Remove-Item -LiteralPath (Join-Path $missingConfigRestoreStopped.UserProfile '.codex\config.toml') -Force
+  $realResult = Invoke-RealLifecycle -Case $missingConfigRestoreStopped `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-restore-stopped-first' `
+    -Arguments @('-RestoreBaseTheme')
+  Assert-RealMissingConfigCompletion -Case $missingConfigRestoreStopped -Result $realResult `
+    -Message 'missing-config-restore-stopped-first failed, created config, or relaunched Codex.'
+  $missingConfigRestoreArchive = Join-Path $missingConfigRestoreStopped.StateRoot 'config.restored.toml'
+  $restoreArchiveBytes = [IO.File]::ReadAllBytes($missingConfigRestoreArchive)
+  $restoreArchiveMarkerBytes = [IO.File]::ReadAllBytes("$missingConfigRestoreArchive.appearance.json")
+  [IO.File]::WriteAllText($missingConfigRestoreStopped.TracePath, '', $utf8NoBom)
+  $realResult = Invoke-RealLifecycle -Case $missingConfigRestoreStopped `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-restore-stopped-retry' `
+    -Arguments @('-RestoreBaseTheme')
+  Assert-RealMissingConfigCompletion -Case $missingConfigRestoreStopped -Result $realResult `
+    -Message 'missing-config-restore-stopped-retry failed, created config, or relaunched Codex.'
+  if ($realResult.Trace -contains 'archive-backup' -or
+    -not (Test-DreamSkinBytesEqual -Left $restoreArchiveBytes `
+      -Right ([IO.File]::ReadAllBytes($missingConfigRestoreArchive))) -or
+    -not (Test-DreamSkinBytesEqual -Left $restoreArchiveMarkerBytes `
+      -Right ([IO.File]::ReadAllBytes("$missingConfigRestoreArchive.appearance.json")))) {
+    throw 'missing-config-restore-stopped-retry changed fixed completion proof.'
+  }
+
+  $missingConfigRestoreUnauthorized = New-RealLifecycleCase `
+    -Name 'missing-config-restore-running-unauthorized'
+  Remove-Item -LiteralPath (Join-Path $missingConfigRestoreUnauthorized.UserProfile '.codex\config.toml') -Force
+  $missingConfigStateBefore = @(Get-StateSnapshot -Root $missingConfigRestoreUnauthorized.StateRoot)
+  $realResult = Invoke-RealLifecycle -Case $missingConfigRestoreUnauthorized `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-restore-running-unauthorized' `
+    -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'stop:False' -or
+    $realResult.Trace -contains 'restore-config' -or (Test-Path -LiteralPath `
+      (Join-Path $missingConfigRestoreUnauthorized.UserProfile '.codex\config.toml'))) {
+    throw 'missing-config-restore-running-unauthorized crossed its close boundary.'
+  }
+  Assert-Equal (Get-StateSnapshot -Root $missingConfigRestoreUnauthorized.StateRoot) `
+    $missingConfigStateBefore 'Unauthorized running first-run Restore changed recovery state.'
+
+  $missingConfigRestoreAuthorized = New-RealLifecycleCase `
+    -Name 'missing-config-restore-running-authorized'
+  Remove-Item -LiteralPath (Join-Path $missingConfigRestoreAuthorized.UserProfile '.codex\config.toml') -Force
+  $realResult = Invoke-RealLifecycle -Case $missingConfigRestoreAuthorized `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-restore-running-authorized' `
+    -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  Assert-RealMissingConfigCompletion -Case $missingConfigRestoreAuthorized -Result $realResult -ExpectedClose `
+    -Message 'missing-config-restore-running-authorized failed, created config, or relaunched Codex.'
+
+  $missingConfigUninstallStopped = New-RealLifecycleCase -Name 'missing-config-uninstall-stopped-first'
+  Remove-Item -LiteralPath (Join-Path $missingConfigUninstallStopped.UserProfile '.codex\config.toml') -Force
+  $realResult = Invoke-RealLifecycle -Case $missingConfigUninstallStopped `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-uninstall-stopped-first' `
+    -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
+  Assert-RealMissingConfigCompletion -Case $missingConfigUninstallStopped -Result $realResult `
+    -Message 'missing-config-uninstall-stopped-first failed or created config.'
+  $missingConfigUninstallArchive = Join-Path $missingConfigUninstallStopped.StateRoot 'config.restored.toml'
+  $uninstallArchiveBytes = [IO.File]::ReadAllBytes($missingConfigUninstallArchive)
+  [IO.File]::WriteAllText($missingConfigUninstallStopped.TracePath, '', $utf8NoBom)
+  $realResult = Invoke-RealLifecycle -Case $missingConfigUninstallStopped `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-uninstall-stopped-retry' `
+    -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
+  Assert-RealMissingConfigCompletion -Case $missingConfigUninstallStopped -Result $realResult `
+    -Message 'missing-config-uninstall-stopped-retry failed or created config.'
+  if ($realResult.Trace -contains 'archive-backup' -or
+    -not (Test-DreamSkinBytesEqual -Left $uninstallArchiveBytes `
+      -Right ([IO.File]::ReadAllBytes($missingConfigUninstallArchive)))) {
+    throw 'missing-config-uninstall-stopped-retry changed fixed completion proof.'
+  }
+
+  $missingConfigUninstallUnauthorized = New-RealLifecycleCase `
+    -Name 'missing-config-uninstall-running-unauthorized'
+  Remove-Item -LiteralPath (Join-Path $missingConfigUninstallUnauthorized.UserProfile '.codex\config.toml') -Force
+  $missingConfigStateBefore = @(Get-StateSnapshot -Root $missingConfigUninstallUnauthorized.StateRoot)
+  $realResult = Invoke-RealLifecycle -Case $missingConfigUninstallUnauthorized `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-uninstall-running-unauthorized' `
+    -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'stop:False' -or
+    $realResult.Trace -contains 'restore-config' -or (Test-Path -LiteralPath `
+      (Join-Path $missingConfigUninstallUnauthorized.UserProfile '.codex\config.toml'))) {
+    throw 'missing-config-uninstall-running-unauthorized crossed its close boundary.'
+  }
+  Assert-Equal (Get-StateSnapshot -Root $missingConfigUninstallUnauthorized.StateRoot) `
+    $missingConfigStateBefore 'Unauthorized running first-run Uninstall changed recovery state.'
+
+  $missingConfigUninstallAuthorized = New-RealLifecycleCase `
+    -Name 'missing-config-uninstall-running-authorized'
+  Remove-Item -LiteralPath (Join-Path $missingConfigUninstallAuthorized.UserProfile '.codex\config.toml') -Force
+  $realResult = Invoke-RealLifecycle -Case $missingConfigUninstallAuthorized `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'missing-config-uninstall-running-authorized' `
+    -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch', '-CloseRunning')
+  Assert-RealMissingConfigCompletion -Case $missingConfigUninstallAuthorized -Result $realResult -ExpectedClose `
+    -Message 'missing-config-uninstall-running-authorized failed or created config.'
 
   $directOrphanMarker = New-RealLifecycleCase -Name 'direct-restore-orphan-marker'
   $directConfig = Join-Path $directOrphanMarker.UserProfile '.codex\config.toml'

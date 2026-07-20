@@ -664,12 +664,14 @@ final class StudioModelTests: CoreTestCase {
         XCTAssertEqual(busy.pauseResumeOperation, .pause)
         XCTAssertFalse(busy.pauseResumeEnabled)
         XCTAssertFalse(busy.restoreEnabled)
+        XCTAssertFalse(busy.statusEnabled)
         XCTAssertFalse(busy.allowsTermination)
 
         let idle = StudioMenuState(envelope: ready, isBusy: false, presentation: nil)
         XCTAssertTrue(idle.primaryEnabled)
         XCTAssertTrue(idle.pauseResumeEnabled)
         XCTAssertTrue(idle.restoreEnabled)
+        XCTAssertTrue(idle.statusEnabled)
         XCTAssertTrue(idle.allowsTermination)
 
         let confirming = StudioMenuState(
@@ -682,6 +684,7 @@ final class StudioModelTests: CoreTestCase {
         XCTAssertEqual(confirming.pauseResumeOperation, .pause)
         XCTAssertFalse(confirming.pauseResumeEnabled)
         XCTAssertFalse(confirming.restoreEnabled)
+        XCTAssertFalse(confirming.statusEnabled)
         XCTAssertTrue(confirming.allowsTermination)
 
         let restored = makeEnvelope(
@@ -888,7 +891,7 @@ final class StudioModelTests: CoreTestCase {
     @Test
 #endif
     @MainActor
-    func testRecoveryRestoreRemainsRequestableWhenUnavailableInState() async {
+    func testRecoveryRestoreRemainsUnavailableWhenMissingFromStateActions() async {
         let recovery = makeEnvelope(
             operation: .status,
             ok: false,
@@ -902,11 +905,36 @@ final class StudioModelTests: CoreTestCase {
         let model = StudioModel(engine: engine)
 
         await model.refresh(.status)
-        XCTAssertTrue(model.canRequest(.restore))
+        XCTAssertFalse(model.canRequest(.restore))
         await model.request(.restore)
 
-        XCTAssertEqual(model.presentation, .restoreConfirmation)
+        XCTAssertNil(model.presentation)
         XCTAssertEqual(await engine.recordedCalls(), [call(.status)])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testStatusRetryRefreshesBusyEnvelopeToIdleActions() async {
+        let busy = makeEnvelope(
+            operation: .status,
+            ok: false,
+            errorCode: "OPERATION_BUSY",
+            recoveryActions: ["retry", "cancel"],
+            availableActions: []
+        )
+        let idle = makeEnvelope(operation: .status, availableActions: ["apply"])
+        let engine = ScriptedEngine([.envelope(busy), .envelope(idle)])
+        let model = StudioModel(engine: engine)
+
+        await model.refresh(.status)
+        XCTAssertTrue(model.menuState.statusEnabled)
+        XCTAssertFalse(model.canRequest(.restore))
+        await model.refresh(.status)
+
+        XCTAssertTrue(model.canRequest(.apply))
+        XCTAssertEqual(await engine.recordedCalls(), [call(.status), call(.status)])
     }
 
 #if !canImport(XCTest)

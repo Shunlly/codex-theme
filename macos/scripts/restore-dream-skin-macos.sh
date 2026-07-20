@@ -42,6 +42,11 @@ CODEX_FIRST_RUN_REQUIRED="false"
 if [ ! -e "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
   CODEX_FIRST_RUN_REQUIRED="true"
 fi
+if [ "$RESTORE_BASE_THEME" = "true" ] \
+  && { [ -e "$THEME_BACKUP_PATH" ] || [ -L "$THEME_BACKUP_PATH" ]; }; then
+  live_theme_backup_is_valid \
+    || fail "The selective pre-install theme backup is invalid; restore state was preserved."
+fi
 
 CODEX_AVAILABLE="false"
 NODE_AVAILABLE="false"
@@ -79,6 +84,15 @@ fi
 require_lifecycle_lock
 trap release_lifecycle_lock EXIT
 DAMAGED_STATE_RECOVERY="false"
+ROLLBACK_RECOVERY="false"
+if [ -e "$ROLLBACK_STATE_PATH" ] || [ -L "$ROLLBACK_STATE_PATH" ]; then
+  renderer_rollback_evidence_is_valid \
+    || fail "Renderer rollback evidence is unsafe or damaged; recovery data was preserved."
+  ROLLBACK_RECOVERY="true"
+  if [ "$PORT_EXPLICIT" = "false" ]; then
+    PORT="$(renderer_rollback_field port)"
+  fi
+fi
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
   SAVED_PORT="$(state_field port 2>/dev/null || true)"
   case "$SAVED_PORT" in
@@ -105,7 +119,12 @@ BROWSER_ID=""
 if [ "$CODEX_AVAILABLE" = "true" ]; then
   if BROWSER_ID="$(verified_cdp_browser_id "$PORT")"; then DEBUG_READY="true"; fi
 fi
-if [ "$DEBUG_READY" = "true" ] && [ -f "$STATE_PATH" ]; then
+if [ "$DEBUG_READY" = "true" ] && [ "$ROLLBACK_RECOVERY" = "true" ]; then
+  SAVED_BROWSER_ID="$(renderer_rollback_field browserId)"
+  [ "$SAVED_BROWSER_ID" = "$BROWSER_ID" ] \
+    || fail "The active CDP browser does not match the saved rollback session; recovery data was preserved."
+  BROWSER_ID="$SAVED_BROWSER_ID"
+elif [ "$DEBUG_READY" = "true" ] && [ -f "$STATE_PATH" ]; then
   SAVED_BROWSER_ID="$(state_field browserId 2>/dev/null || true)"
   browser_id_is_valid "$SAVED_BROWSER_ID" \
     || fail "The saved Dream Skin Browser ID is missing or invalid; restore state was preserved."
@@ -182,6 +201,8 @@ fi
   || fail "Could not remove lifecycle state; the restored theme backup was preserved for retry."
 [ ! -e "$STATE_PATH" ] && [ ! -L "$STATE_PATH" ] \
   || fail "Lifecycle state still exists; the restored theme backup was preserved for retry."
+clear_renderer_rollback_evidence \
+  || fail "Renderer rollback evidence could not be cleared after verified recovery."
 if [ "$RESTORE_BASE_THEME" = "true" ]; then
   archive_restored_theme_backup
 fi

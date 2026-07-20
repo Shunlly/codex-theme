@@ -28,6 +28,7 @@ esac
 
 STATE_ROOT="${HOME}/Library/Application Support/CodexDreamSkinStudio"
 STATE_PATH="${STATE_ROOT}/state.json"
+ROLLBACK_STATE_PATH="${STATE_ROOT}/rollback.json"
 THEME_DIR="${STATE_ROOT}/theme"
 THEME_BACKUP_PATH="${STATE_ROOT}/theme-backup.json"
 RESTORED_THEME_BACKUP_PATH="${STATE_ROOT}/theme-backup.restored.json"
@@ -82,6 +83,8 @@ injector_identity_matches() {
   case "$expected_port" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$expected_browser_id" ] && [ "${#expected_browser_id}" -le 200 ] || return 1
   case "$expected_browser_id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "$(/bin/ps -p "$pid" -o uid= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')" = "$(/usr/bin/id -u)" ] \
+    || return 1
   /bin/kill -0 "$pid" 2>/dev/null || return 1
   command_line="$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)"
   [ -n "$command_line" ] || return 1
@@ -95,13 +98,17 @@ injector_identity_matches() {
   # 9341 via a loose prefix pattern.
   case "$command_lower" in *"--port $expected_port --browser-id "*) ;; *) return 1 ;; esac
   case "$command_line" in *" --browser-id $expected_browser_id --theme-dir "*) ;; *) return 1 ;; esac
+  actual_start="$(LC_ALL=C TZ=UTC /bin/ps -p "$pid" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
+  [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ] && return 0
+  # Compatibility for schema-v5 state written before start times were UTC/C.
   actual_start="$(/bin/ps -p "$pid" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
   [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
 }
 
 # Codex process: cheap name match only.  26.707 renamed Codex.app to
 # ChatGPT.app, while older installs still expose the former process name.
-if /usr/bin/pgrep -x ChatGPT >/dev/null 2>&1 || /usr/bin/pgrep -x Codex >/dev/null 2>&1; then
+if /usr/bin/pgrep -U "$(/usr/bin/id -u)" -x ChatGPT >/dev/null 2>&1 \
+  || /usr/bin/pgrep -U "$(/usr/bin/id -u)" -x Codex >/dev/null 2>&1; then
   CODEX_RUNNING="true"
 fi
 
@@ -126,6 +133,9 @@ if [ -f "$STATE_PATH" ]; then
   elif [ -z "${SESSION:-}" ]; then
     SESSION="unknown"
   fi
+fi
+if [ -e "$ROLLBACK_STATE_PATH" ] || [ -L "$ROLLBACK_STATE_PATH" ]; then
+  SESSION="stale"
 fi
 
 safe_theme_display_name() {

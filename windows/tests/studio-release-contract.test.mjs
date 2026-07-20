@@ -26,6 +26,7 @@ assert.doesNotMatch(inno, /PrivilegesRequiredOverridesAllowed|deleteUserThemes|C
 
 const builder = read("windows/scripts/build-studio-release.ps1");
 const adapter = read("windows/scripts/studio-adapter.ps1");
+const common = read("windows/scripts/common-windows.ps1");
 for (const contract of [
   "[ValidateSet('x64', 'arm64')]", "fetch-node-runtime.ps1", "--self-contained", "check-contents.mjs",
   "allowlist-windows.json", "WINDOWS_SIGN_CERT_THUMBPRINT", "Get-AuthenticodeSignature", "SHA256SUMS.txt",
@@ -35,13 +36,39 @@ for (const contract of [
 assert.doesNotMatch(builder, /studio-release-contract\.test\.mjs/, "builder duplicates the aggregate portable contract gate");
 for (const contract of [
   "function Remove-DreamSkinUserThemeData",
-  "$status.State.codex -ne 'running'",
+  "-not $status.State.requiresRestart",
   "Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot",
   "$recovery.Completed -or $recovery.NeverApplied",
 ]) contains(adapter, contract, `uninstall recovery proof is missing: ${contract}`);
 assert.equal((adapter.match(/Remove-DreamSkinUserThemeData -StateRoot \$stateRoot/g) || []).length, 2,
   "ordinary and already-restored uninstall do not share theme deletion");
 contains(adapter, "$uninstallRecoveryAvailable", "uninstall is not gated by shared safe recovery classification");
+const legacyShortcutCleanup = "Remove-DreamSkinManagedLegacyShortcuts";
+const helperStart = common.indexOf(`function ${legacyShortcutCleanup}`);
+const helper = helperStart < 0 ? "" : common.slice(helperStart);
+assert.ok(helperStart >= 0, "legacy shortcut cleanup is not shared by the adapter and restore child");
+for (const signaturePart of [
+  "CreateShortcut(", "TargetPath", "Arguments", "Codex Dream Skin.lnk",
+  "Codex Dream Skin - Restore.lnk", "Codex Dream Skin - Tray.lnk",
+  "start-dream-skin.ps1", "restore-dream-skin.ps1", "tray-dream-skin.ps1",
+]) contains(helper, signaturePart, `legacy shortcut cleanup does not verify ${signaturePart}`);
+assert.match(helper, /Test-Path[\s\S]*Remove-Item/, "legacy shortcut cleanup is not idempotent when a shortcut is absent");
+assert.match(helper, /if\s*\([\s\S]*?TargetPath[\s\S]*?Arguments[\s\S]*?\)[\s\S]*?Remove-Item/,
+  "legacy shortcut cleanup can remove an unrelated shortcut by filename alone");
+const skipUninstallStart = adapter.indexOf("if ($canSkipCompletedUninstall)");
+const skipUninstallEnd = adapter.indexOf("if (($Operation -eq 'restore'", skipUninstallStart);
+const skipUninstall = adapter.slice(skipUninstallStart, skipUninstallEnd);
+contains(skipUninstall, legacyShortcutCleanup,
+  "already-restored and never-applied uninstall skip legacy shortcut cleanup");
+assert.doesNotMatch(skipUninstall, /Invoke-DreamSkinLifecycleChild|Restore-DreamSkin/,
+  "completed uninstall reruns config restore instead of cleanup only");
+const restoreScript = read("windows/scripts/restore-dream-skin.ps1");
+const ordinaryUninstallStart = restoreScript.indexOf("if ($Uninstall)");
+const ordinaryUninstall = restoreScript.slice(ordinaryUninstallStart);
+contains(ordinaryUninstall, legacyShortcutCleanup,
+  "ordinary uninstall does not share guarded legacy shortcut cleanup");
+assert.ok(ordinaryUninstallStart > restoreScript.indexOf("$transactionCommitted = $true"),
+  "ordinary uninstall cleans legacy shortcuts before its restore transaction commits");
 for (const contract of [
   "git -C $RepoRoot write-tree",
   "git -C $RepoRoot read-tree $IndexTree",
@@ -179,6 +206,7 @@ for (const contract of [
 assert.doesNotMatch(app, /DeleteUserThemes/);
 
 const config = read("windows/scripts/config-utf8.ps1");
+const installScript = read("windows/scripts/install-dream-skin.ps1");
 const windowsTests = read("windows/tests/run-tests.ps1");
 const studioProtocolTests = read("windows/tests/studio-protocol.tests.ps1");
 const studioProgramTests = read("windows/studio-tests/Program.cs");
@@ -206,31 +234,58 @@ contains(config, "completion evidence marker exists without its archive",
 contains(config, "$configCommitted = $false", "config transaction does not track config commit");
 contains(config, "$configCommitted = $true", "config transaction never records config commit");
 contains(config, "$backupCreated -and -not $configCommitted", "marker failure can delete the only recovery backup after config commit");
+for (const contract of [
+  "function Get-DreamSkinStableFileSnapshot",
+  "function Assert-DreamSkinStableFileSnapshotUnchanged",
+  "FILE_FLAG_OPEN_REPARSE_POINT",
+  "GetFileInformationByHandle",
+]) contains(config, contract, `stable config identity contract missing: ${contract}`);
+assert.ok((config.match(/Get-DreamSkinStableFileSnapshot -Path \$ConfigPath/g) || []).length >= 3,
+  "install, selective restore, and exact restore do not snapshot config identity before reading");
+assert.ok((config.match(/-ExpectedSnapshot \$configSnapshot/g) || []).length >= 3,
+  "install, selective restore, and exact restore do not bind atomic replacement to config identity");
+contains(installScript, "$configSnapshot = Get-DreamSkinStableFileSnapshot -Path $ConfigPath",
+  "install preflight reads config before establishing its no-reparse identity");
+for (const regression of [
+  "config-file-symlink-install", "config-file-symlink-selective", "config-file-symlink-exact",
+  "config-directory-junction-install", "config-directory-junction-selective", "config-directory-junction-exact",
+  "same-byte-identity-install", "same-byte-identity-selective", "same-byte-identity-exact",
+  "same-byte-identity-rollback",
+]) contains(windowsTests, regression, `matching-host config trust regression missing: ${regression}`);
 const configCommit = config.indexOf("Write-DreamSkinUtf8FileAtomically -Path $ConfigPath");
 const configCommitted = config.indexOf("$configCommitted = $true", configCommit);
 const markerPublish = config.indexOf("Write-DreamSkinAppearanceMarker", configCommit);
 assert.ok(configCommit >= 0 && configCommitted > configCommit && markerPublish > configCommitted,
   "config commit is not recorded before marker publication");
 
-const restore = read("windows/scripts/restore-dream-skin.ps1");
-contains(restore, "config.restored.toml", "restore completion archive is not fixed and retryable");
-contains(restore, "$transactionCommitted = $false", "restore transaction has no commit boundary");
-contains(restore, "$transactionCommitted = $true", "restore transaction never commits");
-contains(restore, "Remove-DreamSkinRecoveryArtifact", "state and paused cleanup are not strict");
-contains(restore, "Codex could not be reopened automatically. The restore is complete", "post-commit relaunch failure is not nonfatal");
-contains(restore, "Get-DreamSkinRecoveryArtifactSnapshot", "restore cannot roll lifecycle artifacts back exactly");
-contains(restore, "Restore-DreamSkinRecoveryArtifactSnapshot", "restore does not restore entry artifacts on failure");
-contains(restore, "Publish-DreamSkinConfigBackupArchive", "restore consumes its live backup before publishing completion evidence");
-contains(restore, "Test-DreamSkinRestoreCompleted", "direct restore does not share the completed-state predicate");
-const stateCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path $StatePath");
-const pauseCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')");
-const archiveCommit = restore.indexOf("Publish-DreamSkinConfigBackupArchive");
+contains(restoreScript, "$configBeforeRestoreSnapshot = Get-DreamSkinStableFileSnapshot -Path $config",
+  "restore preflight reads config before establishing its no-reparse identity");
+contains(restoreScript, "-ExpectedSnapshot $currentConfigSnapshot",
+  "restore rollback is not bound to the post-restore config identity");
+contains(restoreScript, "config.restored.toml", "restore completion archive is not fixed and retryable");
+contains(restoreScript, "$transactionCommitted = $false", "restore transaction has no commit boundary");
+contains(restoreScript, "$transactionCommitted = $true", "restore transaction never commits");
+contains(restoreScript, "Remove-DreamSkinRecoveryArtifact", "state and paused cleanup are not strict");
+contains(restoreScript, "Codex could not be reopened automatically. The restore is complete", "post-commit relaunch failure is not nonfatal");
+contains(restoreScript, "Get-DreamSkinRecoveryArtifactSnapshot", "restore cannot roll lifecycle artifacts back exactly");
+contains(restoreScript, "Restore-DreamSkinRecoveryArtifactSnapshot", "restore does not restore entry artifacts on failure");
+contains(restoreScript, "Publish-DreamSkinConfigBackupArchive", "restore consumes its live backup before publishing completion evidence");
+contains(restoreScript, "Test-DreamSkinRestoreCompleted", "direct restore does not share the completed-state predicate");
+for (const contract of [
+  "$configMissingAtStart = -not $configBeforeRestoreSnapshot.Exists",
+  "$suppressFirstRunRelaunch = $RestoreBaseTheme -and $configMissingAtStart",
+  "-not $configMissingAtStart",
+  "-not $suppressFirstRunRelaunch",
+]) contains(restoreScript, contract, `missing-config restore contract missing: ${contract}`);
+const stateCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path $StatePath");
+const pauseCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')");
+const archiveCommit = restoreScript.indexOf("Publish-DreamSkinConfigBackupArchive");
 const markerCleanupToken = "Remove-DreamSkinRecoveryArtifact -Path $backupMarkerPath";
-const markerCommit = restore.indexOf(markerCleanupToken, pauseCommit);
-const backupCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path $backup",
+const markerCommit = restoreScript.indexOf(markerCleanupToken, pauseCommit);
+const backupCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path $backup",
   markerCommit + markerCleanupToken.length);
-const committed = restore.indexOf("$transactionCommitted = $true", backupCommit);
-const relaunch = restore.indexOf("Start-Process -FilePath $relaunchCodex.Executable", committed);
+const committed = restoreScript.indexOf("$transactionCommitted = $true", backupCommit);
+const relaunch = restoreScript.indexOf("Start-Process -FilePath $relaunchCodex.Executable", committed);
 assert.ok(archiveCommit >= 0 && stateCommit > archiveCommit && pauseCommit > stateCommit &&
   markerCommit > pauseCommit && backupCommit > markerCommit && committed > backupCommit && relaunch > committed,
 "restore does not publish proof, stage cleanup, remove live recovery artifacts, commit, then relaunch");
@@ -251,6 +306,18 @@ contains(studioWindows, "Test-DreamSkinRestoreCompleted -StateRoot $StateRoot",
   "fixed completion evidence ignores a leftover live backup marker");
 contains(studioWindows, "$activeThemePresent = Test-DreamSkinStudioPathEntry -Path $activeThemeRoot",
   "never-applied recovery ignores an orphan active-theme entry");
+contains(studioWindows, "$codexProcessRunning = $null -ne $runningCodex",
+  "first-run status discards the observed running Codex process");
+contains(studioWindows, "$requiresRestart = $codexProcessRunning -and $session -eq 'official'",
+  "first-run status does not preserve close authorization");
+contains(adapter, "$status.State.requiresRestart -and -not $RestartAuthorized",
+  "Restore/Uninstall authorization is still coupled to the codex display state");
+for (const regression of [
+  "running-missing-config", "missing-config-restore-stopped-first", "missing-config-restore-stopped-retry",
+  "missing-config-restore-running-unauthorized", "missing-config-restore-running-authorized",
+  "missing-config-uninstall-stopped-first", "missing-config-uninstall-stopped-retry",
+  "missing-config-uninstall-running-unauthorized", "missing-config-uninstall-running-authorized",
+]) contains(studioProtocolTests, regression, `missing-config lifecycle regression missing: ${regression}`);
 
 for (const contract of [
   'x:Name="RefreshButton"', 'Click="RefreshButton_Click"',

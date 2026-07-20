@@ -33,7 +33,10 @@ public enum SelectiveConfigRestore {
 
         let backupBytes: Data
         do {
-            backupBytes = try Data(contentsOf: backupURL)
+            backupBytes = try readStableRegularFile(
+                at: backupURL,
+                invalidMessage: "Theme backup must be a regular file, not a symbolic link."
+            )
         } catch where isNoSuchFile(error) {
             throw RestoreError("No selective pre-install theme backup is available.")
         } catch {
@@ -399,6 +402,46 @@ public enum SelectiveConfigRestore {
             throw RestoreError(invalidMessage)
         }
         return value
+    }
+
+    private static func readStableRegularFile(at url: URL, invalidMessage: String) throws -> Data {
+        let before = try regularFileStat(at: url, invalidMessage: invalidMessage)
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw posixError("Could not open \(url.path) safely") }
+        defer { Darwin.close(descriptor) }
+
+        var opened = stat()
+        guard Darwin.fstat(descriptor, &opened) == 0,
+              opened.st_mode & S_IFMT == S_IFREG,
+              opened.st_dev == before.st_dev,
+              opened.st_ino == before.st_ino else {
+            throw RestoreError(invalidMessage)
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 16_384)
+        while true {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count < 0 && errno == EINTR { continue }
+            guard count >= 0 else { throw posixError("Could not read \(url.path)") }
+            if count == 0 { break }
+            data.append(buffer, count: count)
+        }
+
+        var after = stat()
+        var linkedAfter = stat()
+        guard Darwin.fstat(descriptor, &after) == 0,
+              Darwin.lstat(url.path, &linkedAfter) == 0,
+              linkedAfter.st_mode & S_IFMT == S_IFREG,
+              opened.st_dev == after.st_dev,
+              opened.st_ino == after.st_ino,
+              opened.st_size == after.st_size,
+              opened.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              opened.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              opened.st_dev == linkedAfter.st_dev,
+              opened.st_ino == linkedAfter.st_ino else {
+            throw RestoreError("Theme backup identity changed while it was being read; nothing was changed.")
+        }
+        return data
     }
 
     private static func assertConfigUnchanged(

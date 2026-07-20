@@ -5,9 +5,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 NODE="${NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 [ -x "$NODE" ] || { printf 'Codex bundled Node.js was not found: %s\n' "$NODE" >&2; exit 1; }
 /bin/bash "$ROOT/tests/listener-address.test.sh"
+/bin/bash "$ROOT/tests/theme-backup-safety.test.sh"
 "$NODE" "$ROOT/tests/injector-identity.test.mjs"
 /bin/bash "$ROOT/tests/browser-state.test.sh"
 "$NODE" "$ROOT/tests/diagnostics-wiring.test.mjs"
+"$NODE" "$ROOT/tests/studio-status-action.test.mjs"
 
 EXPECTED_STUDIO_VERSION="1.3.0"
 [ "$(/bin/cat "$ROOT/VERSION")" = "$EXPECTED_STUDIO_VERSION" ] || {
@@ -1028,6 +1030,21 @@ if /usr/bin/grep -Eq '^(node-validation|legacy-runtime|launch)$' "$NATIVE_MARKER
   exit 1
 fi
 
+write_valid_theme_backup_fixture() {
+  "$NODE" -e '
+    const fs = require("node:fs");
+    fs.writeFileSync(process.argv[1], `${JSON.stringify({
+      schemaVersion: 1,
+      platform: "darwin",
+      configPath: process.argv[2],
+      values: {
+        appearanceTheme: null,
+        appearanceDarkCodeThemeId: null,
+      },
+    })}\n`);
+  ' "$1" "$2"
+}
+
 assert_unsafe_native_restore_helper_rejected() {
   local kind="$1"
   local fixture_home="$TMP/native-helper-$kind-home"
@@ -1046,7 +1063,8 @@ assert_unsafe_native_restore_helper_rejected() {
   /bin/cp "$ROOT/scripts/common-macos.sh" "$fixture_engine/scripts/"
   /bin/cp "$ROOT/VERSION" "$fixture_engine/VERSION"
   /usr/bin/printf 'config sentinel\n' > "$fixture_home/.codex/config.toml"
-  /usr/bin/printf 'backup sentinel\n' > "$fixture_state/theme-backup.json"
+  write_valid_theme_backup_fixture "$fixture_state/theme-backup.json" \
+    "$fixture_home/.codex/config.toml"
   /bin/cp "$fixture_home/.codex/config.toml" "$fixture_home/.codex/config.toml.original"
   /bin/cp "$fixture_state/theme-backup.json" "$fixture_state/theme-backup.json.original"
   /usr/bin/sed "s|__MARKER__|$malicious_marker|g" > "$malicious_helper" <<'STUB'
@@ -1130,7 +1148,8 @@ RACE_ERROR="$TMP/native-helper-race.error"
 /bin/cp "$ROOT/scripts/common-macos.sh" "$RACE_ENGINE/scripts/"
 /bin/cp "$ROOT/VERSION" "$RACE_ENGINE/VERSION"
 /usr/bin/printf 'config sentinel\n' > "$RACE_HOME/.codex/config.toml"
-/usr/bin/printf 'backup sentinel\n' > "$RACE_STATE/theme-backup.json"
+write_valid_theme_backup_fixture "$RACE_STATE/theme-backup.json" \
+  "$RACE_HOME/.codex/config.toml"
 /bin/cp "$RACE_HOME/.codex/config.toml" "$RACE_HOME/.codex/config.toml.original"
 /bin/cp "$RACE_STATE/theme-backup.json" "$RACE_STATE/theme-backup.json.original"
 /usr/bin/sed "s|__MARKER__|$RACE_MALICIOUS_MARKER|g" > "$RACE_MALICIOUS" <<'STUB'
@@ -1194,7 +1213,9 @@ UNTRUSTED_MARKER="$TMP/untrusted-app-marker"
 /bin/cp "$NATIVE_CONFIG_RESTORE" "$UNTRUSTED_ENGINE/bin/dream-skin-config-restore"
 /bin/cp "$ROOT/scripts/restore-dream-skin-macos.sh" "$UNTRUSTED_ENGINE/scripts/"
 /usr/bin/printf 'config sentinel\n' > "$UNTRUSTED_HOME/.codex/config.toml"
-/usr/bin/printf 'backup sentinel\n' > "$UNTRUSTED_STATE/theme-backup.json"
+write_valid_theme_backup_fixture "$UNTRUSTED_STATE/theme-backup.json" \
+  "$UNTRUSTED_HOME/.codex/config.toml"
+/bin/cp "$UNTRUSTED_STATE/theme-backup.json" "$UNTRUSTED_STATE/theme-backup.json.original"
 /usr/bin/sed "s|__HOME__|$UNTRUSTED_HOME|g; s|__ENGINE__|$UNTRUSTED_ENGINE|g; s|__MARKER__|$UNTRUSTED_MARKER|g" \
   > "$UNTRUSTED_ENGINE/scripts/common-macos.sh" <<'STUB'
 INSTALL_ROOT="__ENGINE__"
@@ -1212,6 +1233,7 @@ try_require_macos_runtime() { return 0; }
 codex_is_running() { printf 'process-probe\n' >> "__MARKER__"; return 0; }
 stop_codex() { printf 'stop\n' >> "__MARKER__"; }
 launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
+live_theme_backup_is_valid() { [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]; }
 STUB
 : > "$UNTRUSTED_MARKER"
 set +e
@@ -1228,7 +1250,8 @@ if /usr/bin/grep -Eq '^(node-validation|process-probe|stop|launch)$' "$UNTRUSTED
   exit 1
 fi
 [ "$(/bin/cat "$UNTRUSTED_HOME/.codex/config.toml")" = 'config sentinel' ]
-[ "$(/bin/cat "$UNTRUSTED_STATE/theme-backup.json")" = 'backup sentinel' ]
+/usr/bin/cmp -s "$UNTRUSTED_STATE/theme-backup.json" \
+  "$UNTRUSTED_STATE/theme-backup.json.original"
 
 # Full app identity must retain deep validation. A separate control-only layer
 # may trust the signed main executable after nested resource validation fails.

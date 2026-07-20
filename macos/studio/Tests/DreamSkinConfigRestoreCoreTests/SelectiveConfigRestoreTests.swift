@@ -500,6 +500,29 @@ final class SelectiveConfigRestoreTests: TestCase {
 #if !canImport(XCTest)
     @Test
 #endif
+    func testRejectsSymlinkedBackupWithoutChangingConfigOrTarget() throws {
+        let fixture = try makeFixture(
+            config: "[desktop]\nappearanceTheme = \"dream-skin\"\nkeepMe = true\n",
+            appearanceTheme: "appearanceTheme = \"system\""
+        )
+        let target = fixture.directory.appendingPathComponent("theme-backup-target.json")
+        try fileManager.moveItem(at: fixture.backup, to: target)
+        try fileManager.createSymbolicLink(at: fixture.backup, withDestinationURL: target)
+        let originalConfig = try Data(contentsOf: fixture.config)
+        let originalTarget = try Data(contentsOf: target)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.restore(configURL: fixture.config, backupURL: fixture.backup))
+        XCTAssertEqual(try Data(contentsOf: fixture.config), originalConfig)
+        XCTAssertEqual(try Data(contentsOf: target), originalTarget)
+        XCTAssertEqual(
+            try fileManager.destinationOfSymbolicLink(atPath: fixture.backup.path),
+            target.path
+        )
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
     func testSavedSettingCreatesMissingDesktopTable() throws {
         let fixture = try makeFixture(
             config: "model = \"gpt-5\"\nkeepMe = true\n",

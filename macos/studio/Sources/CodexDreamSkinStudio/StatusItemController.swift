@@ -5,6 +5,7 @@ import DreamSkinStudioCore
 final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let onShow: () -> Void
+    private let onStatus: () -> Void
     private let onApplyResume: () -> Void
     private let onPauseResume: () -> Void
     private let onRestore: () -> Void
@@ -13,12 +14,14 @@ final class StatusItemController: NSObject {
 
     init(
         onShow: @escaping () -> Void,
+        onStatus: @escaping () -> Void,
         onApplyResume: @escaping () -> Void,
         onPauseResume: @escaping () -> Void,
         onRestore: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onShow = onShow
+        self.onStatus = onStatus
         self.onApplyResume = onApplyResume
         self.onPauseResume = onPauseResume
         self.onRestore = onRestore
@@ -39,6 +42,7 @@ final class StatusItemController: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.addItem(item("Show Dream Skin", #selector(show), enabled: true))
+        menu.addItem(item("Check Status", #selector(status), enabled: menuState.statusEnabled))
         menu.addItem(.separator())
         menu.addItem(item(actionTitle(menuState.primaryOperation, fallback: "Apply / Resume"), #selector(applyResume), enabled: menuState.primaryEnabled))
         menu.addItem(item(actionTitle(menuState.pauseResumeOperation, fallback: "Pause / Resume"), #selector(pauseResume), enabled: menuState.pauseResumeEnabled))
@@ -56,6 +60,7 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func show() { onShow() }
+    @objc private func status() { onStatus() }
     @objc private func applyResume() { onApplyResume() }
     @objc private func pauseResume() { onPauseResume() }
     @objc private func restore() { onRestore() }

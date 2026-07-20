@@ -164,25 +164,38 @@ try {
     (Get-DreamSkinRecoveryArtifactSnapshot -Path $archivePath),
     (Get-DreamSkinRecoveryArtifactSnapshot -Path $archiveMarkerPath)
   )
-  $configBeforeRestoreBytes = $null
+  $configBeforeRestoreSnapshot = $null
+  $configMissingAtStart = $false
   if ($RecoverConfigBackup -and -not $restoreAlreadyCommitted) {
     if (-not (Test-DreamSkinLiveConfigBackup -BackupPath $backup)) {
       throw 'No pre-install config backup is available.'
     }
-    $configBeforeRestoreBytes = [IO.File]::ReadAllBytes($config)
-    $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBeforeRestoreBytes -Path $config
+    $configBeforeRestoreSnapshot = Get-DreamSkinStableFileSnapshot -Path $config -AllowMissing
+    if ($configBeforeRestoreSnapshot.Exists) {
+      $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBeforeRestoreSnapshot.Bytes -Path $config
+    }
   } elseif ($RestoreBaseTheme -and -not $restoreAlreadyCommitted) {
     if (-not (Test-DreamSkinLiveConfigBackup -BackupPath $backup)) {
       throw 'No pre-install config backup is available.'
     }
-    $null = Read-DreamSkinUtf8File -Path $config
-    $configBeforeRestoreBytes = [IO.File]::ReadAllBytes($config)
+    $configBeforeRestoreSnapshot = Get-DreamSkinStableFileSnapshot -Path $config -AllowMissing
+    $configMissingAtStart = -not $configBeforeRestoreSnapshot.Exists
+    if (-not $configMissingAtStart) {
+      $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBeforeRestoreSnapshot.Bytes -Path $config
+    }
+  } elseif ($RestoreBaseTheme -and $restoreAlreadyCommitted) {
+    $configMissingAtStart = -not (Test-Path -LiteralPath $config)
   }
+  $suppressFirstRunRelaunch = $RestoreBaseTheme -and $configMissingAtStart
 
   $restoreError = $null
   $configChanged = $false
+  $currentConfigSnapshot = $null
   $transactionCommitted = $false
   try {
+    if ($RestoreBaseTheme -and -not $restoreAlreadyCommitted -and $configMissingAtStart) {
+      Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $configBeforeRestoreSnapshot
+    }
     if ($shouldCloseCodex) {
       Stop-DreamSkinCodex -Codex $codex -AllowForce:$ForceRestart
       if ($portOwnedByCodex -and -not (Wait-DreamSkinPortAvailable -Port $Port -TimeoutSeconds 5)) {
@@ -202,13 +215,18 @@ try {
       $recoveryBackup = Join-Path $StateRoot "config.before-recovery-$stamp.toml"
       Restore-DreamSkinConfigBackup -ConfigPath $config -BackupPath $backup -RecoveryBackupPath $recoveryBackup
       $configChanged = $true
+      $currentConfigSnapshot = Get-DreamSkinStableFileSnapshot -Path $config
       Write-Host "Recovered the exact pre-install config; previous current config saved at $recoveryBackup"
-    } elseif ($RestoreBaseTheme -and -not $restoreAlreadyCommitted) {
+    } elseif ($RestoreBaseTheme -and -not $restoreAlreadyCommitted -and -not $configMissingAtStart) {
       Restore-DreamSkinBaseTheme -ConfigPath $config -BackupPath $backup
       $configChanged = $true
+      $currentConfigSnapshot = Get-DreamSkinStableFileSnapshot -Path $config
     }
 
     if ($restoreRequested -and -not $restoreAlreadyCommitted) {
+      if ($RestoreBaseTheme -and $configMissingAtStart) {
+        Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $configBeforeRestoreSnapshot
+      }
       Publish-DreamSkinConfigBackupArchive -BackupPath $backup -ArchivePath $archivePath
     }
     Remove-DreamSkinRecoveryArtifact -Path $StatePath
@@ -219,23 +237,14 @@ try {
     }
     $transactionCommitted = $true
     if ($restoreRequested) { Write-Host "Archived the completed pre-install backup at $archivePath" }
-    if ($Uninstall) {
-      $desktop = [Environment]::GetFolderPath('Desktop')
-      $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
-      @(
-        (Join-Path $desktop 'Codex Dream Skin.lnk'),
-        (Join-Path $desktop 'Codex Dream Skin - Restore.lnk'),
-        (Join-Path $desktop 'Codex Dream Skin - Tray.lnk'),
-        (Join-Path $startMenu 'Codex Dream Skin.lnk'),
-        (Join-Path $startMenu 'Codex Dream Skin - Tray.lnk')
-      ) | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }
-    }
+    if ($Uninstall) { Remove-DreamSkinManagedLegacyShortcuts }
   } catch {
     $restoreError = $_
-    if (-not $transactionCommitted -and $configChanged -and $null -ne $configBeforeRestoreBytes) {
+    if (-not $transactionCommitted -and $configChanged -and $null -ne $configBeforeRestoreSnapshot -and
+      $configBeforeRestoreSnapshot.Exists) {
       try {
-        $currentConfigBytes = [IO.File]::ReadAllBytes($config)
-        Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreBytes -ExpectedBytes $currentConfigBytes
+        Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreSnapshot.Bytes `
+          -ExpectedBytes $currentConfigSnapshot.Bytes -ExpectedSnapshot $currentConfigSnapshot
       } catch {
         Write-Warning 'Restore failed and the original config could not be rolled back automatically.'
       }
@@ -250,7 +259,7 @@ try {
     throw $restoreError
   }
 
-  if ($shouldCloseCodex -and -not $NoRelaunch) {
+  if ($shouldCloseCodex -and -not $NoRelaunch -and -not $suppressFirstRunRelaunch) {
     try {
       if ($null -eq $relaunchCodex -or -not (Test-Path -LiteralPath $relaunchCodex.Executable)) {
         throw 'The Codex executable is unavailable.'

@@ -4,27 +4,6 @@ if (-not (Get-Command Read-DreamSkinUtf8File -ErrorAction SilentlyContinue)) {
 
 $script:DreamSkinMaxImageBytes = 16 * 1024 * 1024
 
-function Assert-DreamSkinNoReparseComponents {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  $fullPath = [System.IO.Path]::GetFullPath($Path)
-  $root = [System.IO.Path]::GetPathRoot($fullPath)
-  $current = $fullPath
-  while ($true) {
-    if (Test-Path -LiteralPath $current) {
-      $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
-      if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Managed Dream Skin path contains a junction or symbolic link: $current"
-      }
-    }
-    $currentNormalized = $current.TrimEnd('\')
-    $rootNormalized = $root.TrimEnd('\')
-    if ($currentNormalized.Equals($rootNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { break }
-    $parent = [System.IO.Path]::GetDirectoryName($current)
-    if (-not $parent -or $parent.Equals($current, [System.StringComparison]::OrdinalIgnoreCase)) { break }
-    $current = $parent
-  }
-}
-
 function Ensure-DreamSkinManagedDirectory {
   param(
     [Parameter(Mandatory = $true)][string]$Path,

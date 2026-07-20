@@ -41,8 +41,8 @@ try {
   }
   $ConfigPath = Join-Path $HOME '.codex\config.toml'
   $BackupPath = Join-Path $StateRoot 'config.before-dream-skin.toml'
-  $configBytes = [IO.File]::ReadAllBytes($ConfigPath)
-  $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBytes -Path $ConfigPath
+  $configSnapshot = Get-DreamSkinStableFileSnapshot -Path $ConfigPath
+  $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configSnapshot.Bytes -Path $ConfigPath
   $null = Test-DreamSkinLiveConfigBackup -BackupPath $BackupPath
   Assert-DreamSkinImageFile -Path (Join-Path $SkillRoot 'assets\dream-reference.jpg') -NodePath $node.Path
   $activeThemePath = Join-Path $themePaths.Active 'theme.json'

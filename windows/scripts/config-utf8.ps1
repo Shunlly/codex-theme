@@ -3,6 +3,287 @@ $script:DreamSkinLegacyAppearanceTheme = 'appearanceTheme = "light"'
 $script:DreamSkinManagedLightCodeTheme = 'appearanceLightCodeThemeId = "codex"'
 $script:DreamSkinManagedLightChromeTheme = 'appearanceLightChromeTheme = { accent = "#B65CFF", contrast = 64, fonts = { code = "Cascadia Code", ui = "Microsoft YaHei UI" }, ink = "#4A235F", opaqueWindows = true, semanticColors = { diffAdded = "#BCE8CF", diffRemoved = "#F7B8CE", skill = "#C47BFF" }, surface = "#FFF4FA" }'
 
+function Assert-DreamSkinNoReparseComponents {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  $root = [System.IO.Path]::GetPathRoot($fullPath)
+  $current = $fullPath
+  while ($true) {
+    if (Test-Path -LiteralPath $current) {
+      $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+      if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Managed Dream Skin path contains a junction or symbolic link: $current"
+      }
+    }
+    $currentNormalized = $current.TrimEnd('\')
+    $rootNormalized = $root.TrimEnd('\')
+    if ($currentNormalized.Equals($rootNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { break }
+    $parent = [System.IO.Path]::GetDirectoryName($current)
+    if (-not $parent -or $parent.Equals($current, [System.StringComparison]::OrdinalIgnoreCase)) { break }
+    $current = $parent
+  }
+}
+
+if (-not ('DreamSkinConfigNative' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class DreamSkinNativePathSnapshot
+{
+    public string Identity { get; set; }
+    public string ResolvedPath { get; set; }
+    public byte[] Bytes { get; set; }
+}
+
+public static class DreamSkinConfigNative
+{
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint FILE_READ_ATTRIBUTES = 0x00000080;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint FILE_SHARE_DELETE = 0x00000004;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BY_HANDLE_FILE_INFORMATION
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle handle,
+        out BY_HANDLE_FILE_INFORMATION information);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(
+        SafeFileHandle handle,
+        StringBuilder path,
+        uint pathLength,
+        uint flags);
+
+    public static DreamSkinNativePathSnapshot Snapshot(string path, bool readBytes)
+    {
+        uint access = readBytes ? GENERIC_READ : FILE_READ_ATTRIBUTES;
+        uint flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+        using (SafeFileHandle handle = CreateFileW(
+            path,
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            IntPtr.Zero,
+            OPEN_EXISTING,
+            flags,
+            IntPtr.Zero))
+        {
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                throw new IOException("Could not open a stable Dream Skin path handle: " + path,
+                    new Win32Exception(error));
+            }
+
+            BY_HANDLE_FILE_INFORMATION information;
+            if (!GetFileInformationByHandle(handle, out information))
+            {
+                int error = Marshal.GetLastWin32Error();
+                throw new IOException("Could not inspect a stable Dream Skin path handle: " + path,
+                    new Win32Exception(error));
+            }
+            if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            {
+                throw new IOException("Managed Dream Skin path contains a junction or symbolic link: " + path);
+            }
+
+            StringBuilder resolved = new StringBuilder(512);
+            uint resolvedLength = GetFinalPathNameByHandleW(handle, resolved, (uint)resolved.Capacity, 0);
+            if (resolvedLength == 0)
+            {
+                int error = Marshal.GetLastWin32Error();
+                throw new IOException("Could not resolve a stable Dream Skin path handle: " + path,
+                    new Win32Exception(error));
+            }
+            if (resolvedLength >= resolved.Capacity)
+            {
+                resolved = new StringBuilder((int)resolvedLength + 1);
+                resolvedLength = GetFinalPathNameByHandleW(handle, resolved, (uint)resolved.Capacity, 0);
+                if (resolvedLength == 0 || resolvedLength >= resolved.Capacity)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    throw new IOException("Could not resolve a stable Dream Skin path handle: " + path,
+                        new Win32Exception(error));
+                }
+            }
+
+            byte[] bytes = null;
+            if (readBytes)
+            {
+                using (FileStream stream = new FileStream(handle, FileAccess.Read))
+                {
+                    if (stream.Length > Int32.MaxValue)
+                    {
+                        throw new IOException("Dream Skin config file is too large to read safely: " + path);
+                    }
+                    bytes = new byte[(int)stream.Length];
+                    int offset = 0;
+                    while (offset < bytes.Length)
+                    {
+                        int count = stream.Read(bytes, offset, bytes.Length - offset);
+                        if (count == 0) throw new EndOfStreamException("Config changed while being read: " + path);
+                        offset += count;
+                    }
+                }
+            }
+
+            return new DreamSkinNativePathSnapshot
+            {
+                Identity = information.VolumeSerialNumber.ToString("X8") + ":" +
+                    information.FileIndexHigh.ToString("X8") + ":" + information.FileIndexLow.ToString("X8"),
+                ResolvedPath = resolved.ToString(),
+                Bytes = bytes
+            };
+        }
+    }
+}
+'@
+}
+
+function ConvertTo-DreamSkinComparablePath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $value = $Path
+  if ($value.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    $value = '\\' + $value.Substring(8)
+  } elseif ($value.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    $value = $value.Substring(4)
+  }
+  $fullPath = [System.IO.Path]::GetFullPath($value)
+  $root = [System.IO.Path]::GetPathRoot($fullPath)
+  if ($fullPath.Length -gt $root.Length) { $fullPath = $fullPath.TrimEnd('\') }
+  return $fullPath
+}
+
+function Get-DreamSkinStablePathComponentSnapshots {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  $root = [System.IO.Path]::GetPathRoot($fullPath)
+  $paths = [System.Collections.Generic.List[string]]::new()
+  $current = $fullPath
+  while ($true) {
+    $paths.Insert(0, $current)
+    if ($current.TrimEnd('\').Equals($root.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) { break }
+    $parent = [System.IO.Path]::GetDirectoryName($current)
+    if (-not $parent -or $parent.Equals($current, [System.StringComparison]::OrdinalIgnoreCase)) { break }
+    $current = $parent
+  }
+
+  $snapshots = @()
+  foreach ($component in $paths) {
+    if (-not (Test-Path -LiteralPath $component)) { continue }
+    $native = [DreamSkinConfigNative]::Snapshot($component, $false)
+    $resolved = ConvertTo-DreamSkinComparablePath -Path $native.ResolvedPath
+    $expected = ConvertTo-DreamSkinComparablePath -Path $component
+    if (-not $resolved.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Managed Dream Skin path resolves outside its trusted structure: $component"
+    }
+    $snapshots += [pscustomobject]@{
+      Path = $expected
+      Identity = $native.Identity
+    }
+  }
+  return @($snapshots)
+}
+
+function Get-DreamSkinStableFileSnapshotCore {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [switch]$AllowMissing
+  )
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  Assert-DreamSkinNoReparseComponents -Path $fullPath
+  $exists = Test-Path -LiteralPath $fullPath
+  if (-not $exists -and -not $AllowMissing) { throw "File not found: $fullPath" }
+  if ($exists -and -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+    throw "Dream Skin config path is not a regular file: $fullPath"
+  }
+
+  $native = if ($exists) { [DreamSkinConfigNative]::Snapshot($fullPath, $true) } else { $null }
+  if ($null -ne $native) {
+    $resolved = ConvertTo-DreamSkinComparablePath -Path $native.ResolvedPath
+    $expected = ConvertTo-DreamSkinComparablePath -Path $fullPath
+    if (-not $resolved.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Dream Skin config path resolves outside its trusted structure: $fullPath"
+    }
+  }
+  return [pscustomobject]@{
+    FullPath = $fullPath
+    Exists = $exists
+    Bytes = if ($null -ne $native) { [byte[]]$native.Bytes } else { $null }
+    Identity = if ($null -ne $native) { $native.Identity } else { $null }
+    Components = @(Get-DreamSkinStablePathComponentSnapshots -Path $fullPath)
+  }
+}
+
+function Assert-DreamSkinStableFileSnapshotUnchanged {
+  param([Parameter(Mandatory = $true)]$Snapshot)
+  $current = Get-DreamSkinStableFileSnapshotCore -Path $Snapshot.FullPath -AllowMissing
+  if ([bool]$current.Exists -ne [bool]$Snapshot.Exists) {
+    throw "File identity changed during the operation; retry: $($Snapshot.FullPath)"
+  }
+  if ($current.Exists -and ($current.Identity -cne $Snapshot.Identity -or
+      -not (Test-DreamSkinBytesEqual -Left $Snapshot.Bytes -Right $current.Bytes))) {
+    throw "File identity changed during the operation; retry without other writers: $($Snapshot.FullPath)"
+  }
+  $expectedComponents = @($Snapshot.Components)
+  $currentComponents = @($current.Components)
+  if ($expectedComponents.Count -ne $currentComponents.Count) {
+    throw "Path identity changed during the operation; retry: $($Snapshot.FullPath)"
+  }
+  for ($index = 0; $index -lt $expectedComponents.Count; $index++) {
+    if (-not $expectedComponents[$index].Path.Equals(
+        $currentComponents[$index].Path, [System.StringComparison]::OrdinalIgnoreCase) -or
+      $expectedComponents[$index].Identity -cne $currentComponents[$index].Identity) {
+      throw "Path identity changed during the operation; retry: $($Snapshot.FullPath)"
+    }
+  }
+}
+
+function Get-DreamSkinStableFileSnapshot {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [switch]$AllowMissing
+  )
+  $snapshot = Get-DreamSkinStableFileSnapshotCore -Path $Path -AllowMissing:$AllowMissing
+  Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $snapshot
+  return $snapshot
+}
+
 function ConvertFrom-DreamSkinUtf8Bytes {
   param(
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes,
@@ -77,15 +358,17 @@ function Write-DreamSkinUtf8FileAtomically {
     [string]$Content,
 
     [AllowNull()]
-    [byte[]]$ExpectedBytes
+    [byte[]]$ExpectedBytes,
+
+    [AllowNull()]
+    $ExpectedSnapshot
   )
 
   $bytes = $script:DreamSkinUtf8NoBom.GetBytes($Content)
-  if ($PSBoundParameters.ContainsKey('ExpectedBytes')) {
-    Write-DreamSkinBytesAtomically -Path $Path -Bytes $bytes -ExpectedBytes $ExpectedBytes
-  } else {
-    Write-DreamSkinBytesAtomically -Path $Path -Bytes $bytes
-  }
+  $writeArguments = @{ Path = $Path; Bytes = $bytes }
+  if ($PSBoundParameters.ContainsKey('ExpectedBytes')) { $writeArguments.ExpectedBytes = $ExpectedBytes }
+  if ($PSBoundParameters.ContainsKey('ExpectedSnapshot')) { $writeArguments.ExpectedSnapshot = $ExpectedSnapshot }
+  Write-DreamSkinBytesAtomically @writeArguments
 }
 
 function Write-DreamSkinBytesAtomically {
@@ -93,10 +376,18 @@ function Write-DreamSkinBytesAtomically {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes,
-    [AllowNull()][byte[]]$ExpectedBytes
+    [AllowNull()][byte[]]$ExpectedBytes,
+    [AllowNull()]$ExpectedSnapshot
   )
 
   $fullPath = [System.IO.Path]::GetFullPath($Path)
+  if ($PSBoundParameters.ContainsKey('ExpectedSnapshot')) {
+    if ($null -eq $ExpectedSnapshot -or
+      -not $fullPath.Equals($ExpectedSnapshot.FullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Stable file snapshot does not match the requested path: $fullPath"
+    }
+    Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $ExpectedSnapshot
+  }
   $directory = [System.IO.Path]::GetDirectoryName($fullPath)
   if (-not [System.IO.Directory]::Exists($directory)) {
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -106,7 +397,9 @@ function Write-DreamSkinBytesAtomically {
 
   try {
     [System.IO.File]::WriteAllBytes($temporary, $Bytes)
-    if ($PSBoundParameters.ContainsKey('ExpectedBytes')) {
+    if ($PSBoundParameters.ContainsKey('ExpectedSnapshot')) {
+      Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $ExpectedSnapshot
+    } elseif ($PSBoundParameters.ContainsKey('ExpectedBytes')) {
       Assert-DreamSkinFileUnchanged -Path $fullPath -ExpectedBytes $ExpectedBytes
     }
     if ([System.IO.File]::Exists($fullPath)) {
@@ -311,7 +604,8 @@ function Test-DreamSkinLegacyManagedLightTrio {
 function Test-DreamSkinBaseThemeManaged {
   param([Parameter(Mandatory = $true)][string]$ConfigPath)
   if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { return $false }
-  $content = Read-DreamSkinUtf8File -Path $ConfigPath
+  $configSnapshot = Get-DreamSkinStableFileSnapshot -Path $ConfigPath
+  $content = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configSnapshot.Bytes -Path $ConfigPath
   Assert-DreamSkinDesktopShapeSupported -Content $content
   $desktop = Get-DreamSkinDesktopSection -Content $content
   if ($null -eq $desktop) { return $false }
@@ -452,12 +746,12 @@ function Install-DreamSkinBaseTheme {
     [string]$BackupPath
   )
 
-  if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Codex config not found: $ConfigPath" }
+  $configSnapshot = Get-DreamSkinStableFileSnapshot -Path $ConfigPath
   if (Get-Command Assert-DreamSkinNoReparseComponents -ErrorAction SilentlyContinue) {
     Assert-DreamSkinNoReparseComponents -Path $BackupPath
     Assert-DreamSkinNoReparseComponents -Path (Get-DreamSkinAppearanceMarkerPath -BackupPath $BackupPath)
   }
-  $originalBytes = [System.IO.File]::ReadAllBytes($ConfigPath)
+  $originalBytes = $configSnapshot.Bytes
   $content = ConvertFrom-DreamSkinUtf8Bytes -Bytes $originalBytes -Path $ConfigPath
   $liveBackup = Test-DreamSkinLiveConfigBackup -BackupPath $BackupPath
   if (-not $liveBackup -and (Test-DreamSkinBaseThemeManaged -ConfigPath $ConfigPath)) {
@@ -470,6 +764,7 @@ function Install-DreamSkinBaseTheme {
     }
   }
   $appearanceMarker = Read-DreamSkinAppearanceMarker -BackupPath $BackupPath
+  Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $configSnapshot
   $backupCreated = $false
   if (-not $liveBackup) {
     Write-DreamSkinBytesAtomically -Path $BackupPath -Bytes $originalBytes -ExpectedBytes $null
@@ -512,7 +807,8 @@ function Install-DreamSkinBaseTheme {
       $content.Substring($desktop.BodyStart + $desktop.BodyLength)
     $retainBackupOnFailure = $true
     Remove-DreamSkinConfigCompletionEvidence -ArchivePath (Join-Path (Split-Path -Parent $BackupPath) 'config.restored.toml')
-    Write-DreamSkinUtf8FileAtomically -Path $ConfigPath -Content $content -ExpectedBytes $originalBytes
+    Write-DreamSkinUtf8FileAtomically -Path $ConfigPath -Content $content -ExpectedBytes $originalBytes `
+      -ExpectedSnapshot $configSnapshot
     $configCommitted = $true
     Write-DreamSkinAppearanceMarker -BackupPath $BackupPath
   } catch {
@@ -540,7 +836,8 @@ function Restore-DreamSkinBaseTheme {
   }
   $backupBytes = [System.IO.File]::ReadAllBytes($BackupPath)
   $backupContent = ConvertFrom-DreamSkinUtf8Bytes -Bytes $backupBytes -Path $BackupPath
-  $currentBytes = [System.IO.File]::ReadAllBytes($ConfigPath)
+  $configSnapshot = Get-DreamSkinStableFileSnapshot -Path $ConfigPath
+  $currentBytes = $configSnapshot.Bytes
   $currentContent = ConvertFrom-DreamSkinUtf8Bytes -Bytes $currentBytes -Path $ConfigPath
   Assert-DreamSkinDesktopShapeSupported -Content $backupContent
   Assert-DreamSkinDesktopShapeSupported -Content $currentContent
@@ -571,7 +868,8 @@ function Restore-DreamSkinBaseTheme {
     $currentContent = $currentContent.Substring(0, $currentDesktop.BodyStart) + $body +
       $currentContent.Substring($currentDesktop.BodyStart + $currentDesktop.BodyLength)
   }
-  Write-DreamSkinUtf8FileAtomically -Path $ConfigPath -Content $currentContent -ExpectedBytes $currentBytes
+  Write-DreamSkinUtf8FileAtomically -Path $ConfigPath -Content $currentContent -ExpectedBytes $currentBytes `
+    -ExpectedSnapshot $configSnapshot
 }
 
 function Restore-DreamSkinConfigBackup {
@@ -583,15 +881,19 @@ function Restore-DreamSkinConfigBackup {
   )
 
   if (-not (Test-Path -LiteralPath $BackupPath)) { throw 'No pre-install config backup is available.' }
+  Assert-DreamSkinNoReparseComponents -Path $BackupPath
+  Assert-DreamSkinNoReparseComponents -Path $RecoveryBackupPath
   $backupBytes = [System.IO.File]::ReadAllBytes($BackupPath)
   $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $backupBytes -Path $BackupPath
-  $currentBytes = $null
-  if (Test-Path -LiteralPath $ConfigPath) {
-    $currentBytes = [System.IO.File]::ReadAllBytes($ConfigPath)
+  $configSnapshot = Get-DreamSkinStableFileSnapshot -Path $ConfigPath -AllowMissing
+  $currentBytes = $configSnapshot.Bytes
+  Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $configSnapshot
+  if ($configSnapshot.Exists) {
     Write-DreamSkinBytesAtomically -Path $RecoveryBackupPath -Bytes $currentBytes -ExpectedBytes $null
   }
 
-  Write-DreamSkinBytesAtomically -Path $ConfigPath -Bytes $backupBytes -ExpectedBytes $currentBytes
+  Write-DreamSkinBytesAtomically -Path $ConfigPath -Bytes $backupBytes -ExpectedBytes $currentBytes `
+    -ExpectedSnapshot $configSnapshot
 }
 
 function Publish-DreamSkinConfigBackupArchive {

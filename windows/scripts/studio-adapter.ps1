@@ -226,9 +226,10 @@ try {
   }
   $canSkipCompletedUninstall = $Operation -eq 'uninstall' -and
     $status.State.install -eq 'not-installed' -and $status.State.session -eq 'official' -and
-    $status.State.codex -ne 'running' -and ($recovery.Completed -or $recovery.NeverApplied)
+    -not $status.State.requiresRestart -and ($recovery.Completed -or $recovery.NeverApplied)
   if ($canSkipCompletedUninstall) {
     [Console]::Error.WriteLine('DREAM_SKIN_PROGRESS=uninstalling')
+    Remove-DreamSkinManagedLegacyShortcuts
     if ($DeleteUserThemes) { Remove-DreamSkinUserThemeData -StateRoot $stateRoot }
     $uninstalledState = New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official' `
       -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @('install')
@@ -254,7 +255,8 @@ try {
     Exit-DreamSkinStudioError -Code 'RESTART_REQUIRED' -Message 'Codex must restart once to resume the theme.' `
       -RecoveryActions @('authorize-restart', 'cancel') -State $status.State -RequiresRestart
   }
-  if ($Operation -in @('restore', 'uninstall') -and $status.State.codex -eq 'running' -and -not $RestartAuthorized) {
+  if ($Operation -in @('restore', 'uninstall') -and
+    $status.State.requiresRestart -and -not $RestartAuthorized) {
     Exit-DreamSkinStudioError -Code 'RESTART_REQUIRED' -Message 'Codex must restart once to restore the official session.' `
       -RecoveryActions @('authorize-restart', 'cancel') -State $status.State -RequiresRestart
   }
@@ -314,12 +316,12 @@ try {
     $null -ne $postStatus.Error -and
     $postStatus.Error.code -in @('CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED') -and
     $postStatus.State.install -eq 'not-installed' -and $postStatus.State.session -eq 'official' -and
-    $postStatus.State.codex -ne 'running'
+    -not $postStatus.State.requiresRestart
   $unavailableCodexAfterUninstall = $Operation -eq 'uninstall' -and -not $postStatus.Ok -and
     $null -ne $postStatus.Error -and
     $postStatus.Error.code -in @('CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED') -and
     $postStatus.State.install -eq 'not-installed' -and $postStatus.State.session -eq 'official' -and
-    $postStatus.State.codex -ne 'running'
+    -not $postStatus.State.requiresRestart
   if (-not $postStatus.Ok -and -not $unavailableCodexAfterRestore -and -not $unavailableCodexAfterUninstall) {
     if ($null -ne $postStatus.Error -and $postStatus.Error.code -eq 'STATE_UNSAFE') {
       Exit-DreamSkinStudioError -Code 'STATE_UNSAFE' -Message 'Theme state needs recovery before it can be used.' `
@@ -348,7 +350,7 @@ try {
     Exit-DreamSkinStudioError -Code 'OPERATION_FAILED' -Message 'The Studio uninstall could not be verified.' `
       -RecoveryActions @('retry', 'diagnostics', 'cancel') -State $postStatus.State
   }
-  if ($Operation -eq 'uninstall' -and $postStatus.State.codex -eq 'running') {
+  if ($Operation -eq 'uninstall' -and $postStatus.State.requiresRestart) {
     Exit-DreamSkinStudioError -Code 'OPERATION_FAILED' -Message 'Codex did not remain stopped after uninstall.' `
       -RecoveryActions @('retry', 'diagnostics', 'cancel') -State $postStatus.State
   }

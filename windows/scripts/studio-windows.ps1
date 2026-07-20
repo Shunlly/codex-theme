@@ -265,6 +265,7 @@ function Get-DreamSkinStudioStatus {
   $codexState = 'not-installed'
   $codex = $null
   $codexProcesses = @()
+  $codexProcessRunning = $false
   $installs = @(Get-DreamSkinRegisteredCodexInstalls)
   if ($installs.Count -gt 0) {
     $savedCodex = $null
@@ -289,6 +290,7 @@ function Get-DreamSkinStudioStatus {
         $runningProcesses = $candidateProcesses
       }
     }
+    $codexProcessRunning = $null -ne $runningCodex
     if ($null -ne $savedCodex) {
       $codex = $savedCodex
       $codexProcesses = $savedProcesses
@@ -357,7 +359,7 @@ function Get-DreamSkinStudioStatus {
     $verified = $false
   }
 
-  $requiresRestart = $codexState -eq 'running' -and $session -eq 'official'
+  $requiresRestart = $codexProcessRunning -and $session -eq 'official'
   $availableActions = @('install')
   if ($install -eq 'ready') {
     switch ($session) {

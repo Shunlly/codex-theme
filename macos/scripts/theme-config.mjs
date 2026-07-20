@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -275,6 +276,34 @@ function decodeStrictUtf8(bytes, label) {
   return content;
 }
 
+async function readStableRegularFile(file, invalidMessage) {
+  const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat({ bigint: true });
+    const linked = await fs.lstat(file, { bigint: true });
+    if (!opened.isFile() || !linked.isFile() || opened.dev !== linked.dev || opened.ino !== linked.ino) {
+      throw new Error(invalidMessage);
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    const linkedAfter = await fs.lstat(file, { bigint: true });
+    if (
+      !linkedAfter.isFile()
+      || opened.dev !== after.dev
+      || opened.ino !== after.ino
+      || opened.size !== after.size
+      || opened.mtimeNs !== after.mtimeNs
+      || opened.dev !== linkedAfter.dev
+      || opened.ino !== linkedAfter.ino
+    ) {
+      throw new Error("Theme backup identity changed while it was being read; nothing was changed.");
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 async function acquireConfigLock() {
   const lockPath = `${configPath}.dream-skin.lock`;
   const deadline = Date.now() + 5000;
@@ -372,7 +401,10 @@ async function main() {
     let existingBackup = null;
     let backupExists = false;
     try {
-      const backupBytes = await fs.readFile(backupPath);
+      const backupBytes = await readStableRegularFile(
+        backupPath,
+        "Theme backup must be a regular file, not a symbolic link.",
+      );
       existingBackup = JSON.parse(decodeStrictUtf8(backupBytes, "Theme backup"));
       backupExists = true;
     } catch (error) {
@@ -418,7 +450,10 @@ async function main() {
 
   let backup;
   try {
-    const backupBytes = await fs.readFile(backupPath);
+    const backupBytes = await readStableRegularFile(
+      backupPath,
+      "Theme backup must be a regular file, not a symbolic link.",
+    );
     backup = JSON.parse(decodeStrictUtf8(backupBytes, "Theme backup"));
   } catch (error) {
     if (error.code === "ENOENT") throw new Error("No selective pre-install theme backup is available.");

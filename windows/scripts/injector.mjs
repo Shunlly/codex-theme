@@ -97,9 +97,10 @@ function isValidCdpPageTarget(item, port) {
 }
 
 class CdpSession {
-  constructor(target, port) {
+  constructor(target, port, commandGuard = null) {
     this.target = target;
     this.ws = new WebSocket(validatedDebuggerUrl(target, port));
+    this.commandGuard = commandGuard;
     this.nextId = 1;
     this.pending = new Map();
     this.listeners = new Map();
@@ -125,9 +126,14 @@ class CdpSession {
       }
       this.pending.clear();
     });
-    await this.send("Runtime.enable");
-    await this.send("Page.enable");
-    return this;
+    try {
+      await this.send("Runtime.enable");
+      await this.send("Page.enable");
+      return this;
+    } catch (error) {
+      this.close();
+      throw error;
+    }
   }
 
   onMessage(event) {
@@ -157,6 +163,7 @@ class CdpSession {
   }
 
   send(method, params = {}) {
+    try { this.commandGuard?.(); } catch (error) { return Promise.reject(error); }
     if (this.closed) return Promise.reject(new Error("CDP session is closed"));
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
@@ -233,6 +240,12 @@ class BrowserIdentityAnchor {
     return this;
   }
 
+  assertOpen() {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) {
+      throw new CdpIdentityMismatchError("Original CDP browser identity closed");
+    }
+  }
+
   close() {
     if (!this.closed) {
       try { this.ws.close(); } catch {}
@@ -256,22 +269,7 @@ async function fetchCdpJson(port, resource) {
   }
 }
 
-async function listAppTargets(port, expectedBrowserId = null) {
-  const targets = await fetchCdpJson(port, "/json/list");
-  if (!Array.isArray(targets)) throw new Error("CDP target list is not an array");
-  if (expectedBrowserId) {
-    const version = await fetchCdpJson(port, "/json/version");
-    const actualBrowserId = browserIdFromVersion(version, port);
-    if (actualBrowserId !== expectedBrowserId) {
-      throw new CdpIdentityMismatchError(
-        `CDP browser identity changed from ${expectedBrowserId} to ${actualBrowserId}`,
-      );
-    }
-  }
-  return targets.filter((item) => isValidCdpPageTarget(item, port));
-}
-
-async function connectBrowserIdentityAnchor(port, expectedBrowserId) {
+async function requireBrowserIdentity(port, expectedBrowserId) {
   const version = await fetchCdpJson(port, "/json/version");
   const actualBrowserId = browserIdFromVersion(version, port);
   if (actualBrowserId !== expectedBrowserId) {
@@ -279,6 +277,19 @@ async function connectBrowserIdentityAnchor(port, expectedBrowserId) {
       `CDP browser identity changed from ${expectedBrowserId} to ${actualBrowserId}`,
     );
   }
+  return version;
+}
+
+async function listAppTargets(port, expectedBrowserId) {
+  await requireBrowserIdentity(port, expectedBrowserId);
+  const targets = await fetchCdpJson(port, "/json/list");
+  if (!Array.isArray(targets)) throw new Error("CDP target list is not an array");
+  await requireBrowserIdentity(port, expectedBrowserId);
+  return targets.filter((item) => isValidCdpPageTarget(item, port));
+}
+
+async function connectBrowserIdentityAnchor(port, expectedBrowserId) {
+  const version = await requireBrowserIdentity(port, expectedBrowserId);
   return new BrowserIdentityAnchor(validatedDebuggerUrl(version, port)).open();
 }
 
@@ -458,11 +469,11 @@ async function waitForCodexProbe(session, timeoutMs = 1800) {
   return probe;
 }
 
-async function connectTarget(target, port) {
-  return new CdpSession(target, port).open();
+async function connectTarget(target, port, commandGuard = null) {
+  return new CdpSession(target, port, commandGuard).open();
 }
 
-async function connectCodexTargets(port, timeoutMs, expectedBrowserId) {
+async function connectCodexTargets(port, timeoutMs, expectedBrowserId, commandGuard = null) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
@@ -472,12 +483,13 @@ async function connectCodexTargets(port, timeoutMs, expectedBrowserId) {
       for (const target of targets) {
         let session;
         try {
-          session = await connectTarget(target, port);
+          session = await connectTarget(target, port, commandGuard);
           const probe = await probeSession(session);
           if (probe?.codex) connected.push({ target, session, probe });
           else session.close();
         } catch (error) {
           session?.close();
+          if (error instanceof CdpIdentityMismatchError) throw error;
           lastError = error;
         }
       }
@@ -659,13 +671,21 @@ async function capture(session, outputPath) {
 }
 
 async function runOneShot(options) {
-  const connected = await connectCodexTargets(options.port, options.timeoutMs, options.browserId);
-  const loadedPayload = (options.mode === "once" || options.reload)
-    ? await loadPayload(options.themeDir) : null;
-  const payload = loadedPayload?.payload ?? null;
-  const results = [];
-  let screenshotCaptured = false;
+  const identityAnchor = await connectBrowserIdentityAnchor(options.port, options.browserId);
+  const assertIdentityAnchorOpen = () => identityAnchor.assertOpen();
+  let connected = [];
   try {
+    connected = await connectCodexTargets(
+      options.port,
+      options.timeoutMs,
+      options.browserId,
+      assertIdentityAnchorOpen,
+    );
+    const loadedPayload = (options.mode === "once" || options.reload)
+      ? await loadPayload(options.themeDir) : null;
+    const payload = loadedPayload?.payload ?? null;
+    const results = [];
+    let screenshotCaptured = false;
     for (const { target, session, probe } of connected) {
       try {
         if (options.mode === "remove") await removeFromSession(session);
@@ -692,17 +712,19 @@ async function runOneShot(options) {
         session.close();
       }
     }
+    console.log(JSON.stringify({ mode: options.mode, port: options.port, targets: results }, null, 2));
+    const failed = results.length === 0 || results.some((item) =>
+      options.mode === "remove" ? item.result !== true : !item.result?.pass);
+    if (failed) process.exitCode = 2;
   } finally {
     for (const { session } of connected) session.close();
+    identityAnchor.close();
   }
-  console.log(JSON.stringify({ mode: options.mode, port: options.port, targets: results }, null, 2));
-  const failed = results.length === 0 || results.some((item) =>
-    options.mode === "remove" ? item.result !== true : !item.result?.pass);
-  if (failed) process.exitCode = 2;
 }
 
 async function runWatch(options) {
   const identityAnchor = await connectBrowserIdentityAnchor(options.port, options.browserId);
+  const assertIdentityAnchorOpen = () => identityAnchor.assertOpen();
   const sessions = new Map();
   const earlyScripts = new Map();
   const fallbackTargets = new Map();
@@ -759,9 +781,14 @@ async function runWatch(options) {
       }
       let targets = [];
       try {
-        targets = await listAppTargets(options.port);
+        targets = await listAppTargets(options.port, options.browserId);
         listFailures = 0;
       } catch (error) {
+        if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) {
+          console.error(`[dream-skin] ${error.message}; watcher is stopping`);
+          process.exitCode = 3;
+          break;
+        }
         listFailures += 1;
         const retryMs = Math.min(10000, 1000 * (2 ** Math.min(listFailures - 1, 4)));
         if (listFailures === 1 || Date.now() - lastListErrorLogAt >= 30000) {
@@ -872,7 +899,7 @@ async function runWatch(options) {
         let session;
         let earlyScriptId = null;
         try {
-          session = await connectTarget(target, options.port);
+          session = await connectTarget(target, options.port, assertIdentityAnchorOpen);
           if (identityAnchor.closed) throw new CdpIdentityMismatchError("Original CDP browser identity closed");
           let earlyInjectionFallback = false;
           if (!paused) {
@@ -925,11 +952,11 @@ async function runWatch(options) {
       await new Promise((resolve) => setTimeout(resolve, 1200));
     }
   } finally {
-    identityAnchor.close();
     for (const [id, session] of sessions) {
       await removeEarlyPayload(session, earlyScripts.get(id));
       session.close();
     }
+    identityAnchor.close();
     earlyScripts.clear();
     fallbackTargets.clear();
     fallbackListeners.clear();

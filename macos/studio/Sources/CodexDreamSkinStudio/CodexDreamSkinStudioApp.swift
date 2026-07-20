@@ -42,6 +42,7 @@ final class StudioAppController: NSObject, ObservableObject, NSApplicationDelega
     private var reopenedWindow: NSWindow?
     private lazy var statusItem = StatusItemController(
         onShow: { [weak self] in self?.showWindow() },
+        onStatus: { [weak self] in self?.refreshStatus() },
         onApplyResume: { [weak self] in self?.requestPrimaryAction() },
         onPauseResume: { [weak self] in self?.requestPauseResumeAction() },
         onRestore: { [weak self] in self?.request(.restore) },
@@ -67,6 +68,11 @@ final class StudioAppController: NSObject, ObservableObject, NSApplicationDelega
     func request(_ operation: EngineOperation) {
         showWindow()
         Task { await model.request(operation) }
+    }
+
+    func refreshStatus() {
+        showWindow()
+        Task { await model.refresh(.status) }
     }
 
     func requestPrimaryAction() {

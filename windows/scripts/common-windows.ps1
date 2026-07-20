@@ -71,6 +71,64 @@ function Test-DreamSkinPathEqual {
   }
 }
 
+function Test-DreamSkinManagedLegacyShortcutArguments {
+  param(
+    [Parameter(Mandatory = $true)][string]$Arguments,
+    [Parameter(Mandatory = $true)][string]$ScriptPath,
+    [Parameter(Mandatory = $true)][ValidateSet('start', 'restore', 'tray')][string]$Kind
+  )
+  $prefix = switch ($Kind) {
+    'start' { "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`"" }
+    'restore' { "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`"" }
+    'tray' { "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`"" }
+  }
+  $suffix = switch ($Kind) {
+    'start' { ' -PromptRestart' }
+    'restore' { ' -RestoreBaseTheme -PromptRestart' }
+    'tray' { '' }
+  }
+  $match = [regex]::Match($Arguments,
+    '^' + [regex]::Escape($prefix) + '(?: -Port (?<port>[0-9]{4,5}))?' + [regex]::Escape($suffix) + '$')
+  if (-not $match.Success) { return $false }
+  if ($match.Groups['port'].Success) {
+    $port = 0
+    if (-not [int]::TryParse($match.Groups['port'].Value, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+      return $false
+    }
+  }
+  return $true
+}
+
+function Remove-DreamSkinManagedLegacyShortcuts {
+  $desktop = [Environment]::GetFolderPath('Desktop')
+  $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+  $startScript = Join-Path $PSScriptRoot 'start-dream-skin.ps1'
+  $restoreScript = Join-Path $PSScriptRoot 'restore-dream-skin.ps1'
+  $trayScript = Join-Path $PSScriptRoot 'tray-dream-skin.ps1'
+  $entries = @(
+    @{ Path = (Join-Path $desktop 'Codex Dream Skin.lnk'); Script = $startScript; Kind = 'start' },
+    @{ Path = (Join-Path $startMenu 'Codex Dream Skin.lnk'); Script = $startScript; Kind = 'start' },
+    @{ Path = (Join-Path $desktop 'Codex Dream Skin - Restore.lnk'); Script = $restoreScript; Kind = 'restore' },
+    @{ Path = (Join-Path $desktop 'Codex Dream Skin - Tray.lnk'); Script = $trayScript; Kind = 'tray' },
+    @{ Path = (Join-Path $startMenu 'Codex Dream Skin - Tray.lnk'); Script = $trayScript; Kind = 'tray' }
+  )
+  $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+  $shell = New-Object -ComObject WScript.Shell
+  foreach ($entry in $entries) {
+    if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) { continue }
+    $item = Get-Item -LiteralPath $entry.Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+    try {
+      $shortcut = $shell.CreateShortcut($entry.Path)
+      if ((Test-DreamSkinPathEqual -Left $shortcut.TargetPath -Right $powershell) -and
+        (Test-DreamSkinManagedLegacyShortcutArguments -Arguments "$($shortcut.Arguments)" `
+          -ScriptPath $entry.Script -Kind $entry.Kind)) {
+        Remove-Item -LiteralPath $entry.Path -Force -ErrorAction Stop
+      }
+    } catch {}
+  }
+}
+
 function Test-DreamSkinPathWithin {
   param([string]$Path, [string]$Root)
   if (-not $Path -or -not $Root) { return $false }

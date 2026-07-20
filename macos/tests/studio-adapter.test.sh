@@ -74,10 +74,18 @@ WATCHER_MARKER="$WATCHER_FIXTURE/commands"
 printf 'nohup %s\n' "$*" >> "__MARKER__"
 exit 1
 STUB
-/usr/bin/sed "s|__MARKER__|$WATCHER_MARKER|g" > "$WATCHER_FIXTURE/launchctl" <<'STUB'
+/usr/bin/sed -e "s|__MARKER__|$WATCHER_MARKER|g" \
+  -e "s|__SUBMITTED__|$WATCHER_FIXTURE/submitted|g" > "$WATCHER_FIXTURE/launchctl" <<'STUB'
 #!/bin/bash
 printf 'launchctl %s\n' "$*" >> "__MARKER__"
-[ "${1:-}" = "print" ] && printf '  pid = 4242\n'
+case "${1:-}" in
+  print)
+    [ -e "__SUBMITTED__" ] || exit 1
+    printf '  pid = 4242\n'
+    ;;
+  submit) : > "__SUBMITTED__" ;;
+  remove) /bin/rm -f "__SUBMITTED__" ;;
+esac
 STUB
 /usr/bin/sed > "$WATCHER_FIXTURE/kill" <<'STUB'
 #!/bin/bash
@@ -1086,6 +1094,7 @@ RESTORE_REAL_MARKER="$RESTORE_REAL/marker"
 SCRIPT_DIR="__SCRIPTS__"
 STATE_ROOT="__HOME__/state"
 STATE_PATH="$STATE_ROOT/state.json"
+ROLLBACK_STATE_PATH="$STATE_ROOT/rollback.json"
 INSTALL_ROOT="__HOME__/installed"
 THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
 RESTORED_THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.restored.json"
@@ -1115,7 +1124,9 @@ launch_codex_normally() {
 acquire_lifecycle_lock() { LIFECYCLE_LOCK_BORROWED="true"; return 0; }
 require_lifecycle_lock() { acquire_lifecycle_lock; }
 release_lifecycle_lock() { return 0; }
+live_theme_backup_is_valid() { [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]; }
 restored_theme_backup_is_valid() { [ -f "$RESTORED_THEME_BACKUP_PATH" ]; }
+clear_renderer_rollback_evidence() { /bin/rm -f "$ROLLBACK_STATE_PATH"; }
 STUB
 /usr/bin/sed > "$RESTORE_REAL/scripts/node-stub" <<'STUB'
 #!/bin/bash

@@ -339,6 +339,177 @@ try {
     throw 'Conditional atomic write replaced newer config content.'
   }
 
+  $configTrustBoundaryCases = @(
+    @{ Name = 'config-file-symlink-install'; Boundary = 'file-symlink'; Operation = 'install' },
+    @{ Name = 'config-file-symlink-selective'; Boundary = 'file-symlink'; Operation = 'selective' },
+    @{ Name = 'config-file-symlink-exact'; Boundary = 'file-symlink'; Operation = 'exact' },
+    @{ Name = 'config-directory-junction-install'; Boundary = 'directory-junction'; Operation = 'install' },
+    @{ Name = 'config-directory-junction-selective'; Boundary = 'directory-junction'; Operation = 'selective' },
+    @{ Name = 'config-directory-junction-exact'; Boundary = 'directory-junction'; Operation = 'exact' }
+  )
+  foreach ($trustCase in $configTrustBoundaryCases) {
+    $caseRoot = Join-Path $temporaryRoot $trustCase.Name
+    $profileRoot = Join-Path $caseRoot 'profile'
+    $externalRoot = Join-Path $caseRoot 'external'
+    $configDirectory = Join-Path $profileRoot '.codex'
+    $externalConfig = Join-Path $externalRoot 'config.toml'
+    $configPathUnderTest = Join-Path $configDirectory 'config.toml'
+    $caseBackup = Join-Path $caseRoot 'config.before-dream-skin.toml'
+    $caseRecovery = Join-Path $caseRoot 'config.before-recovery.toml'
+    $caseState = Join-Path $caseRoot 'state.json'
+    New-Item -ItemType Directory -Path $profileRoot, $externalRoot | Out-Null
+    $currentConfig = if ($trustCase.Operation -eq 'install') {
+      "model = `"gpt-5`"`r`n"
+    } else {
+      "[desktop]`r`n$($script:DreamSkinManagedLightCodeTheme)`r`n$($script:DreamSkinManagedLightChromeTheme)`r`n"
+    }
+    [IO.File]::WriteAllText($externalConfig, $currentConfig, $utf8NoBom)
+    [IO.File]::WriteAllText($caseState, 'state sentinel', $utf8NoBom)
+    if ($trustCase.Operation -ne 'install') {
+      [IO.File]::WriteAllText($caseBackup, "model = `"baseline`"`r`n", $utf8NoBom)
+    }
+    $externalBefore = [IO.File]::ReadAllBytes($externalConfig)
+    $stateBefore = [IO.File]::ReadAllBytes($caseState)
+    $backupBefore = if (Test-Path -LiteralPath $caseBackup -PathType Leaf) {
+      [IO.File]::ReadAllBytes($caseBackup)
+    } else { $null }
+    $reparsePath = $null
+    try {
+      if ($trustCase.Boundary -eq 'file-symlink') {
+        New-Item -ItemType Directory -Path $configDirectory | Out-Null
+        $null = New-Item -ItemType SymbolicLink -Path $configPathUnderTest -Target $externalConfig
+        $reparsePath = $configPathUnderTest
+      } else {
+        $null = New-Item -ItemType Junction -Path $configDirectory -Target $externalRoot
+        $reparsePath = $configDirectory
+      }
+
+      $trustRejected = $false
+      try {
+        switch ($trustCase.Operation) {
+          'install' {
+            Install-DreamSkinBaseTheme -ConfigPath $configPathUnderTest -BackupPath $caseBackup
+          }
+          'selective' {
+            Restore-DreamSkinBaseTheme -ConfigPath $configPathUnderTest -BackupPath $caseBackup
+          }
+          'exact' {
+            Restore-DreamSkinConfigBackup -ConfigPath $configPathUnderTest -BackupPath $caseBackup `
+              -RecoveryBackupPath $caseRecovery
+          }
+        }
+      } catch {
+        $trustRejected = $true
+      }
+      $reparseItem = Get-Item -LiteralPath $reparsePath -Force -ErrorAction Stop
+      if (-not $trustRejected -or
+        ($reparseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -or
+        -not (Test-DreamSkinBytesEqual -Left $externalBefore -Right ([IO.File]::ReadAllBytes($externalConfig))) -or
+        -not (Test-DreamSkinBytesEqual -Left $stateBefore -Right ([IO.File]::ReadAllBytes($caseState))) -or
+        (Test-Path -LiteralPath $caseRecovery)) {
+        throw "$($trustCase.Name) crossed the config trust boundary or changed protected state."
+      }
+      if ($null -eq $backupBefore) {
+        if (Test-Path -LiteralPath $caseBackup) {
+          throw "$($trustCase.Name) created a backup before rejecting the config trust boundary."
+        }
+      } elseif (-not (Test-DreamSkinBytesEqual -Left $backupBefore -Right ([IO.File]::ReadAllBytes($caseBackup)))) {
+        throw "$($trustCase.Name) changed the live backup before rejecting the config trust boundary."
+      }
+    } finally {
+      if ($null -ne $reparsePath -and (Test-Path -LiteralPath $reparsePath)) {
+        Remove-Item -LiteralPath $reparsePath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  foreach ($identityCase in @(
+    'same-byte-identity-install',
+    'same-byte-identity-selective',
+    'same-byte-identity-exact',
+    'same-byte-identity-rollback'
+  )) {
+    $operation = $identityCase.Substring('same-byte-identity-'.Length)
+    $caseRoot = Join-Path $temporaryRoot $identityCase
+    New-Item -ItemType Directory -Path $caseRoot | Out-Null
+    $identityConfig = Join-Path $caseRoot 'config.toml'
+    $identityBackup = Join-Path $caseRoot 'config.before-dream-skin.toml'
+    $identityRecovery = Join-Path $caseRoot 'config.before-recovery.toml'
+    $identityState = Join-Path $caseRoot 'state.json'
+    $identityCurrent = if ($operation -eq 'install') {
+      "model = `"gpt-5`"`r`n"
+    } else {
+      "[desktop]`r`n$($script:DreamSkinManagedLightCodeTheme)`r`n$($script:DreamSkinManagedLightChromeTheme)`r`n"
+    }
+    [IO.File]::WriteAllText($identityConfig, $identityCurrent, $utf8NoBom)
+    [IO.File]::WriteAllText($identityState, 'state sentinel', $utf8NoBom)
+    if ($operation -eq 'selective' -or $operation -eq 'exact') {
+      [IO.File]::WriteAllText($identityBackup, "model = `"baseline`"`r`n", $utf8NoBom)
+    }
+    $identityConfigBefore = [IO.File]::ReadAllBytes($identityConfig)
+    $identityStateBefore = [IO.File]::ReadAllBytes($identityState)
+    $identityBackupBefore = if (Test-Path -LiteralPath $identityBackup -PathType Leaf) {
+      [IO.File]::ReadAllBytes($identityBackup)
+    } else { $null }
+    $identityBefore = Get-DreamSkinStableFileSnapshot -Path $identityConfig
+    $originalStableAssert = ${function:Assert-DreamSkinStableFileSnapshotUnchanged}
+    $raceState = [pscustomobject]@{ Injected = $false }
+    $raceTarget = [IO.Path]::GetFullPath($identityConfig)
+    $raceAssert = {
+      param([Parameter(Mandatory = $true)]$Snapshot)
+      if (-not $raceState.Injected -and
+        $Snapshot.FullPath.Equals($raceTarget, [StringComparison]::OrdinalIgnoreCase)) {
+        $replacement = Join-Path ([IO.Path]::GetDirectoryName($raceTarget)) `
+          ".$([IO.Path]::GetFileName($raceTarget)).identity-race"
+        [IO.File]::WriteAllBytes($replacement, [byte[]]$Snapshot.Bytes)
+        [IO.File]::Replace($replacement, $raceTarget, $null)
+        $raceState.Injected = $true
+      }
+      & $originalStableAssert -Snapshot $Snapshot
+    }.GetNewClosure()
+    $identityRejected = $false
+    try {
+      Set-Item Function:\Assert-DreamSkinStableFileSnapshotUnchanged -Value $raceAssert
+      try {
+        switch ($operation) {
+          'install' {
+            Install-DreamSkinBaseTheme -ConfigPath $identityConfig -BackupPath $identityBackup
+          }
+          'selective' {
+            Restore-DreamSkinBaseTheme -ConfigPath $identityConfig -BackupPath $identityBackup
+          }
+          'exact' {
+            Restore-DreamSkinConfigBackup -ConfigPath $identityConfig -BackupPath $identityBackup `
+              -RecoveryBackupPath $identityRecovery
+          }
+          'rollback' {
+            Write-DreamSkinBytesAtomically -Path $identityConfig -Bytes ($utf8NoBom.GetBytes('rollback')) `
+              -ExpectedBytes $identityConfigBefore -ExpectedSnapshot $identityBefore
+          }
+        }
+      } catch {
+        $identityRejected = $true
+      }
+    } finally {
+      Set-Item Function:\Assert-DreamSkinStableFileSnapshotUnchanged -Value $originalStableAssert
+    }
+    $identityAfter = Get-DreamSkinStableFileSnapshot -Path $identityConfig
+    if (-not $raceState.Injected -or -not $identityRejected -or
+      $identityAfter.Identity -ceq $identityBefore.Identity -or
+      -not (Test-DreamSkinBytesEqual -Left $identityConfigBefore -Right $identityAfter.Bytes) -or
+      -not (Test-DreamSkinBytesEqual -Left $identityStateBefore -Right ([IO.File]::ReadAllBytes($identityState))) -or
+      (Test-Path -LiteralPath $identityRecovery))) {
+      throw "$identityCase did not reject a same-byte config identity replacement without side effects."
+    }
+    if ($null -eq $identityBackupBefore) {
+      if (Test-Path -LiteralPath $identityBackup) {
+        throw "$identityCase created a backup after config identity changed."
+      }
+    } elseif (-not (Test-DreamSkinBytesEqual -Left $identityBackupBefore -Right ([IO.File]::ReadAllBytes($identityBackup)))) {
+      throw "$identityCase changed the live backup after config identity changed."
+    }
+  }
+
   if (-not (Test-DreamSkinWebSocketUrl -Value 'ws://127.0.0.1:9335/devtools/page/test' -Port 9335)) {
     throw 'PowerShell loopback WebSocket validation rejected a safe target.'
   }

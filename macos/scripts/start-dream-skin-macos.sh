@@ -38,6 +38,8 @@ trap release_lifecycle_lock EXIT
 discover_codex_app
 require_macos_runtime
 ensure_state_root
+[ ! -e "$ROLLBACK_STATE_PATH" ] && [ ! -L "$ROLLBACK_STATE_PATH" ] \
+  || fail "A previous renderer rollback is unresolved; run Complete Restore before applying again."
 
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
   saved_port="$(state_field port)" || fail "Could not read the existing state port."
