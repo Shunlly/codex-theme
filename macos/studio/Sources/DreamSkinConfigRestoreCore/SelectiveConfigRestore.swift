@@ -65,7 +65,6 @@ public enum SelectiveConfigRestore {
                     expectedBytes: originalBytes,
                     expectedStat: originalStat
                 )
-                try removeBackup(backupURL)
                 return
             }
             content = trimEnd(content) + preferredNewline + preferredNewline + "[desktop]" + preferredNewline
@@ -101,7 +100,6 @@ public enum SelectiveConfigRestore {
             expectedBytes: originalBytes,
             expectedStat: originalStat
         )
-        try removeBackup(backupURL)
     }
 
     private static func decodeStrictUTF8(_ data: Data, label: String) throws -> String {
@@ -461,12 +459,6 @@ public enum SelectiveConfigRestore {
         try assertConfigUnchanged(at: url, expectedBytes: expectedBytes, expectedStat: expectedStat)
         guard Darwin.rename(temporary.path, url.path) == 0 else {
             throw posixError("Could not atomically replace Codex config")
-        }
-    }
-
-    private static func removeBackup(_ url: URL) throws {
-        guard Darwin.unlink(url.path) == 0 else {
-            throw posixError("Could not delete the restored theme backup")
         }
     }
 

@@ -683,6 +683,37 @@ final class StudioModelTests: CoreTestCase {
         XCTAssertFalse(confirming.pauseResumeEnabled)
         XCTAssertFalse(confirming.restoreEnabled)
         XCTAssertTrue(confirming.allowsTermination)
+
+        let restored = makeEnvelope(
+            operation: .status,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            availableActions: ["install", "uninstall"]
+        )
+        let restoredMenu = StudioMenuState(envelope: restored, isBusy: false, presentation: nil)
+        XCTAssertEqual(restoredMenu.primaryOperation, .install)
+        XCTAssertTrue(restoredMenu.primaryEnabled)
+        XCTAssertTrue(restoredMenu.isEnabled(.uninstall))
+
+        let partialRecovery = makeEnvelope(
+            operation: .status,
+            ok: false,
+            install: "not-installed",
+            session: "stale",
+            verified: nil,
+            errorCode: "STATE_UNSAFE",
+            recoveryActions: ["restore", "diagnostics", "cancel"],
+            availableActions: ["restore", "uninstall"]
+        )
+        let partialRecoveryMenu = StudioMenuState(
+            envelope: partialRecovery,
+            isBusy: false,
+            presentation: nil
+        )
+        XCTAssertFalse(partialRecoveryMenu.primaryEnabled)
+        XCTAssertTrue(partialRecoveryMenu.restoreEnabled)
+        XCTAssertTrue(partialRecoveryMenu.isEnabled(.uninstall))
     }
 
 #if !canImport(XCTest)

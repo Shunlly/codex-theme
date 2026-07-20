@@ -10,7 +10,10 @@
 
 ### Fixed
 
-- Complete Restore and uninstall remain usable through the bundled native helper when the installed engine is partial or the validated Node runtime is unavailable; completed restore state is committed before optional relaunch.
+- Complete Restore and uninstall remain usable through the bundled native helper when the installed engine is partial, the validated Node runtime is unavailable, or Codex itself is absent; a valid completed-restore proof keeps the restored engine removable without Terminal.
+- Complete Restore retains its recovery backup until state cleanup succeeds, validates one fixed completion archive before accepting it as proof, and remains retryable after cleanup/archive faults or relaunch failure.
+- CDP discovery now rejects wildcard, non-loopback, malformed, and mixed listener bindings; every watcher is anchored to the strictly parsed `/json/version` Browser ID across verify, pause, restore, status, doctor, and hot reload.
+- Diagnostics opens the fixed Application Support folder with native APIs, and protocol theme names redact path separators and control characters without changing legitimate Chinese names.
 - Config install/restore rejects aliased, dotted, inline, nested, and array-table appearance structures without changing config or deleting recovery data.
 - Studio and advanced shell entries share one stale-recoverable per-user lifecycle lock. Concurrent operations return `OPERATION_BUSY`, and normal Quit or window close is disabled while a mutation is active.
 - Active sessions without a verified watcher are reported stale, install upgrades discard verified-stopped watcher state, and progress messages use `DREAM_SKIN_PROGRESS=<value>` consistently.

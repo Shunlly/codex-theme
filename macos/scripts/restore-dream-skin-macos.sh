@@ -3,6 +3,23 @@
 set -euo pipefail
 . "$(cd "$(dirname "$0")" && pwd -P)/common-macos.sh"
 
+RESTORED_THEME_BACKUP_PATH="${RESTORED_THEME_BACKUP_PATH:-$STATE_ROOT/theme-backup.restored.json}"
+
+archive_restored_theme_backup() {
+  [ -e "$THEME_BACKUP_PATH" ] || [ -L "$THEME_BACKUP_PATH" ] || return 0
+  [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ] \
+    || fail "The restored theme backup is not a safe regular file; recovery data was preserved."
+  if [ -e "$RESTORED_THEME_BACKUP_PATH" ] || [ -L "$RESTORED_THEME_BACKUP_PATH" ]; then
+    [ -f "$RESTORED_THEME_BACKUP_PATH" ] && [ ! -L "$RESTORED_THEME_BACKUP_PATH" ] \
+      || fail "The restored-backup archive path is unsafe; recovery data was preserved."
+  fi
+  /bin/mv -f "$THEME_BACKUP_PATH" "$RESTORED_THEME_BACKUP_PATH" \
+    || fail "Could not archive the restored theme backup; recovery data was preserved."
+  [ ! -e "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ] \
+    && [ -f "$RESTORED_THEME_BACKUP_PATH" ] && [ ! -L "$RESTORED_THEME_BACKUP_PATH" ] \
+    || fail "The restored theme backup archive could not be verified."
+}
+
 PORT=9341
 PORT_EXPLICIT="false"
 RESTORE_BASE_THEME="false"
@@ -56,8 +73,15 @@ if [ "$RESTORE_BASE_THEME" = "true" ] && [ "$NODE_AVAILABLE" != "true" ]; then
 fi
 require_lifecycle_lock
 trap release_lifecycle_lock EXIT
+DAMAGED_STATE_RECOVERY="false"
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
-  PORT="$(state_field port)" || fail "Could not read the saved CDP port; state was preserved."
+  SAVED_PORT="$(state_field port 2>/dev/null || true)"
+  case "$SAVED_PORT" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$SAVED_PORT" -ge 1024 ] && [ "$SAVED_PORT" -le 65535 ]; then PORT="$SAVED_PORT"; fi
+      ;;
+  esac
 fi
 
 CODEX_RUNNING="false"
@@ -72,8 +96,17 @@ if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ] \
 fi
 ensure_state_root
 DEBUG_READY="false"
+BROWSER_ID=""
 if [ "$CODEX_AVAILABLE" = "true" ]; then
-  verified_cdp_endpoint "$PORT" && DEBUG_READY="true"
+  if BROWSER_ID="$(verified_cdp_browser_id "$PORT")"; then DEBUG_READY="true"; fi
+fi
+if [ "$DEBUG_READY" = "true" ] && [ -f "$STATE_PATH" ]; then
+  SAVED_BROWSER_ID="$(state_field browserId 2>/dev/null || true)"
+  browser_id_is_valid "$SAVED_BROWSER_ID" \
+    || fail "The saved Dream Skin Browser ID is missing or invalid; restore state was preserved."
+  [ "$SAVED_BROWSER_ID" = "$BROWSER_ID" ] \
+    || fail "The active CDP browser does not match the saved Dream Skin session; restore state was preserved."
+  BROWSER_ID="$SAVED_BROWSER_ID"
 fi
 
 # Close before touching the watcher, state, backup, or config. Studio calls
@@ -90,8 +123,11 @@ if [ "$CODEX_RUNNING" = "true" ] && [ "$RESTART_CODEX" = "true" ]; then
 fi
 
 if [ -f "$STATE_PATH" ]; then
-  stop_recorded_injector \
-    || fail "Could not stop the recorded injector; restore state was preserved."
+  if ! stop_recorded_injector; then
+    recover_damaged_injector_state_without_live_candidate \
+      || fail "Could not classify the recorded injector safely; restore state was preserved."
+    DAMAGED_STATE_RECOVERY="true"
+  fi
 fi
 # Always remove the themed Codex launchd babysitter so quitting Codex stays quit.
 release_codex_launchd_job || true
@@ -99,7 +135,7 @@ release_codex_launchd_job || true
 if [ "$DEBUG_READY" = "true" ]; then
   [ "$NODE_AVAILABLE" = "true" ] \
     || fail "The validated Codex Node.js runtime is unavailable; pass --restart-codex for a full restore."
-  "$NODE" "$INJECTOR" --remove --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null \
+  "$NODE" "$INJECTOR" --remove --port "$PORT" --browser-id "$BROWSER_ID" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null \
     || fail "The live skin could not be removed and verified; restore stopped safely."
 elif [ "$CODEX_RUNNING" = "true" ] && [ "$RESTART_CODEX" = "false" ]; then
   fail "Codex is still running but its saved CDP endpoint cannot be verified. Pass --restart-codex for a full restore."
@@ -120,14 +156,26 @@ if [ "$RESTORE_BASE_THEME" = "true" ]; then
         || fail "Native config restore helper changed before execution; restore stopped safely."
       "$NATIVE_CONFIG_RESTORE" "$CONFIG_PATH" "$THEME_BACKUP_PATH"
     fi
-  elif [ -f "$STATE_PATH" ]; then
+  elif restored_theme_backup_is_valid; then
+    printf 'The base theme was already restored and its completion proof is valid.\n'
+  elif [ -f "$STATE_PATH" ] || { [ -d "$INSTALL_ROOT" ] && [ ! -L "$INSTALL_ROOT" ]; }; then
     fail "No selective pre-install theme backup is available; restore state was preserved."
   else
-    printf 'The base theme was already restored; no backup remained.\n'
+    printf 'No installed Dream Skin engine or recovery backup remains.\n'
   fi
 fi
 
-/bin/rm -f "$STATE_PATH"
+if [ "$DAMAGED_STATE_RECOVERY" = "true" ]; then
+  recover_damaged_injector_state_without_live_candidate \
+    || fail "A live injector candidate appeared during recovery; restore state was preserved."
+fi
+/bin/rm -f "$STATE_PATH" \
+  || fail "Could not remove lifecycle state; the restored theme backup was preserved for retry."
+[ ! -e "$STATE_PATH" ] && [ ! -L "$STATE_PATH" ] \
+  || fail "Lifecycle state still exists; the restored theme backup was preserved for retry."
+if [ "$RESTORE_BASE_THEME" = "true" ]; then
+  archive_restored_theme_backup
+fi
 
 if [ "$RESTART_CODEX" = "true" ]; then
   [ "$CODEX_RUNNING" = "true" ] && stop_codex "$FORCE_STOP_AUTHORIZED"

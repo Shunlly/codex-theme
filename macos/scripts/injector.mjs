@@ -17,10 +17,12 @@ const PAYLOAD_PLACEHOLDERS = [
   "__DREAM_SKIN_VERSION_JSON__",
   "__DREAM_SKIN_STYLE_REVISION_JSON__",
 ];
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]", "::1"]);
 const CDP_ID_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
 const MAX_ART_BYTES = 16 * 1024 * 1024;
 let staticPayloadAssets = null;
+
+class CdpIdentityMismatchError extends Error {}
 
 function parseArgs(argv) {
   const options = {
@@ -30,6 +32,7 @@ function parseArgs(argv) {
     screenshot: null,
     reload: false,
     themeDir: null,
+    browserId: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -42,6 +45,7 @@ function parseArgs(argv) {
     else if (arg === "--timeout-ms") options.timeoutMs = Number(argv[++i]);
     else if (arg === "--screenshot") options.screenshot = path.resolve(argv[++i]);
     else if (arg === "--theme-dir") options.themeDir = path.resolve(argv[++i]);
+    else if (arg === "--browser-id") options.browserId = argv[++i];
     else if (arg === "--reload") options.reload = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -51,12 +55,18 @@ function parseArgs(argv) {
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 250 || options.timeoutMs > 120000) {
     throw new Error(`Invalid timeout: ${options.timeoutMs}`);
   }
+  if (options.browserId !== null && !CDP_ID_PATTERN.test(options.browserId)) {
+    throw new Error(`Invalid browser ID: ${options.browserId}`);
+  }
+  if (["watch", "once", "verify", "remove"].includes(options.mode) && !options.browserId) {
+    throw new Error(`--browser-id is required in ${options.mode} mode`);
+  }
   return options;
 }
 
 function validatedDebuggerUrl(target, port) {
   const url = new URL(target.webSocketDebuggerUrl);
-  const pathIsValid = /^\/devtools\/page\/[A-Za-z0-9._-]{1,200}$/.test(url.pathname);
+  const pathIsValid = /^\/devtools\/(?:page|browser)\/[A-Za-z0-9._-]{1,200}$/.test(url.pathname);
   if (
     url.protocol !== "ws:" || !LOOPBACK_HOSTS.has(url.hostname) || Number(url.port) !== port
     || url.username || url.password || url.search || url.hash || !pathIsValid
@@ -64,6 +74,15 @@ function validatedDebuggerUrl(target, port) {
     throw new Error("Rejected a CDP WebSocket URL outside the allowed loopback page endpoint shape");
   }
   return url.href;
+}
+
+function browserIdFromVersion(version, port) {
+  const url = new URL(validatedDebuggerUrl(version, port));
+  const match = url.pathname.match(/^\/devtools\/browser\/([A-Za-z0-9._-]{1,200})$/);
+  if (!match || url.search || url.hash || !CDP_ID_PATTERN.test(match[1])) {
+    throw new Error("Rejected an invalid CDP browser identity URL");
+  }
+  return match[1];
 }
 
 function isValidCdpPageTarget(item, port) {
@@ -81,9 +100,10 @@ function isValidCdpPageTarget(item, port) {
 }
 
 class CdpSession {
-  constructor(target, port) {
+  constructor(target, port, commandGuard = null) {
     this.target = target;
     this.ws = new WebSocket(validatedDebuggerUrl(target, port));
+    this.commandGuard = commandGuard;
     this.nextId = 1;
     this.pending = new Map();
     this.listeners = new Map();
@@ -149,6 +169,7 @@ class CdpSession {
   }
 
   send(method, params = {}, timeoutMs = 10000) {
+    try { this.commandGuard?.(); } catch (error) { return Promise.reject(error); }
     if (this.closed) return Promise.reject(new Error("CDP session is closed"));
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
@@ -194,21 +215,87 @@ class CdpSession {
   }
 }
 
-async function listAppTargets(port) {
+class BrowserIdentityAnchor {
+  constructor(url) {
+    this.ws = new WebSocket(url);
+    this.closed = false;
+    this.ws.addEventListener("close", () => { this.closed = true; });
+    this.ws.addEventListener("error", () => {
+      this.closed = true;
+      try { this.ws.close(); } catch {}
+    });
+  }
+
+  async open() {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.close();
+        reject(new Error("CDP browser identity WebSocket open timed out"));
+      }, 5000);
+      this.ws.addEventListener("open", () => { clearTimeout(timeout); resolve(); }, { once: true });
+      this.ws.addEventListener("error", () => {
+        clearTimeout(timeout);
+        reject(new Error("CDP browser identity WebSocket open failed"));
+      }, { once: true });
+      this.ws.addEventListener("close", () => {
+        clearTimeout(timeout);
+        reject(new Error("CDP browser identity WebSocket closed during startup"));
+      }, { once: true });
+    });
+    if (this.closed) throw new Error("CDP browser identity WebSocket is already closed");
+    return this;
+  }
+
+  assertOpen() {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) {
+      throw new CdpIdentityMismatchError("Original CDP browser identity closed");
+    }
+  }
+
+  close() {
+    if (!this.closed) {
+      try { this.ws.close(); } catch {}
+    }
+    this.closed = true;
+  }
+}
+
+async function fetchCdpJson(port, resource) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2000);
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+    const response = await fetch(`http://127.0.0.1:${port}${resource}`, {
       redirect: "error",
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const targets = await response.json();
-    if (!Array.isArray(targets)) throw new Error("CDP target list was not an array");
-    return targets.filter((item) => isValidCdpPageTarget(item, port));
+    return await response.json();
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function requireBrowserIdentity(port, expectedBrowserId) {
+  const version = await fetchCdpJson(port, "/json/version");
+  const actualBrowserId = browserIdFromVersion(version, port);
+  if (actualBrowserId !== expectedBrowserId) {
+    throw new CdpIdentityMismatchError(
+      `CDP browser identity changed from ${expectedBrowserId} to ${actualBrowserId}`,
+    );
+  }
+  return version;
+}
+
+async function listAppTargets(port, expectedBrowserId) {
+  await requireBrowserIdentity(port, expectedBrowserId);
+  const targets = await fetchCdpJson(port, "/json/list");
+  if (!Array.isArray(targets)) throw new Error("CDP target list was not an array");
+  return targets.filter((item) => isValidCdpPageTarget(item, port));
+}
+
+async function connectBrowserIdentityAnchor(port, expectedBrowserId) {
+  const version = await requireBrowserIdentity(port, expectedBrowserId);
+  return new BrowserIdentityAnchor(validatedDebuggerUrl(version, port)).open();
 }
 
 async function probeSession(session) {
@@ -239,16 +326,16 @@ async function waitForCodexProbe(session, timeoutMs = 1800) {
   return probe;
 }
 
-async function connectTarget(target, port) {
-  return new CdpSession(target, port).open();
+async function connectTarget(target, port, commandGuard = null) {
+  return new CdpSession(target, port, commandGuard).open();
 }
 
-async function connectCodexTargets(port, timeoutMs) {
+async function connectCodexTargets(port, timeoutMs, expectedBrowserId) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
     try {
-      const targets = await listAppTargets(port);
+      const targets = await listAppTargets(port, expectedBrowserId);
       const connected = [];
       for (const target of targets) {
         let session;
@@ -265,6 +352,7 @@ async function connectCodexTargets(port, timeoutMs) {
       if (connected.length) return connected;
       lastError = new Error("No page matched the expected Codex shell markers");
     } catch (error) {
+      if (error instanceof CdpIdentityMismatchError) throw error;
       lastError = error;
     }
     await new Promise((resolve) => setTimeout(resolve, 350));
@@ -633,7 +721,7 @@ async function capture(session, outputPath) {
 }
 
 async function runOneShot(options) {
-  const connected = await connectCodexTargets(options.port, options.timeoutMs);
+  const connected = await connectCodexTargets(options.port, options.timeoutMs, options.browserId);
   const loaded = (options.mode === "once" || options.reload) ? await loadPayload(options.themeDir) : null;
   const payload = loaded?.payload ?? null;
   const results = [];
@@ -732,6 +820,8 @@ function watchPayloadSources(themeDir, onDirty) {
 
 async function runWatch(options) {
   let current = await loadPayload(options.themeDir);
+  const identityAnchor = await connectBrowserIdentityAnchor(options.port, options.browserId);
+  const assertIdentityAnchorOpen = () => identityAnchor.assertOpen();
   const sessions = new Map();
   const rejected = new Set();
   let stopping = false;
@@ -739,9 +829,21 @@ async function runWatch(options) {
   let reloadChain = Promise.resolve();
   let discoveryDelayMs = 100;
   let lastListErrorAt = 0;
+  let terminalError = null;
   const stop = () => { stopping = true; };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+
+  const recordAsyncFailure = (error, label) => {
+    if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) {
+      terminalError ??= error instanceof CdpIdentityMismatchError
+        ? error
+        : new CdpIdentityMismatchError("Original CDP browser identity closed");
+      stopping = true;
+      return;
+    }
+    console.error(`[dream-skin] ${label}: ${error.message}`);
+  };
 
   const registerEarly = async (session, payload, revision) => {
     const result = await session.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -767,14 +869,19 @@ async function runWatch(options) {
       try {
         const nextIdentifier = await registerEarly(session, current.payload, current.revision);
         if (record.earlyScriptId) {
-          await session.send("Page.removeScriptToEvaluateOnNewDocument", {
-            identifier: record.earlyScriptId,
-          }).catch(() => {});
+          try {
+            await session.send("Page.removeScriptToEvaluateOnNewDocument", {
+              identifier: record.earlyScriptId,
+            });
+          } catch (error) {
+            if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) throw error;
+          }
         }
         record.earlyScriptId = nextIdentifier;
         record.needsLoadFallback = !nextIdentifier;
         await applyToSession(session, current.payload);
       } catch (error) {
+        if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) throw error;
         record.needsLoadFallback = true;
         console.error(`[dream-skin] theme refresh failed: ${error.message}`);
       }
@@ -788,7 +895,7 @@ async function runWatch(options) {
     reloadTimer = setTimeout(() => {
       reloadTimer = null;
       reloadChain = reloadChain.then(refreshPayload).catch((error) => {
-        console.error(`[dream-skin] theme reload failed: ${error.message}`);
+        recordAsyncFailure(error, "theme reload failed");
       });
     }, 45);
   };
@@ -796,11 +903,14 @@ async function runWatch(options) {
 
   try {
     while (!stopping) {
+      assertIdentityAnchorOpen();
       let targets = [];
       try {
-        targets = await listAppTargets(options.port);
+        targets = await listAppTargets(options.port, options.browserId);
+        assertIdentityAnchorOpen();
         discoveryDelayMs = 100;
       } catch (error) {
+        if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) throw error;
         if (Date.now() - lastListErrorAt >= 2000) {
           console.error(`[dream-skin] ${new Date().toISOString()} ${error.message}`);
           lastListErrorAt = Date.now();
@@ -823,16 +933,19 @@ async function runWatch(options) {
         let session;
         let record;
         try {
-          session = await connectTarget(target, options.port);
+          session = await connectTarget(target, options.port, assertIdentityAnchorOpen);
+          assertIdentityAnchorOpen();
           record = { session, earlyScriptId: null, needsLoadFallback: false };
           try {
             record.earlyScriptId = await registerEarly(session, current.payload, current.revision);
             await session.evaluate(earlyPayloadFor(current.payload, current.revision));
           } catch (error) {
+            if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) throw error;
             record.needsLoadFallback = true;
             console.error(`[dream-skin] early injection unavailable: ${error.message}`);
           }
           const probe = await waitForCodexProbe(session);
+          assertIdentityAnchorOpen();
           if (!probe?.codex) {
             await removeEarly(record);
             session.close();
@@ -844,10 +957,12 @@ async function runWatch(options) {
           }
           rejected.delete(target.id);
           session.on("Page.loadEventFired", () => {
-            if (!record.needsLoadFallback) return;
-            setTimeout(() => applyToSession(session, current.payload).catch((error) => {
-              console.error(`[dream-skin] fallback reinject failed: ${error.message}`);
-            }), 0);
+            if (!record.needsLoadFallback || stopping) return;
+            setTimeout(() => {
+              if (stopping) return;
+              applyToSession(session, current.payload)
+                .catch((error) => recordAsyncFailure(error, "fallback reinject failed"));
+            }, 0);
           });
           const earlyApplied = await session.evaluate(
             `window.__CODEX_DREAM_SKIN_EARLY_APPLIED__ === ${JSON.stringify(current.revision)}`,
@@ -863,18 +978,28 @@ async function runWatch(options) {
         } catch (error) {
           if (record) await removeEarly(record);
           session?.close();
+          if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) {
+            throw error instanceof CdpIdentityMismatchError
+              ? error
+              : new CdpIdentityMismatchError("Original CDP browser identity closed");
+          }
           console.error(`[dream-skin] inject failed for ${target.id}: ${error.message}`);
         }
       }
       const pollDelay = sessions.size ? 800 : (targets.length ? 250 : 100);
       await new Promise((resolve) => setTimeout(resolve, pollDelay));
     }
+    if (terminalError) throw terminalError;
   } finally {
     if (reloadTimer) clearTimeout(reloadTimer);
     closePayloadWatchers();
-    await reloadChain.catch(() => {});
-    await Promise.all([...sessions.values()].map((record) => removeEarly(record)));
-    for (const record of sessions.values()) record.session.close();
+    try {
+      await reloadChain.catch(() => {});
+      await Promise.all([...sessions.values()].map((record) => removeEarly(record)));
+    } finally {
+      for (const record of sessions.values()) record.session.close();
+      identityAnchor.close();
+    }
   }
 }
 

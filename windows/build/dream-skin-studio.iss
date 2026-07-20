@@ -25,6 +25,9 @@ AppId=com.feiaway.codex-dream-skin-studio
 #endif
 AppName=Codex Dream Skin Studio
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}.0
+VersionInfoProductVersion={#AppVersion}.0
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=Codex Dream Skin Studio contributors
 DefaultDirName={localappdata}\Programs\CodexDreamSkinStudio\versions\{#AppVersion}
 DefaultGroupName=Codex Dream Skin Studio

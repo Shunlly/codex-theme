@@ -73,6 +73,43 @@ try {
     throw 'Install did not preserve an exact pre-change config backup.'
   }
 
+  $markerFailureConfig = Join-Path $temporaryRoot 'marker-failure.toml'
+  $markerFailureBackup = Join-Path $temporaryRoot 'marker-failure.before.toml'
+  $markerFailureOriginal = "model = `"gpt-5`"`r`nproject = `"$projectName`"`r`n"
+  [IO.File]::WriteAllText($markerFailureConfig, $markerFailureOriginal, $utf8NoBom)
+  $markerFailureOriginalBytes = [IO.File]::ReadAllBytes($markerFailureConfig)
+  $markerWriter = ${function:Write-DreamSkinAppearanceMarker}
+  try {
+    Set-Item Function:\Write-DreamSkinAppearanceMarker -Value { throw 'injected marker publication failure' }
+    $markerFailureRejected = $false
+    try {
+      Install-DreamSkinBaseTheme -ConfigPath $markerFailureConfig -BackupPath $markerFailureBackup
+    } catch {
+      $markerFailureRejected = $_.Exception.Message -match 'injected marker publication failure'
+    }
+  } finally {
+    Set-Item Function:\Write-DreamSkinAppearanceMarker -Value $markerWriter
+  }
+  if (-not $markerFailureRejected) { throw 'Marker publication failure was not surfaced.' }
+  if (-not (Test-DreamSkinBytesEqual -Left $markerFailureOriginalBytes `
+    -Right ([IO.File]::ReadAllBytes($markerFailureBackup)))) {
+    throw 'Marker publication failure deleted or changed the only recovery backup.'
+  }
+  $markerFailureInstalled = Read-DreamSkinUtf8File -Path $markerFailureConfig
+  if (-not $markerFailureInstalled.Contains($projectName) -or
+    $markerFailureInstalled -notmatch 'appearanceLightCodeThemeId = "codex"') {
+    throw 'Marker publication failure left invalid or unrelated config bytes.'
+  }
+  if (Test-Path -LiteralPath (Get-DreamSkinAppearanceMarkerPath -BackupPath $markerFailureBackup)) {
+    throw 'Failed marker publication unexpectedly created its marker.'
+  }
+  Install-DreamSkinBaseTheme -ConfigPath $markerFailureConfig -BackupPath $markerFailureBackup
+  if (-not (Test-DreamSkinBytesEqual -Left $markerFailureOriginalBytes `
+    -Right ([IO.File]::ReadAllBytes($markerFailureBackup))) -or
+    -not (Test-Path -LiteralPath (Get-DreamSkinAppearanceMarkerPath -BackupPath $markerFailureBackup))) {
+    throw 'Retry after marker publication failure replaced recovery bytes or omitted the marker.'
+  }
+
   $written = [System.IO.File]::ReadAllBytes($configPath)
   if ($written.Length -ge 3 -and $written[0] -eq 0xEF -and $written[1] -eq 0xBB -and $written[2] -eq 0xBF) {
     throw 'Config writer added an unexpected UTF-8 BOM.'
@@ -184,16 +221,62 @@ try {
     throw 'Exact config recovery did not preserve the replaced current config.'
   }
   $archivePath = Join-Path $temporaryRoot 'config.restored.toml'
-  Archive-DreamSkinConfigBackup -BackupPath $backupPath -ArchivePath $archivePath
-  if ((Test-Path -LiteralPath $backupPath) -or -not (Test-Path -LiteralPath $archivePath)) {
-    throw 'Completed config backup was not archived for a safe future reinstall.'
+  $backupMarkerPath = Get-DreamSkinAppearanceMarkerPath -BackupPath $backupPath
+  $archiveMarkerPath = Get-DreamSkinAppearanceMarkerPath -BackupPath $archivePath
+  $expectedArchiveBytes = [IO.File]::ReadAllBytes($backupPath)
+  $expectedArchiveMarkerBytes = [IO.File]::ReadAllBytes($backupMarkerPath)
+  [IO.File]::WriteAllText($archivePath, 'older completed backup', $utf8NoBom)
+  [IO.File]::WriteAllText($archiveMarkerPath, 'older completed marker', $utf8NoBom)
+  Publish-DreamSkinConfigBackupArchive -BackupPath $backupPath -ArchivePath $archivePath
+  if (-not (Test-Path -LiteralPath $backupPath) -or -not (Test-Path -LiteralPath $backupMarkerPath) -or
+    -not (Test-Path -LiteralPath $archivePath) -or -not (Test-Path -LiteralPath $archiveMarkerPath) -or
+    -not (Test-DreamSkinBytesEqual -Left $expectedArchiveBytes -Right ([IO.File]::ReadAllBytes($backupPath))) -or
+    -not (Test-DreamSkinBytesEqual -Left $expectedArchiveMarkerBytes -Right ([IO.File]::ReadAllBytes($backupMarkerPath))) -or
+    -not (Test-DreamSkinBytesEqual -Left $expectedArchiveBytes -Right ([IO.File]::ReadAllBytes($archivePath))) -or
+    -not (Test-DreamSkinBytesEqual -Left $expectedArchiveMarkerBytes -Right ([IO.File]::ReadAllBytes($archiveMarkerPath)))) {
+    throw 'Completion publication did not preserve the live backup while replacing the fixed archive exactly.'
   }
+
+  $invalidationRoot = Join-Path $temporaryRoot 'generation invalidation failure'
+  New-Item -ItemType Directory -Path $invalidationRoot | Out-Null
+  $invalidationConfig = Join-Path $invalidationRoot 'config.toml'
+  $invalidationBackup = Join-Path $invalidationRoot 'config.before-dream-skin.toml'
+  $invalidationArchive = Join-Path $invalidationRoot 'config.restored.toml'
+  $invalidationBaseline = "model = `"gpt-5`"`r`nproject = `"$projectName`"`r`n"
+  [IO.File]::WriteAllText($invalidationConfig, $invalidationBaseline, $utf8NoBom)
+  $invalidationBaselineBytes = [IO.File]::ReadAllBytes($invalidationConfig)
+  New-Item -ItemType Directory -Path $invalidationArchive | Out-Null
+  $invalidationRejected = $false
+  try {
+    Install-DreamSkinBaseTheme -ConfigPath $invalidationConfig -BackupPath $invalidationBackup
+  } catch {
+    $invalidationRejected = $_.Exception.Message -match 'completion evidence is not a safe file'
+  }
+  if (-not $invalidationRejected -or
+    -not (Test-DreamSkinBytesEqual -Left $invalidationBaselineBytes -Right ([IO.File]::ReadAllBytes($invalidationConfig))) -or
+    -not (Test-DreamSkinBytesEqual -Left $invalidationBaselineBytes -Right ([IO.File]::ReadAllBytes($invalidationBackup))) -or
+    -not (Test-Path -LiteralPath $invalidationArchive -PathType Container)) {
+    throw 'Failed completion-proof invalidation did not retain the fresh backup and unchanged config.'
+  }
+  Remove-Item -LiteralPath $invalidationArchive -Recurse -Force
+  Install-DreamSkinBaseTheme -ConfigPath $invalidationConfig -BackupPath $invalidationBackup
+  if ((Test-Path -LiteralPath $invalidationArchive) -or
+    -not (Test-DreamSkinBytesEqual -Left $invalidationBaselineBytes -Right ([IO.File]::ReadAllBytes($invalidationBackup))) -or
+    -not (Test-Path -LiteralPath (Get-DreamSkinAppearanceMarkerPath -BackupPath $invalidationBackup))) {
+    throw 'Retry after completion-proof invalidation failure did not commit the fresh generation safely.'
+  }
+
+  Remove-Item -LiteralPath $backupMarkerPath -Force
+  Remove-Item -LiteralPath $backupPath -Force
   $secondBaseline = "[desktop]`r`nappearanceTheme = `"dark`"`r`n"
   [System.IO.File]::WriteAllText($configPath, $secondBaseline, $utf8NoBom)
   $secondBaselineBytes = [System.IO.File]::ReadAllBytes($configPath)
   Install-DreamSkinBaseTheme -ConfigPath $configPath -BackupPath $backupPath
   if (-not (Test-DreamSkinBytesEqual -Left $secondBaselineBytes -Right ([System.IO.File]::ReadAllBytes($backupPath)))) {
     throw 'Reinstall did not capture a fresh config baseline after completed restore.'
+  }
+  if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $archiveMarkerPath)) {
+    throw 'Reinstall did not invalidate the prior generation completion evidence before config commit.'
   }
 
   $invalidPath = Join-Path $temporaryRoot 'invalid.toml'

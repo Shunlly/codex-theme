@@ -76,6 +76,16 @@ fi
 [ -f "$CONFIG_PATH" ] || fail "Codex config not found: $CONFIG_PATH. Launch Codex once, close it, and rerun the installer."
 "$NODE" "$INJECTOR" --check-payload --theme-dir "$THEME_DIR" >/dev/null
 "$NODE" "$SCRIPT_DIR/theme-config.mjs" install "$CONFIG_PATH" "$THEME_BACKUP_PATH"
+[ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ] \
+  || fail "The live theme recovery backup is not a safe regular file."
+if [ -e "$RESTORED_THEME_BACKUP_PATH" ] || [ -L "$RESTORED_THEME_BACKUP_PATH" ]; then
+  [ -f "$RESTORED_THEME_BACKUP_PATH" ] && [ ! -L "$RESTORED_THEME_BACKUP_PATH" ] \
+    || fail "The completed-restore proof path is unsafe; the new live backup was preserved."
+  /bin/rm -f "$RESTORED_THEME_BACKUP_PATH" \
+    || fail "Could not invalidate the previous completed-restore proof; the new live backup was preserved."
+  [ ! -e "$RESTORED_THEME_BACKUP_PATH" ] && [ ! -L "$RESTORED_THEME_BACKUP_PATH" ] \
+    || fail "The previous completed-restore proof still exists; the new live backup was preserved."
+fi
 
 shell_quote() {
   "$NODE" -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"

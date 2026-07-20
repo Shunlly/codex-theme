@@ -9,6 +9,20 @@ using Drawing = System.Drawing;
 
 namespace CodexDreamSkinStudio;
 
+internal sealed class HandoffReservation
+{
+  internal bool IsActive { get; private set; }
+
+  internal bool TryBegin(bool busy, bool confirming)
+  {
+    if (IsActive || busy || confirming) return false;
+    IsActive = true;
+    return true;
+  }
+
+  internal void Cancel() => IsActive = false;
+}
+
 public partial class MainWindow : Window
 {
   private readonly EngineClient _client = new();
@@ -20,6 +34,7 @@ public partial class MainWindow : Window
   private bool _preflightStarted;
   private bool _explicitExit;
   private bool _resourcesDisposed;
+  private readonly HandoffReservation _handoff = new();
 
   public MainWindow(bool prepareUninstall = false)
   {
@@ -73,16 +88,60 @@ public partial class MainWindow : Window
 
   private bool CanRun(EngineOperation operation)
   {
-    if (_busy || _confirming || _envelope is null) return operation == EngineOperation.Preflight && !_busy && !_confirming;
+    if (!AllowsDispatch(_busy, _confirming, _handoff.IsActive)) return false;
+    if (_envelope is null) return operation == EngineOperation.Preflight;
     var action = operation.ToArgument();
     return _envelope.State.AvailableActions.Contains(action) ||
       operation == EngineOperation.Restore && _envelope.Error?.RecoveryActions.Contains("restore") == true;
   }
 
-  internal static bool AllowsTermination(bool busy) => !busy;
+  internal static bool AllowsDispatch(bool busy, bool confirming, bool handoffReserved) =>
+    !busy && !confirming && !handoffReserved;
+  internal static bool AllowsTermination(bool busy, bool handoffReserved = false) => !busy && !handoffReserved;
+  internal static bool AllowsRefresh(bool busy, bool confirming, bool handoffReserved = false) =>
+    AllowsDispatch(busy, confirming, handoffReserved);
+  internal bool CanReleaseForHandoff => AllowsDispatch(_busy, _confirming, _handoff.IsActive);
+
+  internal void ActivateFromSecondInstance() => ShowWindow();
+
+  internal bool TryReserveHandoff()
+  {
+    if (!_handoff.TryBegin(_busy, _confirming)) return false;
+    UpdateView();
+    return true;
+  }
+
+  internal void CancelHandoffReservation()
+  {
+    _handoff.Cancel();
+    UpdateView();
+  }
+
+  internal async Task<int> PrepareUninstallFromOwnerAsync(CancellationToken cancellationToken)
+  {
+    if (!CanReleaseForHandoff || cancellationToken.IsCancellationRequested) return 1;
+    ShowWindow();
+    if (!ConfirmPrepareUninstall()) return 1;
+    if (cancellationToken.IsCancellationRequested) return 1;
+    if (!await DispatchAsync(EngineOperation.Uninstall, bypassAvailability: true) ||
+      cancellationToken.IsCancellationRequested) return 1;
+    return TryReserveHandoff() ? 0 : 1;
+  }
+
+  internal void ReleaseForHandoff()
+  {
+    if (_handoff.IsActive) FinishPrepareUninstall(0);
+  }
+
+  private async Task<bool> RefreshStatusAsync()
+  {
+    if (!AllowsRefresh(_busy, _confirming, _handoff.IsActive)) return false;
+    return await DispatchAsync(EngineOperation.Status, bypassAvailability: true);
+  }
 
   private async Task<bool> DispatchAsync(EngineOperation operation, bool deleteUserThemes = false, bool bypassAvailability = false)
   {
+    if (!AllowsDispatch(_busy, _confirming, _handoff.IsActive)) return false;
     if (!bypassAvailability && !CanRun(operation)) return false;
     var restartAuthorized = false;
     var forceAuthorized = false;
@@ -203,9 +262,11 @@ public partial class MainWindow : Window
     };
     PrimaryButton.IsEnabled = CanRun(PrimaryOperation());
     PauseButton.IsEnabled = CanRun(EngineOperation.Pause);
+    VerifyButton.IsEnabled = CanRun(EngineOperation.Verify);
     RestoreButton.IsEnabled = CanRun(EngineOperation.Restore);
     UninstallButton.IsEnabled = CanRun(EngineOperation.Uninstall);
-    DiagnosticsButton.IsEnabled = !_busy && !_confirming;
+    DiagnosticsButton.IsEnabled = AllowsDispatch(_busy, _confirming, _handoff.IsActive);
+    RefreshButton.IsEnabled = AllowsRefresh(_busy, _confirming, _handoff.IsActive);
 
     var highContrast = SystemParameters.HighContrast;
     VerificationLine.Background = highContrast ? System.Windows.SystemColors.HighlightBrush : state?.Verified switch
@@ -232,7 +293,7 @@ public partial class MainWindow : Window
     primary.Enabled = CanRun(PrimaryOperation());
     _tray.ContextMenuStrip.Items["pause"]!.Enabled = CanRun(EngineOperation.Pause);
     _tray.ContextMenuStrip.Items["restore"]!.Enabled = CanRun(EngineOperation.Restore);
-    _tray.ContextMenuStrip.Items["exit"]!.Enabled = AllowsTermination(_busy);
+    _tray.ContextMenuStrip.Items["exit"]!.Enabled = AllowsTermination(_busy, _handoff.IsActive);
   }
 
   private static string StateText(EngineState state)
@@ -295,7 +356,7 @@ public partial class MainWindow : Window
 
   private Task ExitApplicationAsync()
   {
-    if (!AllowsTermination(_busy)) return Task.CompletedTask;
+    if (!AllowsTermination(_busy, _handoff.IsActive)) return Task.CompletedTask;
     _explicitExit = true;
     DisposeResources();
     System.Windows.Application.Current.Shutdown(_prepareUninstall ? 1 : 0);
@@ -319,7 +380,7 @@ public partial class MainWindow : Window
 
   protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
   {
-    if (!_explicitExit && !AllowsTermination(_busy))
+    if (!_explicitExit && !AllowsTermination(_busy, _handoff.IsActive))
     {
       e.Cancel = true;
     }
@@ -340,7 +401,9 @@ public partial class MainWindow : Window
 
   private async void PrimaryButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(PrimaryOperation());
   private async void PauseButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(EngineOperation.Pause);
+  private async void VerifyButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(EngineOperation.Verify);
   private async void RestoreButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(EngineOperation.Restore);
+  private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await RefreshStatusAsync();
 
   private void DiagnosticsButton_Click(object sender, RoutedEventArgs e)
   {
@@ -358,8 +421,22 @@ public partial class MainWindow : Window
 
   private async void UninstallButton_Click(object sender, RoutedEventArgs e)
   {
-    var dialog = new UninstallDialog { Owner = this };
-    if (dialog.ShowDialog() == true) await DispatchAsync(EngineOperation.Uninstall, dialog.DeleteUserThemes);
+    var confirmed = false;
+    var deleteUserThemes = false;
+    _confirming = true;
+    UpdateView();
+    try
+    {
+      var dialog = new UninstallDialog { Owner = this };
+      confirmed = dialog.ShowDialog() == true;
+      deleteUserThemes = dialog.DeleteUserThemes;
+    }
+    finally
+    {
+      _confirming = false;
+      UpdateView();
+    }
+    if (confirmed) await DispatchAsync(EngineOperation.Uninstall, deleteUserThemes);
   }
 
   private void ShowSafeOperationFailure()

@@ -145,12 +145,37 @@ fi
 
 status_error="$(json_field error.code 2>/dev/null || true)"
 status_install="$(json_field state.install 2>/dev/null || true)"
+live_recovery_backup_is_safe() {
+  [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
+    && [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]
+}
+status_has_action() {
+  local expected="$1"
+  local count=""
+  local index=0
+  count="$(json_field state.availableActions 2>/dev/null)" || return 1
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  while [ "$index" -lt "$count" ]; do
+    [ "$(json_field "state.availableActions.$index" 2>/dev/null || true)" != "$expected" ] || return 0
+    index=$((index + 1))
+  done
+  return 1
+}
+recovery_artifact_is_available() {
+  live_recovery_backup_is_safe \
+    || { status_has_action uninstall && restored_theme_backup_is_valid; }
+}
 if [ "$status_exit" -ne 0 ] && [ -n "$status_error" ]; then
-  if [ "$OPERATION" != "install" ] || [ "$status_error" != "STATE_UNSAFE" ] \
-    || [ "$status_install" != "not-installed" ]; then
-    printf '%s\n' "$STATUS_JSON"
-    exit 1
-  fi
+  case "$OPERATION:$status_error:$status_install" in
+    install:STATE_UNSAFE:not-installed) ;;
+    restore:STATE_UNSAFE:*|restore:CODEX_NOT_INSTALLED:*)
+      recovery_artifact_is_available || { printf '%s\n' "$STATUS_JSON"; exit 1; }
+      ;;
+    uninstall:STATE_UNSAFE:*|uninstall:CODEX_NOT_INSTALLED:*)
+      recovery_artifact_is_available || { printf '%s\n' "$STATUS_JSON"; exit 1; }
+      ;;
+    *) printf '%s\n' "$STATUS_JSON"; exit 1 ;;
+  esac
 fi
 
 codex_state="$(json_field state.codex)"
@@ -171,9 +196,16 @@ case "$OPERATION" in
   install) progress="installing"; command_root="$PROJECT_ROOT"; args=(--no-launchers --no-launch) ;;
   apply|resume) progress="applying"; command_root="$INSTALL_ROOT"; args=(--studio-strict-verify) ;;
   pause) progress="pausing"; command_root="$INSTALL_ROOT"; args=() ;;
-  restore) progress="restoring"; command_root="$status_root"; args=(--restore-base-theme --restart-codex) ;;
+  restore)
+    progress="restoring"; command_root="$status_root"; args=(--restore-base-theme)
+    [ "$codex_state" = "not-installed" ] || args+=(--restart-codex)
+    ;;
   verify) progress="verifying"; command_root="$INSTALL_ROOT"; args=(--reload) ;;
-  uninstall) progress="uninstalling"; command_root="$status_root"; args=(--restore-base-theme --restart-codex --uninstall) ;;
+  uninstall)
+    progress="uninstalling"; command_root="$status_root"; args=(--restore-base-theme)
+    [ "$codex_state" = "not-installed" ] || args+=(--restart-codex)
+    args+=(--uninstall)
+    ;;
 esac
 
 if [ "$RESTART_AUTHORIZED" = "true" ]; then
@@ -242,7 +274,13 @@ if [ "$OPERATION" = "uninstall" ]; then
   STATUS_JSON="$("$command_root/scripts/status-dream-skin-macos.sh" --studio-json --deep --operation uninstall 2>>"$OPERATION_LOG")"
   status_exit="$?"
   set -e
-  [ "$status_exit" -eq 0 ] && [ "$(json_field state.session)" = "official" ] \
+  restored_without_codex="false"
+  if [ "$status_exit" -ne 0 ] \
+    && [ "$(json_field error.code 2>/dev/null || true)" = "CODEX_NOT_INSTALLED" ]; then
+    restored_without_codex="true"
+  fi
+  { [ "$status_exit" -eq 0 ] || [ "$restored_without_codex" = "true" ]; } \
+    && [ "$(json_field state.session)" = "official" ] \
     || emit_error OPERATION_FAILED "The Studio restore could not be verified." '["retry","restore","diagnostics","cancel"]'
 
   set +e
@@ -272,6 +310,14 @@ status_exit="$?"
 set -e
 if [ "$status_exit" -ne 0 ]; then
   status_error="$(json_field error.code 2>/dev/null || true)"
+  if [ "$status_error" = "CODEX_NOT_INSTALLED" ] \
+    && [ "$(json_field state.session)" = "official" ] \
+    && { [ "$OPERATION" = "restore" ] || [ "$OPERATION" = "uninstall" ]; }; then
+    state_json="$(printf '%s' "$STATUS_JSON" | /usr/bin/plutil -extract state json -o - -)"
+    printf '{"schemaVersion":1,"ok":true,"operation":"%s","state":%s,"error":null}\n' \
+      "$OPERATION" "$state_json"
+    exit 0
+  fi
   [ -z "$status_error" ] || { printf '%s\n' "$STATUS_JSON"; exit 1; }
   emit_error INTERNAL_ERROR "Studio status could not be read safely." '["retry","diagnostics","cancel"]'
 fi

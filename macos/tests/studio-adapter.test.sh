@@ -29,6 +29,7 @@ ADAPTER_LOCK_OWNER_PID=""
 LOCK_RACE_A_PID=""
 LOCK_RACE_B_PID=""
 LOCK_GATE_HOLDER_PID=""
+RECOVERY_WATCHER_PID=""
 cleanup() {
   [ -z "$RESPONDER_PID" ] || /bin/kill -TERM "$RESPONDER_PID" 2>/dev/null || true
   [ -z "$RESPONDER_PID" ] || wait "$RESPONDER_PID" 2>/dev/null || true
@@ -42,6 +43,8 @@ cleanup() {
   [ -z "$LOCK_RACE_B_PID" ] || wait "$LOCK_RACE_B_PID" 2>/dev/null || true
   [ -z "$LOCK_GATE_HOLDER_PID" ] || /bin/kill -TERM "$LOCK_GATE_HOLDER_PID" 2>/dev/null || true
   [ -z "$LOCK_GATE_HOLDER_PID" ] || wait "$LOCK_GATE_HOLDER_PID" 2>/dev/null || true
+  [ -z "$RECOVERY_WATCHER_PID" ] || /bin/kill -TERM "$RECOVERY_WATCHER_PID" 2>/dev/null || true
+  [ -z "$RECOVERY_WATCHER_PID" ] || wait "$RECOVERY_WATCHER_PID" 2>/dev/null || true
   /bin/rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -81,7 +84,7 @@ STUB
 run_watcher_fixture() (
   source "$WATCHER_FIXTURE/common-macos.sh"
   NODE=/usr/bin/false
-  launch_injector_daemon 9341
+  launch_injector_daemon 9341 Browser-A
 )
 
 : > "$WATCHER_MARKER"
@@ -92,12 +95,14 @@ WATCHER_EXIT="$?"
 set -e
 [ "$WATCHER_EXIT" -ne 0 ] || { printf 'Studio watcher failure fell back to launchctl submit.\n' >&2; exit 1; }
 /usr/bin/grep -q '^nohup ' "$WATCHER_MARKER"
+/usr/bin/grep -q -- '--port 9341 --browser-id Browser-A --theme-dir ' "$WATCHER_MARKER"
 ! /usr/bin/grep -q '^launchctl submit ' "$WATCHER_MARKER"
 
 : > "$WATCHER_MARKER"
 WATCHER_PID="$(HOME="$WATCHER_HOME" run_watcher_fixture)"
 [ "$WATCHER_PID" = "4242" ] || { printf 'Legacy watcher fallback did not return its launchctl PID.\n' >&2; exit 1; }
 /usr/bin/grep -q '^launchctl submit ' "$WATCHER_MARKER"
+/usr/bin/grep -q -- '--port 9341 --browser-id Browser-A --theme-dir ' "$WATCHER_MARKER"
 
 # One per-user lifecycle owner must serialize direct callers, allow only its
 # verified descendants to reuse the lock, and project contention read-only.
@@ -589,8 +594,8 @@ LEGACY_STATE="$LEGACY_HOME/Library/Application Support/CodexDreamSkinStudio"
 /usr/bin/printf '{"port":%s}\n' "$PORT" > "$LEGACY_STATE/state.json"
 LEGACY_JSON="$(/usr/bin/env HOME="$LEGACY_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json --deep)"
 LEGACY_TEXT="$(/usr/bin/env HOME="$LEGACY_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --deep)"
-"$NODE" -e 'if (JSON.parse(process.argv[1]).cdpOk !== true) process.exit(1)' "$LEGACY_JSON"
-printf '%s\n' "$LEGACY_TEXT" | /usr/bin/grep -Fx 'cdp=true' >/dev/null
+"$NODE" -e 'if (JSON.parse(process.argv[1]).cdpOk !== false) process.exit(1)' "$LEGACY_JSON"
+printf '%s\n' "$LEGACY_TEXT" | /usr/bin/grep -Fx 'cdp=false' >/dev/null
 
 TEST_HOME="$TMP/success-home"
 INSTALL_ROOT="$TEST_HOME/.codex/codex-dream-skin-studio"
@@ -598,9 +603,13 @@ STATE_ROOT="$TEST_HOME/Library/Application Support/CodexDreamSkinStudio"
 /bin/mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/scripts" "$STATE_ROOT/theme"
 /bin/cp "$ROOT/VERSION" "$INSTALL_ROOT/VERSION"
 /bin/cp "$ROOT/bin/dream-skin-config-restore" "$INSTALL_ROOT/bin/"
-for script in studio-adapter-macos.sh start-dream-skin-macos.sh restore-dream-skin-macos.sh; do
+for script in studio-adapter-macos.sh start-dream-skin-macos.sh pause-dream-skin-macos.sh \
+  restore-dream-skin-macos.sh verify-dream-skin-macos.sh; do
   : > "$INSTALL_ROOT/scripts/$script"
   /bin/chmod 755 "$INSTALL_ROOT/scripts/$script"
+done
+for script in common-macos.sh injector.mjs theme-config.mjs; do
+  : > "$INSTALL_ROOT/scripts/$script"
 done
 : > "$TEST_HOME/.codex/config.toml"
 : > "$STATE_ROOT/theme-backup.json"
@@ -622,7 +631,145 @@ run_adapter status
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
   if (value.state.session !== "stale" || value.error?.code !== "STATE_UNSAFE") process.exit(1);
+  if (value.state.availableActions.join(",") !== "restore,uninstall") process.exit(1);
 ' "$ADAPTER_JSON"
+
+/usr/bin/printf '{}\n' > "$STATE_ROOT/state.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 1 ] || { printf 'damaged state did not fail safely.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.session !== "stale" || value.error?.code !== "STATE_UNSAFE") process.exit(1);
+  if (value.state.availableActions.join(",") !== "restore,uninstall") process.exit(1);
+' "$ADAPTER_JSON"
+/usr/bin/printf '{"port":%s,"session":"paused","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
+
+/usr/bin/printf '%s\n' '{"name":"测试主题"}' > "$STATE_ROOT/theme/theme.json"
+run_adapter status
+"$NODE" -e 'if (JSON.parse(process.argv[1]).state.themeName !== "测试主题") process.exit(1)' "$ADAPTER_JSON"
+/usr/bin/printf '%s\n' '{"id":"id-only-theme","image":"theme.jpg"}' > "$STATE_ROOT/theme/theme.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'id-only theme status did not return an envelope.\n' >&2; exit 1; }
+assert_json_line "$ADAPTER_JSON"
+"$NODE" -e 'if (JSON.parse(process.argv[1]).state.themeName !== "id-only-theme") process.exit(1)' "$ADAPTER_JSON"
+/usr/bin/printf '{malformed\n' > "$STATE_ROOT/theme/theme.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'malformed theme status did not return an envelope.\n' >&2; exit 1; }
+assert_json_line "$ADAPTER_JSON"
+"$NODE" -e 'if (JSON.parse(process.argv[1]).state.themeName !== null) process.exit(1)' "$ADAPTER_JSON"
+for unsafe_theme_name in '/Users/alice/private/theme' 'C:\\Users\\Alice\\private\\theme' 'line\u000asecret'; do
+  /usr/bin/printf '{"name":"%s"}\n' "$unsafe_theme_name" > "$STATE_ROOT/theme/theme.json"
+  run_adapter status
+  assert_json_line "$ADAPTER_JSON"
+  "$NODE" -e '
+    const value = JSON.parse(process.argv[1]);
+    if (value.state.themeName !== null || JSON.stringify(value).includes("alice/private")) process.exit(1);
+  ' "$ADAPTER_JSON"
+done
+/usr/bin/printf '%s\n' '{"name":"Fixture"}' > "$STATE_ROOT/theme/theme.json"
+
+/bin/rm -f "$STATE_ROOT/state.json" "$STATE_ROOT/theme-backup.json" \
+  "$STATE_ROOT/theme-backup.restored.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 1 ] || { printf 'missing restore proof did not fail closed.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.session !== "stale" || value.error?.code !== "STATE_UNSAFE") process.exit(1);
+  if (value.state.availableActions.includes("uninstall")) process.exit(1);
+' "$ADAPTER_JSON"
+
+/usr/bin/printf 'not valid completion proof\n' > "$STATE_ROOT/theme-backup.restored.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 1 ] || { printf 'invalid restore proof did not fail closed.\n' >&2; exit 1; }
+
+"$NODE" -e '
+  const fs = require("node:fs");
+  fs.writeFileSync(process.argv[1], `${JSON.stringify({
+    schemaVersion: 1,
+    platform: "darwin",
+    configPath: process.argv[2],
+    values: {
+      appearanceTheme: null,
+      appearanceDarkCodeThemeId: null,
+    },
+  })}\n`);
+' "$STATE_ROOT/theme-backup.restored.json" "$TEST_HOME/.codex/config.toml"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'valid restored installed-engine status failed.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.install !== "not-installed") process.exit(1);
+  if (value.state.availableActions.join(",") !== "install,uninstall") process.exit(1);
+' "$ADAPTER_JSON"
+/bin/rm -f "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'restored partial-engine status failed.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.availableActions.join(",") !== "install,uninstall") process.exit(1);
+' "$ADAPTER_JSON"
+: > "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh"
+/bin/chmod 755 "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh"
+
+# A fresh install generation must invalidate an older completed-restore proof
+# only after its new live backup has been established successfully.
+PROOF_FIXTURE="$TMP/reinstall-proof"
+PROOF_HOME="$PROOF_FIXTURE/home"
+PROOF_ROOT="$PROOF_FIXTURE/engine"
+PROOF_STATE="$PROOF_HOME/Library/Application Support/CodexDreamSkinStudio"
+PROOF_CONFIG="$PROOF_HOME/.codex/config.toml"
+/bin/mkdir -p "$PROOF_ROOT/scripts" "$PROOF_ROOT/bin" "$PROOF_STATE/theme" "$PROOF_HOME/.codex"
+/bin/cp "$ROOT/VERSION" "$PROOF_ROOT/VERSION"
+/bin/cp "$ROOT/scripts/install-dream-skin-macos.sh" "$ROOT/scripts/theme-config.mjs" \
+  "$PROOF_ROOT/scripts/"
+/usr/bin/sed "s|__ROOT__|$PROOF_ROOT|g; s|__HOME__|$PROOF_HOME|g; s|__NODE__|$NODE|g" \
+  > "$PROOF_ROOT/scripts/common-macos.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="__ROOT__/scripts"
+PROJECT_ROOT="__ROOT__"
+INSTALL_ROOT="__HOME__/.codex/codex-dream-skin-studio"
+STATE_ROOT="__HOME__/Library/Application Support/CodexDreamSkinStudio"
+STATE_PATH="$STATE_ROOT/state.json"
+THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
+RESTORED_THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.restored.json"
+THEME_DIR="$STATE_ROOT/theme"
+CONFIG_PATH="__HOME__/.codex/config.toml"
+INJECTOR="$SCRIPT_DIR/injector.mjs"
+NODE="__NODE__"
+SKIN_VERSION=1.3.0
+CODEX_VERSION=fixture
+NODE_VERSION=v24.0.0
+fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
+require_lifecycle_lock() { return 0; }
+release_lifecycle_lock() { return 0; }
+discover_codex_app() { return 0; }
+require_macos_runtime() { return 0; }
+codex_is_running() { return 1; }
+ensure_state_root() { /bin/mkdir -p "$STATE_ROOT"; }
+seed_bundled_presets() { return 0; }
+STUB
+: > "$PROOF_ROOT/scripts/injector.mjs"
+/bin/chmod 755 "$PROOF_ROOT/scripts/install-dream-skin-macos.sh"
+/usr/bin/printf '[desktop]\nappearanceTheme = "dark"\n' > "$PROOF_CONFIG"
+/usr/bin/printf '{"schemaVersion":1,"image":"theme.jpg"}\n' > "$PROOF_STATE/theme/theme.json"
+"$NODE" -e '
+  const fs = require("node:fs");
+  fs.writeFileSync(process.argv[1], `${JSON.stringify({
+    schemaVersion: 1,
+    platform: "darwin",
+    configPath: process.argv[2],
+    values: { appearanceTheme: null, appearanceDarkCodeThemeId: null },
+  })}\n`);
+' "$PROOF_STATE/theme-backup.restored.json" "$PROOF_CONFIG"
+/usr/bin/env HOME="$PROOF_HOME" "$PROOF_ROOT/scripts/install-dream-skin-macos.sh" \
+  --in-place --no-launchers --no-launch >/dev/null
+[ -f "$PROOF_STATE/theme-backup.json" ] && [ ! -L "$PROOF_STATE/theme-backup.json" ] \
+  || { printf 'fresh install did not establish its live recovery backup.\n' >&2; exit 1; }
+[ ! -e "$PROOF_STATE/theme-backup.restored.json" ] && [ ! -L "$PROOF_STATE/theme-backup.restored.json" ] \
+  || { printf 'fresh install retained an obsolete completed-restore proof.\n' >&2; exit 1; }
+
+/usr/bin/printf 'backup sentinel\n' > "$STATE_ROOT/theme-backup.json"
 /usr/bin/printf '{"port":%s,"session":"paused","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
 
 invalid_index=0
@@ -884,7 +1031,9 @@ RESTORE_REAL_MARKER="$RESTORE_REAL/marker"
 SCRIPT_DIR="__SCRIPTS__"
 STATE_ROOT="__HOME__/state"
 STATE_PATH="$STATE_ROOT/state.json"
+INSTALL_ROOT="__HOME__/installed"
 THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
+RESTORED_THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.restored.json"
 THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="__HOME__/.codex/config.toml"
 INJECTOR="__HOME__/injector.mjs"
@@ -900,6 +1049,7 @@ ensure_state_root() { printf 'ensure\n' >> "__MARKER__"; }
 state_field() { printf '9341\n'; }
 codex_is_running() { return 0; }
 verified_cdp_endpoint() { return 1; }
+verified_cdp_browser_id() { return 1; }
 stop_codex() { printf 'stop:%s\n' "$1" >> "__MARKER__"; }
 stop_recorded_injector() { printf 'injector\n' >> "__MARKER__"; }
 release_codex_launchd_job() { printf 'release\n' >> "__MARKER__"; }
@@ -910,13 +1060,13 @@ launch_codex_normally() {
 acquire_lifecycle_lock() { LIFECYCLE_LOCK_BORROWED="true"; return 0; }
 require_lifecycle_lock() { acquire_lifecycle_lock; }
 release_lifecycle_lock() { return 0; }
+restored_theme_backup_is_valid() { [ -f "$RESTORED_THEME_BACKUP_PATH" ]; }
 STUB
 /usr/bin/sed > "$RESTORE_REAL/scripts/node-stub" <<'STUB'
 #!/bin/bash
 set -euo pipefail
 [ "${2:-}" = "restore" ] || exit 0
 [ -f "${4:-}" ] || { printf 'No selective pre-install theme backup is available.\n' >&2; exit 1; }
-/bin/rm -f "$4"
 STUB
 /bin/chmod 755 "$RESTORE_REAL/scripts/node-stub"
 : > "$RESTORE_REAL_MARKER"
@@ -934,6 +1084,56 @@ set -e
 /usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
   "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized >/dev/null
 /usr/bin/grep -Fx 'stop:false' "$RESTORE_REAL_MARKER" >/dev/null
+[ ! -e "$RESTORE_REAL_HOME/state/state.json" ]
+[ ! -e "$RESTORE_REAL_HOME/state/theme-backup.json" ]
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'backup sentinel' ]
+
+# State cleanup failure must retain the live recovery backup and be retryable.
+/usr/bin/printf 'state sentinel\n' > "$RESTORE_REAL_HOME/state/state.json"
+/usr/bin/printf 'state-fault backup\n' > "$RESTORE_REAL_HOME/state/theme-backup.json"
+/bin/chmod 500 "$RESTORE_REAL_HOME/state"
+set +e
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
+  >/dev/null 2>&1
+RESTORE_STATE_FAULT_EXIT="$?"
+set -e
+/bin/chmod 700 "$RESTORE_REAL_HOME/state"
+[ "$RESTORE_STATE_FAULT_EXIT" -ne 0 ] || { printf 'state unlink fault unexpectedly committed restore.\n' >&2; exit 1; }
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/state.json")" = 'state sentinel' ]
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.json")" = 'state-fault backup' ]
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
+  >/dev/null
+[ ! -e "$RESTORE_REAL_HOME/state/state.json" ]
+[ ! -e "$RESTORE_REAL_HOME/state/theme-backup.json" ]
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'state-fault backup' ]
+
+# Archive publication failure happens after state commit but keeps the live
+# backup usable; retry then atomically replaces the fixed completion archive.
+/usr/bin/printf 'state sentinel\n' > "$RESTORE_REAL_HOME/state/state.json"
+/usr/bin/printf 'archive-fault backup\n' > "$RESTORE_REAL_HOME/state/theme-backup.json"
+/bin/rm -f "$RESTORE_REAL_HOME/state/theme-backup.restored.json"
+/bin/mkdir "$RESTORE_REAL_HOME/state/theme-backup.restored.json"
+set +e
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
+  >/dev/null 2>&1
+RESTORE_ARCHIVE_FAULT_EXIT="$?"
+set -e
+[ "$RESTORE_ARCHIVE_FAULT_EXIT" -ne 0 ] || { printf 'backup archive fault unexpectedly committed restore.\n' >&2; exit 1; }
+[ ! -e "$RESTORE_REAL_HOME/state/state.json" ]
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.json")" = 'archive-fault backup' ]
+/bin/rmdir "$RESTORE_REAL_HOME/state/theme-backup.restored.json"
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
+  >/dev/null
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'archive-fault backup' ]
+RESTORED_ARCHIVE_HASH="$(/usr/bin/shasum -a 256 "$RESTORE_REAL_HOME/state/theme-backup.restored.json")"
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
+  >/dev/null
+[ "$RESTORED_ARCHIVE_HASH" = "$(/usr/bin/shasum -a 256 "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" ]
 
 /usr/bin/printf 'state sentinel\n' > "$RESTORE_REAL_HOME/state/state.json"
 /usr/bin/printf 'backup sentinel\n' > "$RESTORE_REAL_HOME/state/theme-backup.json"
@@ -946,6 +1146,8 @@ RESTORE_LAUNCH_EXIT="$?"
 set -e
 [ "$RESTORE_LAUNCH_EXIT" -eq 0 ] || { printf 'completed restore treated relaunch failure as transactional.\n' >&2; exit 1; }
 [ ! -e "$RESTORE_REAL_HOME/state/state.json" ] || { printf 'completed restore retained stale state after relaunch failure.\n' >&2; exit 1; }
+[ ! -e "$RESTORE_REAL_HOME/state/theme-backup.json" ] || { printf 'completed restore retained its live backup after relaunch failure.\n' >&2; exit 1; }
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'backup sentinel' ]
 
 /usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
   "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --uninstall --restart-authorized \
@@ -970,43 +1172,22 @@ NO_NODE_CANDIDATE="$RECOVERY_FIXTURE/no-candidate"
   -e "s|/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node|$NO_NODE_CANDIDATE|g" \
   -e "s|/Applications/Codex.app/Contents/Resources/cua_node/bin/node|$NO_NODE_CANDIDATE|g" \
   "$ROOT/scripts/studio-adapter-macos.sh" > "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh"
+/bin/cp "$ROOT/scripts/common-macos.sh" "$RECOVERY_BUNDLED/scripts/common-production-macos.sh"
 /usr/bin/sed "s|__ROOT__|$RECOVERY_BUNDLED|g; s|__HOME__|$RECOVERY_HOME|g" \
   > "$RECOVERY_BUNDLED/scripts/common-macos.sh" <<'STUB'
 #!/bin/bash
 set -euo pipefail
-SCRIPT_DIR="__ROOT__/scripts"
-PROJECT_ROOT="__ROOT__"
-INSTALL_ROOT="__HOME__/.codex/codex-dream-skin-studio"
-STATE_ROOT="__HOME__/Library/Application Support/CodexDreamSkinStudio"
-STATE_PATH="$STATE_ROOT/state.json"
-THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
-THEME_DIR="$STATE_ROOT/theme"
-CONFIG_PATH="__HOME__/.codex/config.toml"
-INJECTOR="$SCRIPT_DIR/injector.mjs"
-CODEX_APP_VALIDATED="false"
-CODEX_APP_CONTROL_VALIDATED="false"
-NODE_RUNTIME_VALIDATED="false"
-fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
-try_discover_codex_app() { CODEX_BUNDLE=/fixture/Codex.app; CODEX_EXE=/usr/bin/true; CODEX_VERSION=fixture; return 0; }
-try_validate_codex_app_identity() { return 1; }
-try_validate_codex_app_control_identity() { CODEX_APP_CONTROL_VALIDATED=true; return 0; }
-try_require_macos_node_runtime() { return 1; }
-native_restore_helper_identity() {
-  local root="$1" helper="$2"
-  [ "$helper" = "$root/bin/dream-skin-config-restore" ] || return 1
-  [ -d "$root/bin" ] && [ ! -L "$root/bin" ] || return 1
-  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -x "$helper" ] || return 1
-  /usr/bin/stat -f '%d:%i' "$helper"
+. "__ROOT__/scripts/common-production-macos.sh"
+try_discover_codex_app() {
+  unset CODEX_BUNDLE CODEX_EXE CODEX_VERSION CODEX_TEAM_ID NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
+  CODEX_APP_VALIDATED="false"
+  CODEX_APP_CONTROL_VALIDATED="false"
+  NODE_RUNTIME_VALIDATED="false"
+  return 1
 }
-ensure_state_root() { /bin/mkdir -p "$STATE_ROOT"; }
-codex_is_running() { return 1; }
-verified_cdp_endpoint() { return 1; }
-stop_recorded_injector() { return 0; }
-release_codex_launchd_job() { return 0; }
-launch_codex_normally() { return 0; }
-acquire_lifecycle_lock() { LIFECYCLE_LOCK_BORROWED="true"; return 0; }
-require_lifecycle_lock() { acquire_lifecycle_lock; }
-release_lifecycle_lock() { return 0; }
+try_validate_codex_app_identity() { return 1; }
+try_validate_codex_app_control_identity() { return 1; }
+try_require_macos_node_runtime() { return 1; }
 STUB
 /usr/bin/sed > "$RECOVERY_BUNDLED/scripts/status-dream-skin-macos.sh" <<'STUB'
 #!/bin/bash
@@ -1014,9 +1195,26 @@ operation=status
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--operation" ]; then operation="$2"; shift 2; else shift; fi
 done
-printf '{"schemaVersion":1,"ok":true,"operation":"%s","state":{"install":"not-installed","codex":"stopped","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":["install"],"verified":null},"error":null}\n' "$operation"
+state="$HOME/Library/Application Support/CodexDreamSkinStudio/state.json"
+archive="$HOME/Library/Application Support/CodexDreamSkinStudio/theme-backup.restored.json"
+installed="$HOME/.codex/codex-dream-skin-studio"
+if [ -e "$state" ]; then
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"stale","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":["restore","uninstall"],"verified":null},"error":{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["restore","diagnostics","cancel"]}}\n' "$operation"
+  exit 1
+fi
+if [ -d "$installed" ] && [ ! -L "$installed" ] && [ ! -f "$archive" ]; then
+  printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"stale","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["diagnostics","cancel"]}}\n' "$operation"
+  exit 1
+fi
+actions='["install"]'
+[ ! -d "$installed" ] || actions='["install","uninstall"]'
+printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":%s,"verified":null},"error":{"code":"CODEX_NOT_INSTALLED","message":"Codex is not installed.","recoveryActions":["cancel"]}}\n' "$operation" "$actions"
+exit 1
 STUB
-for script in theme-config.mjs injector.mjs; do : > "$RECOVERY_BUNDLED/scripts/$script"; done
+: > "$RECOVERY_BUNDLED/scripts/theme-config.mjs"
+/usr/bin/sed > "$RECOVERY_BUNDLED/scripts/injector.mjs" <<'STUB'
+setInterval(() => {}, 30000);
+STUB
 /bin/chmod 755 "$RECOVERY_BUNDLED/scripts/"*.sh "$RECOVERY_BUNDLED/bin/dream-skin-config-restore"
 
 NONEXEC_NODE="$RECOVERY_FIXTURE/non-executable-node"
@@ -1034,6 +1232,7 @@ recreate_native_recovery() {
   /bin/mkdir -p "$RECOVERY_INSTALLED" "$RECOVERY_STATE"
   /usr/bin/printf 'partial engine\n' > "$RECOVERY_INSTALLED/partial"
   /usr/bin/printf '[desktop]\nappearanceTheme = "dark"\n' > "$RECOVERY_CONFIG"
+  /usr/bin/printf '{damaged state\n' > "$RECOVERY_STATE/state.json"
   "$NODE" -e '
     const fs = require("node:fs");
     fs.writeFileSync(process.argv[1], `${JSON.stringify({
@@ -1047,6 +1246,36 @@ recreate_native_recovery() {
     })}\n`);
   ' "$RECOVERY_BACKUP" "$RECOVERY_CONFIG"
 }
+
+recreate_native_recovery
+RECOVERY_STATE_BEFORE="$(/usr/bin/shasum -a 256 "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")"
+"$NODE" "$RECOVERY_BUNDLED/scripts/injector.mjs" --watch --port 9341 --browser-id Browser-A \
+  --theme-dir "$RECOVERY_STATE/theme" &
+RECOVERY_WATCHER_PID="$!"
+/bin/sleep 0.1
+set +e
+/usr/bin/env HOME="$RECOVERY_HOME" \
+  "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+  > "$RECOVERY_FIXTURE/unsafe-identity.json" 2> "$RECOVERY_FIXTURE/unsafe-identity.stderr"
+RECOVERY_UNSAFE_EXIT="$?"
+set -e
+[ "$RECOVERY_UNSAFE_EXIT" -eq 1 ] || { printf 'unsafe live identity did not fail closed.\n' >&2; exit 1; }
+"$NODE" -e '
+  const text = require("node:fs").readFileSync(process.argv[1], "utf8").trim();
+  const lines = text.split("\n");
+  if (lines.length !== 1 || JSON.parse(lines[0]).error?.code !== "STATE_UNSAFE") {
+    throw new Error(`unsafe recovery returned an unexpected envelope: ${text}`);
+  }
+' "$RECOVERY_FIXTURE/unsafe-identity.json"
+[ "$RECOVERY_STATE_BEFORE" = "$(/usr/bin/shasum -a 256 "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")" ] \
+  || { printf 'unsafe live identity changed recovery artifacts.\n' >&2; exit 1; }
+/bin/kill -0 "$RECOVERY_WATCHER_PID" 2>/dev/null \
+  || { printf 'unsafe recovery signalled the unverified watcher candidate.\n' >&2; exit 1; }
+/usr/bin/grep -F 'live injector candidate' "$RECOVERY_STATE/studio-operation.log" >/dev/null \
+  || { printf 'unsafe recovery never reached production watcher classification.\n' >&2; exit 1; }
+/bin/kill -TERM "$RECOVERY_WATCHER_PID" 2>/dev/null || true
+wait "$RECOVERY_WATCHER_PID" 2>/dev/null || true
+RECOVERY_WATCHER_PID=""
 
 for recovery_operation in restore uninstall; do
   for node_case in missing non-executable tampered; do
@@ -1066,6 +1295,8 @@ for recovery_operation in restore uninstall; do
     set -e
     [ "$RECOVERY_EXIT" -eq 0 ] || {
       printf '%s with %s Node did not complete native recovery.\n' "$recovery_operation" "$node_case" >&2
+      /bin/cat "$RECOVERY_FIXTURE/$recovery_operation-$node_case.json" >&2 || true
+      /bin/cat "$RECOVERY_FIXTURE/$recovery_operation-$node_case.stderr" >&2 || true
       exit 1
     }
     "$NODE" -e '
@@ -1074,9 +1305,52 @@ for recovery_operation in restore uninstall; do
     ' "$RECOVERY_FIXTURE/$recovery_operation-$node_case.json" "$recovery_operation"
     /usr/bin/grep -Fx 'appearanceTheme = "system"' "$RECOVERY_CONFIG" >/dev/null
     [ ! -e "$RECOVERY_BACKUP" ]
+    [ -f "$RECOVERY_STATE/theme-backup.restored.json" ]
     [ ! -e "$RECOVERY_NODE_MARKER" ] || { printf 'unsafe Node was executed during native recovery.\n' >&2; exit 1; }
   done
 done
+
+# A restored partial engine stays removable through the fixed completion proof;
+# losing that proof must fail closed without deleting the engine.
+/bin/mkdir -p "$RECOVERY_INSTALLED"
+/usr/bin/printf 'partial engine\n' > "$RECOVERY_INSTALLED/partial"
+[ -f "$RECOVERY_STATE/theme-backup.restored.json" ]
+set +e
+/usr/bin/env HOME="$RECOVERY_HOME" "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" uninstall \
+  > "$RECOVERY_FIXTURE/completed-uninstall.json" 2> "$RECOVERY_FIXTURE/completed-uninstall.stderr"
+COMPLETED_UNINSTALL_EXIT="$?"
+set -e
+[ "$COMPLETED_UNINSTALL_EXIT" -eq 0 ] || {
+  printf 'completion-proof uninstall failed.\n' >&2
+  /bin/cat "$RECOVERY_FIXTURE/completed-uninstall.json" >&2 || true
+  /bin/cat "$RECOVERY_FIXTURE/completed-uninstall.stderr" >&2 || true
+  exit 1
+}
+[ ! -e "$RECOVERY_INSTALLED" ] || { printf 'completion-proof uninstall retained the partial engine.\n' >&2; exit 1; }
+
+/bin/mkdir -p "$RECOVERY_INSTALLED"
+/usr/bin/printf 'partial engine\n' > "$RECOVERY_INSTALLED/partial"
+/bin/rm -f "$RECOVERY_STATE/theme-backup.restored.json"
+set +e
+/usr/bin/env HOME="$RECOVERY_HOME" "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" uninstall \
+  > "$RECOVERY_FIXTURE/missing-proof-uninstall.json" 2> "$RECOVERY_FIXTURE/missing-proof-uninstall.stderr"
+MISSING_PROOF_UNINSTALL_EXIT="$?"
+set -e
+[ "$MISSING_PROOF_UNINSTALL_EXIT" -eq 1 ] || { printf 'missing-proof uninstall did not fail closed.\n' >&2; exit 1; }
+[ -d "$RECOVERY_INSTALLED" ] || { printf 'missing-proof uninstall deleted the partial engine.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (value.error?.code !== "STATE_UNSAFE") process.exit(1);
+' "$RECOVERY_FIXTURE/missing-proof-uninstall.json"
+
+/usr/bin/printf 'invalid completion proof\n' > "$RECOVERY_STATE/theme-backup.restored.json"
+set +e
+/usr/bin/env HOME="$RECOVERY_HOME" "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" uninstall \
+  > "$RECOVERY_FIXTURE/invalid-proof-uninstall.json" 2> "$RECOVERY_FIXTURE/invalid-proof-uninstall.stderr"
+INVALID_PROOF_UNINSTALL_EXIT="$?"
+set -e
+[ "$INVALID_PROOF_UNINSTALL_EXIT" -eq 1 ] || { printf 'invalid-proof uninstall did not fail closed.\n' >&2; exit 1; }
+[ -d "$RECOVERY_INSTALLED" ] || { printf 'invalid-proof uninstall deleted the partial engine.\n' >&2; exit 1; }
 
 # The production deploy-and-exec upgrade path must transition verified-stopped
 # watcher state before the new engine is installed.
@@ -1253,7 +1527,8 @@ assert_json_line "$CLEANUP_VALUE"
     if (!start.includes(required)) throw new Error(`start missing ${required}`);
   }
   if (!/STUDIO_STRICT_VERIFY[\s\S]*installed.*true/.test(start)) throw new Error("strict verify does not guard soft success");
-  if (!pause.includes("verified_cdp_endpoint") || !/fail .*live skin/.test(pause)) throw new Error("pause removal is not verified");
+  if (!pause.includes("verified_cdp_browser_id") || !pause.includes("--browser-id") ||
+      !/fail .*live skin/.test(pause)) throw new Error("pause removal is not Browser-ID verified");
   if (!restore.includes("--restart-authorized")) throw new Error("restore missing restart authorization");
   if (!restore.includes("--force-stop-authorized")) throw new Error("restore missing force authorization");
 ' "$ROOT/scripts/install-dream-skin-macos.sh" "$ROOT/scripts/start-dream-skin-macos.sh" \

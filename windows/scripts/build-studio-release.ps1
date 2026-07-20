@@ -265,6 +265,10 @@ try {
 
   $setupPath = Join-Path $PublishRoot "$baseName.exe"
   if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) { throw 'Inno Setup output is missing.' }
+  $setupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($setupPath)
+  if ($setupVersionInfo.ProductVersion -cne $Version -or $setupVersionInfo.FileVersion -cne "$Version.0") {
+    throw 'The setup version metadata does not match windows/VERSION.'
+  }
   if (-not $SkipSign) { Sign-And-Verify -Path $setupPath -SignTool $SignTool -Thumbprint $Thumbprint }
 
   $hash = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant()

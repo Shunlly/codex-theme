@@ -115,6 +115,25 @@ function Invoke-UninstallConfirmation {
   throw "The real Studio $Choice confirmation button was not available."
 }
 
+function Get-StudioMainWindow {
+  param([Parameter(Mandatory = $true)][int]$ProcessId, [int]$TimeoutSeconds = 30)
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+      [System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+    for ($index = 0; $index -lt $windows.Count; $index++) {
+      try {
+        $candidate = $windows[$index]
+        if ($candidate.Current.ProcessId -eq $ProcessId -and $candidate.Current.Name -ceq 'Codex 梦幻皮肤') {
+          return $candidate
+        }
+      } catch [System.Windows.Automation.ElementNotAvailableException] {}
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  throw 'The resident Studio window was not available.'
+}
+
 foreach ($tool in @($PowerShell, $DotNet, $InnoSetup, $TaskKill)) {
   if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw 'A required Windows release test tool is unavailable.' }
 }
@@ -226,6 +245,10 @@ try {
   if ($versionInfo.FileVersion -cne "$Version.0" -or $versionInfo.ProductVersion -cne $Version) {
     throw 'Staged Studio FileVersionInfo does not match windows/VERSION.'
   }
+  $setupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($Setup)
+  if ($setupVersionInfo.FileVersion -cne "$Version.0" -or $setupVersionInfo.ProductVersion -cne $Version) {
+    throw 'Setup FileVersionInfo does not match windows/VERSION.'
+  }
 
   $contract = Invoke-TestProcess $PrivateNode @((Join-Path $PSScriptRoot 'studio-release-contract.test.mjs'))
   if ($contract.ExitCode -ne 0) { throw "Portable Studio release contract failed.`n$($contract.Output)" }
@@ -254,6 +277,7 @@ $RealStudioBackup = Join-Path $TemporaryRoot 'CodexDreamSkinStudio.real.exe'
 $PrepareTrace = Join-Path $TemporaryRoot 'prepare-uninstall-trace.txt'
 $instanceMutex = $null
 $ownsInstanceMutex = $false
+$residentOwner = $null
 $previousGuardExit = $env:DREAM_SKIN_TEST_PREPARE_EXIT
 $previousPrepareScenario = $env:DREAM_SKIN_TEST_PREPARE_SCENARIO
 $previousThumbprint = $env:WINDOWS_SIGN_CERT_THUMBPRINT
@@ -316,10 +340,14 @@ public static class Program {
 
   $mutexUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   if (-not $mutexUser) { $mutexUser = [Environment]::UserName }
-  $instanceMutex = [Threading.Mutex]::new($true, "Local\CodexDreamSkinStudio.$mutexUser", [ref]$ownsInstanceMutex)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try { $mutexDigest = $sha256.ComputeHash([Text.UTF8Encoding]::new($false, $true).GetBytes($mutexUser)) }
+  finally { $sha256.Dispose() }
+  $mutexSuffix = ([BitConverter]::ToString($mutexDigest).Replace('-', '').ToLowerInvariant()).Substring(0, 32)
+  $instanceMutex = [Threading.Mutex]::new($true, "Local\CodexDreamSkinStudio.$mutexSuffix", [ref]$ownsInstanceMutex)
   if (-not $ownsInstanceMutex) { throw 'Studio mutex fixture could not own the production instance mutex.' }
   $contended = Invoke-TestProcess $InstalledStudio @('--prepare-uninstall') `
-    -TimeoutMilliseconds 15000
+    -TimeoutMilliseconds 30000
   if ($contended.ExitCode -eq 0) { throw 'Prepare-uninstall succeeded while the production Studio mutex was owned.' }
   $instanceMutex.ReleaseMutex()
   $instanceMutex.Dispose()
@@ -343,7 +371,11 @@ param([string]$Operation)
 $scenario = "$env:DREAM_SKIN_TEST_PREPARE_SCENARIO"
 [IO.File]::AppendAllText('__TRACE__', $scenario + "`r`n", [Text.UTF8Encoding]::new($false))
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-[Console]::Error.WriteLine('DREAM_SKIN_PROGRESS=uninstalling')
+[Console]::Error.WriteLine($(if ($Operation -in @('preflight', 'status')) { 'DREAM_SKIN_PROGRESS=checking' } else { 'DREAM_SKIN_PROGRESS=uninstalling' }))
+if ($Operation -in @('preflight', 'status')) {
+  [Console]::Out.WriteLine('{"schemaVersion":1,"ok":true,"operation":"__OPERATION__","state":{"install":"ready","codex":"stopped","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":["apply","restore","uninstall"],"verified":null},"error":null}'.Replace('__OPERATION__', $Operation))
+  exit 0
+}
 if ($Operation -cne 'uninstall') { exit 2 }
 if ($scenario -eq 'prepare-restore-failure') {
   [Console]::Out.WriteLine('{"schemaVersion":1,"ok":false,"operation":"uninstall","state":{"install":"ready","codex":"stopped","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":["restore","uninstall"],"verified":null},"error":{"code":"OPERATION_FAILED","message":"Controlled restore failure.","recoveryActions":["retry","diagnostics","cancel"]}}'.Replace('\"', '"'))
@@ -400,11 +432,32 @@ exit 0
     'A failed real Studio restore guard changed installed files.'
 
   $env:DREAM_SKIN_TEST_PREPARE_SCENARIO = 'prepare-missing-codex'
+  $residentOwner = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{
+    FileName = $InstalledStudio
+    UseShellExecute = $false
+  })
+  $ownerWindow = Get-StudioMainWindow -ProcessId $residentOwner.Id
+  $windowPattern = [System.Windows.Automation.WindowPattern]$ownerWindow.GetCurrentPattern(
+    [System.Windows.Automation.WindowPattern]::Pattern)
+  $windowPattern.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Minimized)
+  $activation = Invoke-TestProcess $InstalledStudio @() -TimeoutMilliseconds 30000
+  if ($activation.ExitCode -ne 0 -or $residentOwner.HasExited) {
+    throw 'A second normal launch did not activate the resident Studio owner.'
+  }
+  $reactivatedWindow = Get-StudioMainWindow -ProcessId $residentOwner.Id
+  $reactivatedPattern = [System.Windows.Automation.WindowPattern]$reactivatedWindow.GetCurrentPattern(
+    [System.Windows.Automation.WindowPattern]::Pattern)
+  if ($reactivatedPattern.Current.WindowVisualState -ne [System.Windows.Automation.WindowVisualState]::Normal) {
+    throw 'A minimized or hidden resident Studio was not restored by a second launch.'
+  }
   $successfulUninstall = Invoke-TestProcess $Uninstaller.FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
     -TimeoutMilliseconds 120000 -AfterStart {
-      Invoke-UninstallConfirmation -ProcessId 0 -Choice Yes
+      Invoke-UninstallConfirmation -ProcessId $residentOwner.Id -Choice Yes
     }
   if ($successfulUninstall.ExitCode -ne 0) { throw "The real Studio guarded uninstall failed.`n$($successfulUninstall.Output)" }
+  if (-not $residentOwner.WaitForExit(10000)) { throw 'Delegated uninstall returned before the resident owner exited.' }
+  $residentOwner.Dispose()
+  $residentOwner = $null
   for ($attempt = 0; $attempt -lt 50 -and (Test-Path -LiteralPath $InstallRoot); $attempt++) { Start-Sleep -Milliseconds 100 }
   if (Test-Path -LiteralPath $InstallRoot) { throw 'The real Studio guarded uninstall preserved installed files.' }
   if (-not (Test-Path -LiteralPath $ThemeSentinel -PathType Leaf)) { throw 'The real Studio guarded uninstall deleted a user theme.' }
@@ -421,6 +474,10 @@ exit 0
 
   Write-Host 'PASS: Windows Studio release build, install scan, mutex, uninstall guard, and publication behavior.'
 } finally {
+  if ($residentOwner) {
+    if (-not $residentOwner.HasExited) { & $TaskKill /PID "$($residentOwner.Id)" /T /F *> $null }
+    $residentOwner.Dispose()
+  }
   if ($instanceMutex) {
     if ($ownsInstanceMutex) { $instanceMutex.ReleaseMutex() }
     $instanceMutex.Dispose()

@@ -45,7 +45,8 @@ if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
 fi
 
 DEBUG_READY="false"
-if verified_cdp_endpoint "$PORT"; then DEBUG_READY="true"; fi
+BROWSER_ID=""
+if BROWSER_ID="$(verified_cdp_browser_id "$PORT")"; then DEBUG_READY="true"; fi
 
 if codex_is_running && [ "$DEBUG_READY" = "false" ]; then
   if [ "$PROMPT_RESTART" = "true" ] && [ "$RESTART_EXISTING" = "false" ]; then
@@ -71,16 +72,13 @@ if [ "$DEBUG_READY" = "false" ]; then
   PORT="$(select_available_port "$PORT")"
   printf 'Launching Codex with skin debug port %s…\n' "$PORT" >&2
   launch_codex_with_cdp "$PORT"
-  # Start probing immediately instead of waiting for the native window to finish loading.
-  if [ "$FOREGROUND_INJECTOR" != "true" ]; then
-    INJECTOR_PID="$(launch_injector_daemon "$PORT")"
-  fi
   # Some builds open the window slowly; also try activating the app once.
   /usr/bin/open -na "$CODEX_BUNDLE" --args --remote-debugging-address=127.0.0.1 --remote-debugging-port="$PORT" >/dev/null 2>&1 || true
   if ! wait_for_cdp "$PORT"; then
-    [ -z "$INJECTOR_PID" ] || /bin/kill -TERM "$INJECTOR_PID" 2>/dev/null || true
     fail "Codex did not expose a verified loopback CDP endpoint on port $PORT within 45 seconds. See $APP_LOG and $APP_ERROR_LOG"
   fi
+  BROWSER_ID="$(verified_cdp_browser_id "$PORT")" \
+    || fail "Codex exposed CDP without a stable numeric-loopback Browser ID."
 fi
 
 if [ "$FOREGROUND_INJECTOR" = "true" ]; then
@@ -88,33 +86,33 @@ if [ "$FOREGROUND_INJECTOR" = "true" ]; then
   [ ! -e "$LIFECYCLE_LOCK_PATH" ] && [ ! -L "$LIFECYCLE_LOCK_PATH" ] \
     || fail "The lifecycle lock was reacquired before the foreground watcher could start."
   trap - EXIT
-  exec "$NODE" "$INJECTOR" --watch --port "$PORT" --theme-dir "$THEME_DIR"
+  exec "$NODE" "$INJECTOR" --watch --port "$PORT" --browser-id "$BROWSER_ID" --theme-dir "$THEME_DIR"
 fi
 
 if [ -z "$INJECTOR_PID" ]; then
-  INJECTOR_PID="$(launch_injector_daemon "$PORT")"
+  INJECTOR_PID="$(launch_injector_daemon "$PORT" "$BROWSER_ID")"
 fi
 /bin/sleep 0.15
 /bin/kill -0 "$INJECTOR_PID" 2>/dev/null || fail "The injector exited during startup. See $INJECTOR_ERROR_LOG"
 INJECTOR_STARTED_AT="$(process_started_at "$INJECTOR_PID")"
 [ -n "$INJECTOR_STARTED_AT" ] || fail "Could not record the injector process start time."
 CODEX_PID="$(codex_main_pids | /usr/bin/head -n 1)"
-write_state "$PORT" "$INJECTOR_PID" "$INJECTOR_STARTED_AT" "$CODEX_PID"
+write_state "$PORT" "$INJECTOR_PID" "$INJECTOR_STARTED_AT" "$CODEX_PID" "$BROWSER_ID"
 
 # Soft verify: keep the injector even if secondary selectors differ by Codex version.
 VERIFY_OUTPUT="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dream-skin-verify.XXXXXX")"
 /bin/chmod 600 "$VERIFY_OUTPUT"
 cleanup_verify_output() { /bin/rm -f "$VERIFY_OUTPUT"; }
 trap 'cleanup_verify_output; release_lifecycle_lock' EXIT
-if "$NODE" "$INJECTOR" --verify --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 20000 >"$VERIFY_OUTPUT" 2>/dev/null; then
+if "$NODE" "$INJECTOR" --verify --port "$PORT" --browser-id "$BROWSER_ID" --theme-dir "$THEME_DIR" --timeout-ms 20000 >"$VERIFY_OUTPUT" 2>/dev/null; then
   verify_code=0
 else
   verify_code=$?
 fi
 if [ "$verify_code" -ne 0 ]; then
   # One more force inject before giving up
-  "$NODE" "$INJECTOR" --once --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 15000 >/dev/null 2>&1 || true
-  if "$NODE" "$INJECTOR" --verify --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 12000 >"$VERIFY_OUTPUT" 2>/dev/null; then
+  "$NODE" "$INJECTOR" --once --port "$PORT" --browser-id "$BROWSER_ID" --theme-dir "$THEME_DIR" --timeout-ms 15000 >/dev/null 2>&1 || true
+  if "$NODE" "$INJECTOR" --verify --port "$PORT" --browser-id "$BROWSER_ID" --theme-dir "$THEME_DIR" --timeout-ms 12000 >"$VERIFY_OUTPUT" 2>/dev/null; then
     verify_code=0
   else
     verify_code=$?
@@ -140,7 +138,7 @@ if [ "$verify_code" -ne 0 ]; then
   if [ "$STUDIO_STRICT_VERIFY" = "true" ]; then
     verified_cdp_endpoint "$PORT" \
       || fail "Injection verification failed and the live skin endpoint could not be verified; state was preserved."
-    "$NODE" "$INJECTOR" --remove --port "$PORT" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null 2>&1 \
+    "$NODE" "$INJECTOR" --remove --port "$PORT" --browser-id "$BROWSER_ID" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null 2>&1 \
       || fail "Injection verification failed and the live skin could not be removed safely; state was preserved."
   fi
   /bin/rm -f "$STATE_PATH"

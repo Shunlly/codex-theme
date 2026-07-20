@@ -32,6 +32,38 @@ function Stop-DreamSkinTrayProcess {
   }
 }
 
+function Remove-DreamSkinRecoveryArtifact {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if (Test-Path -LiteralPath $Path) { throw "Recovery artifact could not be removed: $Path" }
+}
+
+function Get-DreamSkinRecoveryArtifactSnapshot {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  Assert-DreamSkinNoReparseComponents -Path $Path
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return [pscustomobject]@{ Path = $Path; Exists = $false; Bytes = $null }
+  }
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "Recovery artifact is not a safe file: $Path"
+  }
+  return [pscustomobject]@{ Path = $Path; Exists = $true; Bytes = [IO.File]::ReadAllBytes($Path) }
+}
+
+function Restore-DreamSkinRecoveryArtifactSnapshot {
+  param([Parameter(Mandatory = $true)][object]$Snapshot)
+  Assert-DreamSkinNoReparseComponents -Path $Snapshot.Path
+  if ($Snapshot.Exists) {
+    $currentBytes = if (Test-Path -LiteralPath $Snapshot.Path -PathType Leaf) {
+      [IO.File]::ReadAllBytes($Snapshot.Path)
+    } else { $null }
+    Write-DreamSkinBytesAtomically -Path $Snapshot.Path -Bytes $Snapshot.Bytes -ExpectedBytes $currentBytes
+  } else {
+    Remove-DreamSkinRecoveryArtifact -Path $Snapshot.Path
+  }
+}
+
 $operationLock = $null
 if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
   $operationLock = Enter-DreamSkinOperationLock
@@ -115,14 +147,33 @@ try {
   }
 
   $backup = Join-Path $StateRoot 'config.before-dream-skin.toml'
+  $archivePath = Join-Path $StateRoot 'config.restored.toml'
+  $pausedPath = Join-Path $StateRoot 'paused'
+  $backupMarkerPath = Get-DreamSkinAppearanceMarkerPath -BackupPath $backup
+  $archiveMarkerPath = Get-DreamSkinAppearanceMarkerPath -BackupPath $archivePath
   $config = Join-Path $HOME '.codex\config.toml'
+  $restoreRequested = $RecoverConfigBackup -or $RestoreBaseTheme
+  $completionEvidence = Test-DreamSkinConfigCompletionEvidence -ArchivePath $archivePath
+  $restoreAlreadyCommitted = $restoreRequested -and
+    -not (Test-Path -LiteralPath $backup) -and
+    $completionEvidence -and
+    -not (Test-Path -LiteralPath $StatePath) -and
+    -not (Test-Path -LiteralPath $pausedPath)
+  $artifactSnapshots = @(
+    (Get-DreamSkinRecoveryArtifactSnapshot -Path $StatePath),
+    (Get-DreamSkinRecoveryArtifactSnapshot -Path $pausedPath),
+    (Get-DreamSkinRecoveryArtifactSnapshot -Path $backup),
+    (Get-DreamSkinRecoveryArtifactSnapshot -Path $backupMarkerPath),
+    (Get-DreamSkinRecoveryArtifactSnapshot -Path $archivePath),
+    (Get-DreamSkinRecoveryArtifactSnapshot -Path $archiveMarkerPath)
+  )
   $configBeforeRestoreBytes = $null
-  if ($RecoverConfigBackup) {
+  if ($RecoverConfigBackup -and -not $restoreAlreadyCommitted) {
     if (-not (Test-Path -LiteralPath $backup)) { throw 'No pre-install config backup is available.' }
     $null = Read-DreamSkinUtf8File -Path $backup
     $configBeforeRestoreBytes = [IO.File]::ReadAllBytes($config)
     $null = ConvertFrom-DreamSkinUtf8Bytes -Bytes $configBeforeRestoreBytes -Path $config
-  } elseif ($RestoreBaseTheme) {
+  } elseif ($RestoreBaseTheme -and -not $restoreAlreadyCommitted) {
     if (-not (Test-Path -LiteralPath $backup)) { throw 'No pre-install config backup is available.' }
     $null = Read-DreamSkinUtf8File -Path $backup
     $null = Read-DreamSkinUtf8File -Path $config
@@ -131,6 +182,7 @@ try {
 
   $restoreError = $null
   $configChanged = $false
+  $transactionCommitted = $false
   try {
     if ($shouldCloseCodex) {
       Stop-DreamSkinCodex -Codex $codex -AllowForce:$ForceRestart
@@ -143,36 +195,31 @@ try {
     Stop-DreamSkinTrayProcess
     $recordedInjectorStopped = Stop-DreamSkinRecordedInjector -State $state
     if (-not $recordedInjectorStopped) {
-      $staleStatePath = Archive-DreamSkinStateFile -Path $StatePath
-      Write-Warning "Archived stale Dream Skin state at $staleStatePath"
+      Write-Warning 'The recorded injector identity was stale; lifecycle state will be removed only if restore commits.'
     }
 
-    if ($RecoverConfigBackup) {
+    if ($RecoverConfigBackup -and -not $restoreAlreadyCommitted) {
       $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N')
       $recoveryBackup = Join-Path $StateRoot "config.before-recovery-$stamp.toml"
       Restore-DreamSkinConfigBackup -ConfigPath $config -BackupPath $backup -RecoveryBackupPath $recoveryBackup
       $configChanged = $true
       Write-Host "Recovered the exact pre-install config; previous current config saved at $recoveryBackup"
-    } elseif ($RestoreBaseTheme) {
+    } elseif ($RestoreBaseTheme -and -not $restoreAlreadyCommitted) {
       Restore-DreamSkinBaseTheme -ConfigPath $config -BackupPath $backup
       $configChanged = $true
     }
 
-    if ($shouldCloseCodex -and -not $NoRelaunch) {
-      if ($null -eq $relaunchCodex -or -not (Test-Path -LiteralPath $relaunchCodex.Executable)) {
-        throw 'Codex cannot be reopened because its current executable is unavailable.'
-      }
-      Start-Process -FilePath $relaunchCodex.Executable | Out-Null
+    if ($restoreRequested -and -not $restoreAlreadyCommitted) {
+      Publish-DreamSkinConfigBackupArchive -BackupPath $backup -ArchivePath $archivePath
     }
-
-    if ($RecoverConfigBackup -or $RestoreBaseTheme) {
-      $archiveStamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N')
-      $archivePath = Join-Path $StateRoot "config.restored-$archiveStamp.toml"
-      Archive-DreamSkinConfigBackup -BackupPath $backup -ArchivePath $archivePath
-      Write-Host "Archived the completed pre-install backup at $archivePath"
+    Remove-DreamSkinRecoveryArtifact -Path $StatePath
+    Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')
+    Remove-DreamSkinRecoveryArtifact -Path $backupMarkerPath
+    if ($restoreRequested -and -not $restoreAlreadyCommitted) {
+      Remove-DreamSkinRecoveryArtifact -Path $backup
     }
-    Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path $StateRoot 'paused') -Force -ErrorAction SilentlyContinue
+    $transactionCommitted = $true
+    if ($restoreRequested) { Write-Host "Archived the completed pre-install backup at $archivePath" }
     if ($Uninstall) {
       $desktop = [Environment]::GetFolderPath('Desktop')
       $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
@@ -186,7 +233,7 @@ try {
     }
   } catch {
     $restoreError = $_
-    if ($configChanged -and $null -ne $configBeforeRestoreBytes) {
+    if (-not $transactionCommitted -and $configChanged -and $null -ne $configBeforeRestoreBytes) {
       try {
         $currentConfigBytes = [IO.File]::ReadAllBytes($config)
         Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreBytes -ExpectedBytes $currentConfigBytes
@@ -194,13 +241,25 @@ try {
         Write-Warning 'Restore failed and the original config could not be rolled back automatically.'
       }
     }
-    if ($shouldCloseCodex -and -not $NoRelaunch -and $null -ne $relaunchCodex -and
-      (Get-DreamSkinCodexProcesses -Codex $codex).Count -eq 0 -and (Test-Path -LiteralPath $relaunchCodex.Executable)) {
-      try { Start-Process -FilePath $relaunchCodex.Executable | Out-Null } catch {
-        Write-Warning 'Restore failed and Codex could not be reopened automatically.'
+    if (-not $transactionCommitted) {
+      foreach ($snapshot in $artifactSnapshots) {
+        try { Restore-DreamSkinRecoveryArtifactSnapshot -Snapshot $snapshot } catch {
+          Write-Warning "Restore failed and a recovery artifact could not be rolled back: $($snapshot.Path)"
+        }
       }
     }
     throw $restoreError
+  }
+
+  if ($shouldCloseCodex -and -not $NoRelaunch) {
+    try {
+      if ($null -eq $relaunchCodex -or -not (Test-Path -LiteralPath $relaunchCodex.Executable)) {
+        throw 'The Codex executable is unavailable.'
+      }
+      Start-Process -FilePath $relaunchCodex.Executable | Out-Null
+    } catch {
+      Write-Warning 'Codex could not be reopened automatically. The restore is complete; open Codex normally when you are ready.'
+    }
   }
 
   Write-Host 'Dream Skin restore actions completed; any saved CDP session was closed.'

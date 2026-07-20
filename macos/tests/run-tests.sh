@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 NODE="${NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 [ -x "$NODE" ] || { printf 'Codex bundled Node.js was not found: %s\n' "$NODE" >&2; exit 1; }
+/bin/bash "$ROOT/tests/listener-address.test.sh"
+"$NODE" "$ROOT/tests/injector-identity.test.mjs"
+/bin/bash "$ROOT/tests/browser-state.test.sh"
+"$NODE" "$ROOT/tests/diagnostics-wiring.test.mjs"
 
 EXPECTED_STUDIO_VERSION="1.3.0"
 [ "$(/bin/cat "$ROOT/VERSION")" = "$EXPECTED_STUDIO_VERSION" ] || {
@@ -434,6 +438,7 @@ DUMMY_PID="$!"
     injectorStartedAt: "not-the-real-start-time",
     nodePath: node,
     injectorPath: injector,
+    browserId: "Browser-A",
   })}\n`);
 ' "$STOP_STATE_ROOT/state.json" "$DUMMY_PID" "$NODE" "$ROOT/scripts/injector.mjs"
 /usr/bin/env HOME="$STOP_HOME" NODE="$NODE" /bin/bash -c '
@@ -468,6 +473,7 @@ DUMMY_PID="$!"
     injectorStartedAt: "not-the-real-start-time",
     nodePath: node,
     injectorPath: injector,
+    browserId: "Browser-A",
   })}\n`);
 ' "$STOP_STATE_ROOT/state.json" "$DUMMY_PID" "$NODE" "$ROOT/scripts/injector.mjs"
 /bin/kill -TERM "$DUMMY_PID" 2>/dev/null || true
@@ -493,13 +499,14 @@ STATUS_PID="$!"
   const fs = require("node:fs");
   const [file, pid] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
-    schemaVersion: 4,
+    schemaVersion: 5,
     session: "active",
     port: 9341,
     injectorPid: Number(pid),
     injectorStartedAt: "not-the-real-start-time",
     injectorPath: "/tmp/not-the-dream-skin-injector.mjs",
     nodePath: "/tmp/not-the-codex-node",
+    browserId: "Browser-A",
   })}\n`);
 ' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID"
 STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
@@ -516,7 +523,7 @@ STATUS_PID=""
 # token boundary distinguishes this case.
 STATUS_FAKE_INJECTOR="$TMP/status-fake-injector.mjs"
 /usr/bin/printf 'setTimeout(() => {}, 30000);\n' > "$STATUS_FAKE_INJECTOR"
-"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 93410 --theme-dir "$TMP" &
+"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 93410 --browser-id Browser-A --theme-dir "$TMP" &
 STATUS_PID="$!"
 /bin/sleep 0.08
 STATUS_START="$(/bin/ps -p "$STATUS_PID" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
@@ -524,13 +531,14 @@ STATUS_START="$(/bin/ps -p "$STATUS_PID" -o lstart= 2>/dev/null | /usr/bin/awk '
   const fs = require("node:fs");
   const [file, pid, node, injector, startedAt] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
-    schemaVersion: 4,
+    schemaVersion: 5,
     session: "active",
     port: 9341,
     injectorPid: Number(pid),
     injectorStartedAt: startedAt,
     injectorPath: injector,
     nodePath: node,
+    browserId: "Browser-A",
   })}\n`);
 ' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$NODE" "$STATUS_FAKE_INJECTOR" "$STATUS_START"
 STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
@@ -545,7 +553,7 @@ STATUS_PID=""
 # The common stop path must reject a real watcher running on 19341 when the
 # saved state claims 1934, even though nodePath/injectorPath/start-time all
 # match. This exercises the signal gate directly (status has its own matcher).
-"$NODE" "$ROOT/scripts/injector.mjs" --watch --port 19341 --theme-dir "$ROOT/presets/preset-midnight-aurora" \
+"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 19341 --browser-id Browser-A --theme-dir "$ROOT/presets/preset-midnight-aurora" \
   >"$TMP/near-prefix-injector.out" 2>&1 &
 WATCH_PID="$!"
 /bin/sleep 0.2
@@ -555,15 +563,16 @@ WATCH_START="$(/bin/ps -p "$WATCH_PID" -o lstart= 2>/dev/null | /usr/bin/awk '{$
   const fs = require("node:fs");
   const [file, pid, node, injector, startedAt] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
-    schemaVersion: 4,
+    schemaVersion: 5,
     session: "active",
     port: 1934,
     injectorPid: Number(pid),
     injectorStartedAt: startedAt,
     injectorPath: injector,
     nodePath: node,
+    browserId: "Browser-A",
   })}\n`);
-' "$STOP_STATE_ROOT/state.json" "$WATCH_PID" "$NODE" "$ROOT/scripts/injector.mjs" "$WATCH_START"
+' "$STOP_STATE_ROOT/state.json" "$WATCH_PID" "$NODE" "$STATUS_FAKE_INJECTOR" "$WATCH_START"
 if /usr/bin/env HOME="$STOP_HOME" NODE="$NODE" /bin/bash -c '
   . "$1/scripts/common-macos.sh"
   INJECTOR_JOB_LABEL="$2"
@@ -993,6 +1002,7 @@ ensure_state_root() { :; }
 state_field() { printf '9341\n'; }
 codex_is_running() { return 0; }
 verified_cdp_endpoint() { return 1; }
+verified_cdp_browser_id() { return 1; }
 stop_codex() { printf 'stop:%s\n' "$1" >> "__MARKER__"; }
 stop_recorded_injector() { printf 'stop-injector\n' >> "__MARKER__"; return 0; }
 release_codex_launchd_job() { printf 'release-job\n' >> "__MARKER__"; return 0; }
@@ -1060,6 +1070,7 @@ state_field() { printf 'state-field\n' >> "__MARKER__"; return 1; }
 codex_is_running() { printf 'process-probe\n' >> "__MARKER__"; return 1; }
 ensure_state_root() { printf 'ensure-state\n' >> "__MARKER__"; }
 verified_cdp_endpoint() { printf 'endpoint-probe\n' >> "__MARKER__"; return 1; }
+verified_cdp_browser_id() { printf 'endpoint-probe\n' >> "__MARKER__"; return 1; }
 stop_codex() { printf 'stop\n' >> "__MARKER__"; }
 stop_recorded_injector() { printf 'stop-injector\n' >> "__MARKER__"; return 0; }
 release_codex_launchd_job() { printf 'release-job\n' >> "__MARKER__"; return 0; }
@@ -1143,6 +1154,7 @@ codex_is_running() {
 }
 ensure_state_root() { :; }
 verified_cdp_endpoint() { return 1; }
+verified_cdp_browser_id() { return 1; }
 release_codex_launchd_job() { return 0; }
 launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
 STUB

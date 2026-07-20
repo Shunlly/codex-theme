@@ -30,6 +30,7 @@ STATE_ROOT="${HOME}/Library/Application Support/CodexDreamSkinStudio"
 STATE_PATH="${STATE_ROOT}/state.json"
 THEME_DIR="${STATE_ROOT}/theme"
 THEME_BACKUP_PATH="${STATE_ROOT}/theme-backup.json"
+RESTORED_THEME_BACKUP_PATH="${STATE_ROOT}/theme-backup.restored.json"
 INSTALL_ROOT="${HOME}/.codex/codex-dream-skin-studio"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 
@@ -50,6 +51,7 @@ INJECTOR_ALIVE="false"
 CDP_OK="false"
 THEME_NAME=""
 CODEX_RUNNING="false"
+SAVED_BROWSER_ID=""
 
 read_json_field() {
   # Parse machine-written JSON (one key per line) without python3, which macOS
@@ -71,12 +73,15 @@ injector_identity_matches() {
   local expected_node="$3"
   local expected_injector="$4"
   local expected_port="$5"
+  local expected_browser_id="$6"
   local command_line command_lower node_lower injector_lower actual_start
 
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" != "0" ] || return 1
   [ -n "$expected_start" ] && [ -n "$expected_node" ] && [ -n "$expected_injector" ] || return 1
   case "$expected_port" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$expected_browser_id" ] && [ "${#expected_browser_id}" -le 200 ] || return 1
+  case "$expected_browser_id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   /bin/kill -0 "$pid" 2>/dev/null || return 1
   command_line="$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)"
   [ -n "$command_line" ] || return 1
@@ -88,7 +93,8 @@ injector_identity_matches() {
   # The watcher launch shape puts --theme-dir immediately after the port.
   # Requiring that following token prevents 93410 from matching saved port
   # 9341 via a loose prefix pattern.
-  case "$command_lower" in *"--port $expected_port --theme-dir "*) ;; *) return 1 ;; esac
+  case "$command_lower" in *"--port $expected_port --browser-id "*) ;; *) return 1 ;; esac
+  case "$command_line" in *" --browser-id $expected_browser_id --theme-dir "*) ;; *) return 1 ;; esac
   actual_start="$(/bin/ps -p "$pid" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
   [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
 }
@@ -107,7 +113,8 @@ if [ -f "$STATE_PATH" ]; then
   saved_start="$(read_json_field "$STATE_PATH" injectorStartedAt)"
   saved_node="$(read_json_field "$STATE_PATH" nodePath)"
   saved_injector="$(read_json_field "$STATE_PATH" injectorPath)"
-  if injector_identity_matches "${pid:-}" "$saved_start" "$saved_node" "$saved_injector" "$PORT"; then
+  SAVED_BROWSER_ID="$(read_json_field "$STATE_PATH" browserId)"
+  if injector_identity_matches "${pid:-}" "$saved_start" "$saved_node" "$saved_injector" "$PORT" "$SAVED_BROWSER_ID"; then
     INJECTOR_ALIVE="true"
     SESSION="active"
   elif [ "${SESSION:-}" = "paused" ] && [ "${pid:-}" = "0" ]; then
@@ -121,15 +128,23 @@ if [ -f "$STATE_PATH" ]; then
   fi
 fi
 
-if [ -f "$THEME_DIR/theme.json" ]; then
-  THEME_NAME="$(read_json_field "$THEME_DIR/theme.json" name)"
-  [ -n "$THEME_NAME" ] || THEME_NAME="$(read_json_field "$THEME_DIR/theme.json" id)"
-fi
-
-if [ "$DEEP" = "true" ]; then
-  if /usr/bin/curl --noproxy '*' --silent --fail --max-time 1 "http://127.0.0.1:${PORT}/json/version" >/dev/null 2>&1; then
-    CDP_OK="true"
+safe_theme_display_name() {
+  local value="$1"
+  [ -n "$value" ] || return 1
+  case "$value" in
+    *'/'*|*\\*|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  if printf '%s' "$value" | LC_ALL=C /usr/bin/grep -q $'[\x01-\x1f\x7f]\|\xc2[\x80-\x9f]\|\xe2\x80[\xa8\xa9]'; then
+    return 1
   fi
+  printf '%s' "$value"
+}
+
+if [ -f "$THEME_DIR/theme.json" ] && [ ! -L "$THEME_DIR/theme.json" ]; then
+  THEME_NAME="$(/usr/bin/plutil -extract name raw -o - "$THEME_DIR/theme.json" 2>/dev/null)"
+  [ -n "$THEME_NAME" ] \
+    || THEME_NAME="$(/usr/bin/plutil -extract id raw -o - "$THEME_DIR/theme.json" 2>/dev/null)"
+  THEME_NAME="$(safe_theme_display_name "$THEME_NAME" 2>/dev/null)" || THEME_NAME=""
 fi
 
 official_codex_bundle_exists() {
@@ -159,16 +174,26 @@ official_codex_bundle_exists() {
 
 studio_strict_verify() {
   local port="$1"
+  local browser_id=""
+  local active_browser_id=""
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  browser_id="$(read_json_field "$STATE_PATH" browserId)"
+  [ -n "$browser_id" ] || return 1
   (
     . "$PROJECT_ROOT/scripts/common-macos.sh"
     fail() { exit 1; }
     discover_codex_app
     require_macos_runtime
-    verified_cdp_endpoint "$port" || exit 1
-    "$NODE" "$INJECTOR" --verify --port "$port" --theme-dir "$THEME_DIR" --timeout-ms 5000 >/dev/null 2>&1
+    browser_id_is_valid "$browser_id" || exit 1
+    active_browser_id="$(verified_cdp_browser_id "$port")" || exit 1
+    [ "$active_browser_id" = "$browser_id" ] || exit 1
+    "$NODE" "$INJECTOR" --verify --port "$port" --browser-id "$browser_id" --theme-dir "$THEME_DIR" --timeout-ms 5000 >/dev/null 2>&1
   )
 }
+
+if [ "$DEEP" = "true" ] && [ "$STUDIO_JSON" != "true" ] && studio_strict_verify "$PORT"; then
+  CDP_OK="true"
+fi
 
 native_restore_helper_is_safe() {
   local root="$1"
@@ -180,6 +205,43 @@ native_restore_helper_is_safe() {
   root_real="$(cd "$root" && pwd -P)" || return 1
   bin_real="$(cd "$root/bin" && pwd -P)" || return 1
   [ "$bin_real" = "$root_real/bin" ]
+}
+
+restored_theme_backup_is_valid() {
+  local keys=""
+  local value_type=""
+  [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
+    && [ -f "$RESTORED_THEME_BACKUP_PATH" ] && [ ! -L "$RESTORED_THEME_BACKUP_PATH" ] \
+    || return 1
+  [ "$(/usr/bin/plutil -extract schemaVersion raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "1" ] \
+    && [ "$(/usr/bin/plutil -extract platform raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "darwin" ] \
+    && [ "$(/usr/bin/plutil -extract configPath raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" = "$HOME/.codex/config.toml" ] \
+    || return 1
+  keys="$(/usr/bin/plutil -extract values raw -o - "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null \
+    | LC_ALL=C /usr/bin/sort)" || return 1
+  [ "$keys" = $'appearanceDarkCodeThemeId\nappearanceTheme' ] || return 1
+  for key in appearanceTheme appearanceDarkCodeThemeId; do
+    value_type="$(/usr/bin/plutil -type "values.$key" "$RESTORED_THEME_BACKUP_PATH" 2>/dev/null)" \
+      || return 1
+    case "$value_type" in string|'(any)') ;; *) return 1 ;; esac
+  done
+}
+
+installed_engine_is_present() {
+  [ -d "$INSTALL_ROOT" ] && [ ! -L "$INSTALL_ROOT" ]
+}
+
+installed_engine_is_complete() {
+  native_restore_helper_is_safe "$INSTALL_ROOT" \
+    && [ -f "$INSTALL_ROOT/VERSION" ] && /usr/bin/cmp -s "$INSTALL_ROOT/VERSION" "$PROJECT_ROOT/VERSION" \
+    && [ -x "$INSTALL_ROOT/scripts/studio-adapter-macos.sh" ] \
+    && [ -x "$INSTALL_ROOT/scripts/start-dream-skin-macos.sh" ] \
+    && [ -x "$INSTALL_ROOT/scripts/pause-dream-skin-macos.sh" ] \
+    && [ -x "$INSTALL_ROOT/scripts/restore-dream-skin-macos.sh" ] \
+    && [ -x "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh" ] \
+    && [ -f "$INSTALL_ROOT/scripts/common-macos.sh" ] \
+    && [ -f "$INSTALL_ROOT/scripts/injector.mjs" ] \
+    && [ -f "$INSTALL_ROOT/scripts/theme-config.mjs" ]
 }
 
 if [ "$STUDIO_JSON" = "true" ]; then
@@ -194,13 +256,18 @@ if [ "$STUDIO_JSON" = "true" ]; then
   OK="true"
   ERROR="null"
   EXIT_CODE=0
+  ENGINE_COMPLETE="false"
+  ENGINE_PRESENT="false"
+  RESTORE_PROOF_VALID="false"
+  LIVE_BACKUP_SAFE="false"
 
-  if native_restore_helper_is_safe "$INSTALL_ROOT" \
-    && [ -f "$INSTALL_ROOT/VERSION" ] && /usr/bin/cmp -s "$INSTALL_ROOT/VERSION" "$PROJECT_ROOT/VERSION" \
-    && [ -x "$INSTALL_ROOT/scripts/studio-adapter-macos.sh" ] \
-    && [ -x "$INSTALL_ROOT/scripts/start-dream-skin-macos.sh" ] \
-    && [ -x "$INSTALL_ROOT/scripts/restore-dream-skin-macos.sh" ] \
-    && [ -f "$THEME_BACKUP_PATH" ] && [ -f "$THEME_DIR/theme.json" ]; then
+  if installed_engine_is_complete; then ENGINE_COMPLETE="true"; fi
+  if installed_engine_is_present; then ENGINE_PRESENT="true"; fi
+  if restored_theme_backup_is_valid; then RESTORE_PROOF_VALID="true"; fi
+  if [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]; then LIVE_BACKUP_SAFE="true"; fi
+  if [ "$ENGINE_COMPLETE" = "true" ] \
+    && [ "$LIVE_BACKUP_SAFE" = "true" ] \
+    && [ -f "$THEME_DIR/theme.json" ] && [ ! -L "$THEME_DIR/theme.json" ]; then
     INSTALL="ready"
   fi
 
@@ -212,7 +279,10 @@ if [ "$STUDIO_JSON" = "true" ]; then
     fi
   fi
 
-  case "$SESSION" in active|paused|stale) STUDIO_SESSION="$SESSION" ;; esac
+  case "$SESSION" in
+    active|paused|stale) STUDIO_SESSION="$SESSION" ;;
+    unknown) STUDIO_SESSION="stale" ;;
+  esac
   if [ "$STUDIO_SESSION" = "active" ] \
     && { [ "$INSTALL" != "ready" ] || [ "$CODEX" != "running" ]; }; then
     STUDIO_SESSION="stale"
@@ -230,7 +300,7 @@ if [ "$STUDIO_JSON" = "true" ]; then
     case "$STUDIO_SESSION" in
       active) ACTIONS='["pause","resume","restore","verify","uninstall"]' ;;
       paused) ACTIONS='["apply","resume","restore","verify","uninstall"]' ;;
-      stale) ACTIONS='["apply","restore","verify","uninstall"]' ;;
+      stale) ACTIONS='["restore","uninstall"]' ;;
       *)
         if [ "$CODEX" = "running" ]; then
           ACTIONS='["apply","restore","verify","uninstall"]'
@@ -238,7 +308,19 @@ if [ "$STUDIO_JSON" = "true" ]; then
           ACTIONS='["apply","restore","uninstall"]'
         fi
         ;;
-    esac
+      esac
+  elif [ "$ENGINE_PRESENT" = "true" ] && [ "$STUDIO_SESSION" = "stale" ] \
+    && { [ "$LIVE_BACKUP_SAFE" = "true" ] || [ "$RESTORE_PROOF_VALID" = "true" ]; }; then
+    ACTIONS='["restore","uninstall"]'
+  elif [ "$ENGINE_PRESENT" = "true" ] && [ "$STUDIO_SESSION" = "official" ] \
+    && [ ! -e "$STATE_PATH" ] && [ ! -L "$STATE_PATH" ] \
+    && [ ! -e "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]; then
+    if [ "$RESTORE_PROOF_VALID" = "true" ]; then
+      ACTIONS='["install","uninstall"]'
+    else
+      STUDIO_SESSION="stale"
+      ACTIONS='[]'
+    fi
   fi
 
   case "$CODEX" in

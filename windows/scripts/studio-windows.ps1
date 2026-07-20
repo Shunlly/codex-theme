@@ -3,6 +3,21 @@ $EngineRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot 'common-windows.ps1')
 . (Join-Path $PSScriptRoot 'theme-windows.ps1')
 
+function Get-DreamSkinSafeThemeDisplayName {
+  param([AllowNull()][object]$Value)
+  if ($null -eq $Value) { return $null }
+  $name = "$Value"
+  if ([string]::IsNullOrWhiteSpace($name) -or $name.IndexOfAny([char[]]@('/', '\')) -ge 0) { return $null }
+  foreach ($character in $name.ToCharArray()) {
+    $code = [int]$character
+    if ($code -lt 0x20 -or ($code -ge 0x7f -and $code -le 0x9f) -or
+      $character -eq [char]0x2028 -or $character -eq [char]0x2029) {
+      return $null
+    }
+  }
+  return $name
+}
+
 function New-DreamSkinStudioState {
   param(
     [string]$Install,
@@ -19,7 +34,7 @@ function New-DreamSkinStudioState {
     codex = $Codex
     session = $Session
     operation = $Operation
-    themeName = $ThemeName
+    themeName = Get-DreamSkinSafeThemeDisplayName -Value $ThemeName
     requiresRestart = $RequiresRestart
     availableActions = @($AvailableActions)
     verified = $Verified
@@ -66,6 +81,76 @@ function script:Test-DreamSkinStudioVersion {
     return [regex]::IsMatch($value, '\A1\.3\.0(?:\r\n|\n)?\z')
   } catch {
     return $false
+  }
+}
+
+function script:Test-DreamSkinStudioPathEntry {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  try {
+    $null = [IO.File]::GetAttributes([IO.Path]::GetFullPath($Path))
+    return $true
+  } catch [IO.FileNotFoundException] {
+    return $false
+  } catch [IO.DirectoryNotFoundException] {
+    return $false
+  }
+}
+
+function Get-DreamSkinStudioRecoveryState {
+  param([Parameter(Mandatory = $true)][string]$StateRoot)
+  Assert-DreamSkinNoReparseComponents -Path $StateRoot
+  if ((Test-DreamSkinStudioPathEntry -Path $StateRoot) -and
+    -not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
+    throw 'The Dream Skin state root is not a safe directory.'
+  }
+  $backup = Join-Path $StateRoot 'config.before-dream-skin.toml'
+  $backupMarker = Get-DreamSkinAppearanceMarkerPath -BackupPath $backup
+  $archive = Join-Path $StateRoot 'config.restored.toml'
+  $archiveMarker = Get-DreamSkinAppearanceMarkerPath -BackupPath $archive
+  $state = Join-Path $StateRoot 'state.json'
+  $paused = Join-Path $StateRoot 'paused'
+  $activeThemeRoot = Join-Path $StateRoot 'active-theme'
+  $activeTheme = Join-Path $activeThemeRoot 'theme.json'
+  foreach ($path in @($backup, $backupMarker, $archive, $archiveMarker, $state, $paused, $activeTheme)) {
+    Assert-DreamSkinNoReparseComponents -Path $path
+    if ((Test-DreamSkinStudioPathEntry -Path $path) -and
+      -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "A Dream Skin lifecycle artifact is not a safe file: $path"
+    }
+  }
+  Assert-DreamSkinNoReparseComponents -Path $activeThemeRoot
+  if ((Test-DreamSkinStudioPathEntry -Path $activeThemeRoot) -and
+    -not (Test-Path -LiteralPath $activeThemeRoot -PathType Container)) {
+    throw 'The Dream Skin active theme is not a safe directory.'
+  }
+
+  $liveBackup = Test-Path -LiteralPath $backup -PathType Leaf
+  $backupMarkerPresent = Test-Path -LiteralPath $backupMarker -PathType Leaf
+  $statePresent = Test-Path -LiteralPath $state -PathType Leaf
+  $pausedPresent = Test-Path -LiteralPath $paused -PathType Leaf
+  $activeThemePresent = Test-DreamSkinStudioPathEntry -Path $activeThemeRoot
+  $completionEvidence = Test-DreamSkinConfigCompletionEvidence -ArchivePath $archive
+  $completed = $completionEvidence -and -not $liveBackup -and -not $backupMarkerPresent -and
+    -not $statePresent -and -not $pausedPresent
+
+  $configManaged = $false
+  if (-not $liveBackup -and -not $completed -and -not $statePresent -and -not $pausedPresent) {
+    $configManaged = Test-DreamSkinBaseThemeManaged -ConfigPath (Join-Path $env:USERPROFILE '.codex\config.toml')
+  }
+  $neverApplied = -not $liveBackup -and -not $backupMarkerPresent -and -not $completionEvidence -and
+    -not $statePresent -and -not $pausedPresent -and -not $activeThemePresent -and -not $configManaged
+  $unsafe = -not $liveBackup -and -not $completed -and -not $neverApplied
+  return [pscustomobject]@{
+    LiveBackup = $liveBackup
+    BackupMarkerPresent = $backupMarkerPresent
+    CompletionEvidence = $completionEvidence
+    StatePresent = $statePresent
+    PausedPresent = $pausedPresent
+    ActiveThemePresent = $activeThemePresent
+    ConfigManaged = $configManaged
+    Completed = $completed
+    NeverApplied = $neverApplied
+    Unsafe = $unsafe
   }
 }
 
@@ -143,11 +228,12 @@ function Get-DreamSkinStudioStatus {
   param([switch]$Deep)
 
   $stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
+  $recovery = Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot
   $install = if (Test-DreamSkinStudioInstalled -StateRoot $stateRoot) { 'ready' } else { 'not-installed' }
   $statePath = Join-Path $stateRoot 'state.json'
   $savedState = $null
   $stateDamaged = $false
-  if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+  if ($recovery.StatePresent) {
     try {
       $savedState = Read-DreamSkinState -Path $statePath
       if ($null -eq $savedState) { $stateDamaged = $true }
@@ -221,6 +307,7 @@ function Get-DreamSkinStudioStatus {
     $session = 'paused'
   }
   if ($session -eq 'active' -and $install -ne 'ready') { $session = 'stale' }
+  if ($recovery.Unsafe) { $session = 'stale' }
 
   try {
     $theme = Read-DreamSkinTheme -ThemeDirectory (Join-Path $stateRoot 'active-theme') -SkipImageMetadata
@@ -256,7 +343,7 @@ function Get-DreamSkinStudioStatus {
     switch ($session) {
       'active' { $availableActions = @('pause', 'resume', 'restore', 'verify', 'uninstall') }
       'paused' { $availableActions = @('apply', 'resume', 'restore', 'verify', 'uninstall') }
-      'stale' { $availableActions = @('apply', 'restore', 'verify', 'uninstall') }
+      'stale' { $availableActions = @('restore', 'uninstall') }
       default {
         $availableActions = if ($codexState -eq 'running') {
           @('apply', 'restore', 'verify', 'uninstall')
@@ -265,6 +352,12 @@ function Get-DreamSkinStudioStatus {
         }
       }
     }
+  } elseif ($recovery.Completed -or $recovery.NeverApplied) {
+    $availableActions = @('install', 'uninstall')
+  } elseif ($session -eq 'stale' -and $recovery.LiveBackup) {
+    $availableActions = @('restore', 'uninstall')
+  } elseif ($recovery.Unsafe) {
+    $availableActions = @()
   }
 
   $error = $null
@@ -274,7 +367,8 @@ function Get-DreamSkinStudioStatus {
     $error = New-DreamSkinStudioError -Code 'CODEX_FIRST_RUN_REQUIRED' -Message 'Open Codex and complete first-run setup.' -RecoveryActions @('open-codex', 'retry', 'cancel')
   }
   if ($session -eq 'stale') {
-    $error = New-DreamSkinStudioError -Code 'STATE_UNSAFE' -Message 'Theme state needs recovery before it can be used.' -RecoveryActions @('restore', 'diagnostics', 'cancel')
+    $recoveryActions = if ($recovery.LiveBackup) { @('restore', 'diagnostics', 'cancel') } else { @('diagnostics', 'cancel') }
+    $error = New-DreamSkinStudioError -Code 'STATE_UNSAFE' -Message 'Theme state needs recovery before it can be used.' -RecoveryActions $recoveryActions
   }
   if ($runtimeInvalid) {
     $error = New-DreamSkinStudioError -Code 'RUNTIME_INVALID' -Message 'The Studio runtime is unavailable.' -RecoveryActions @('diagnostics', 'cancel')

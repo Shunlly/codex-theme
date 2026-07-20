@@ -34,19 +34,14 @@ for (const contract of [
 ]) contains(builder, contract, `builder contract missing: ${contract}`);
 assert.doesNotMatch(builder, /studio-release-contract\.test\.mjs/, "builder duplicates the aggregate portable contract gate");
 for (const contract of [
-  "function Test-DreamSkinPathEntry",
   "function Remove-DreamSkinUserThemeData",
-  "$appearanceMarker = Get-DreamSkinAppearanceMarkerPath -BackupPath $restoreBackup",
   "$status.State.codex -ne 'running'",
-  "Assert-DreamSkinNoReparseComponents -Path $stateRoot",
-  "foreach ($path in @($restoreBackup, $appearanceMarker, $statePath, $pausedPath))",
-  "Assert-DreamSkinNoReparseComponents -Path $path",
-  "Test-DreamSkinPathEntry -Path $path",
+  "Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot",
+  "$recovery.Completed -or $recovery.NeverApplied",
 ]) contains(adapter, contract, `uninstall recovery proof is missing: ${contract}`);
 assert.equal((adapter.match(/Remove-DreamSkinUserThemeData -StateRoot \$stateRoot/g) || []).length, 2,
   "ordinary and already-restored uninstall do not share theme deletion");
-assert.doesNotMatch(adapter, /Test-Path -LiteralPath \$restoreBackup -PathType Leaf/,
-  "a non-file backup entry can be mistaken for completed restoration");
+contains(adapter, "$uninstallRecoveryAvailable", "uninstall is not gated by shared safe recovery classification");
 for (const contract of [
   "git -C $RepoRoot write-tree",
   "git -C $RepoRoot read-tree $IndexTree",
@@ -144,6 +139,7 @@ contains(app, '"--prepare-uninstall"', "prepare-uninstall argument missing");
 contains(app, "Shutdown(1)", "unknown arguments or mutex contention do not fail closed");
 
 const window = read("windows/studio/MainWindow.xaml.cs");
+const xaml = read("windows/studio/MainWindow.xaml");
 contains(window, "EngineOperation.Uninstall", "existing uninstall operation is not reused");
 contains(window, "DispatchAsync", "existing dispatcher is not reused");
 contains(window, "Shutdown(exitCode)", "prepare result is not returned to Inno");
@@ -154,13 +150,98 @@ contains(window, "if (!bypassAvailability && !CanRun(operation)) return false;",
   "prepare-uninstall bypass is not scoped to the dispatcher availability guard");
 contains(window, "MessageBoxButton.YesNo", "prepare-uninstall confirmation is not yes/no");
 for (const contract of [
-  "internal static bool AllowsTermination(bool busy) => !busy;",
-  'Items["exit"]!.Enabled = AllowsTermination(_busy)',
-  "if (!AllowsTermination(_busy)) return Task.CompletedTask;",
-  "if (!_explicitExit && !AllowsTermination(_busy))",
+  "internal static bool AllowsTermination(bool busy, bool handoffReserved = false) => !busy && !handoffReserved;",
+  'Items["exit"]!.Enabled = AllowsTermination(_busy, _handoff.IsActive)',
+  "if (!AllowsTermination(_busy, _handoff.IsActive)) return Task.CompletedTask;",
+  "if (!_explicitExit && !AllowsTermination(_busy, _handoff.IsActive))",
 ]) contains(window, contract, `busy termination policy missing: ${contract}`);
 assert.doesNotMatch(window, /_operationCancellation\.Cancel\(\)/, "normal UI termination still cancels the engine tree");
 assert.doesNotMatch(app, /DeleteUserThemes/);
+
+const config = read("windows/scripts/config-utf8.ps1");
+contains(config, "$configCommitted = $false", "config transaction does not track config commit");
+contains(config, "$configCommitted = $true", "config transaction never records config commit");
+contains(config, "$backupCreated -and -not $configCommitted", "marker failure can delete the only recovery backup after config commit");
+const configCommit = config.indexOf("Write-DreamSkinUtf8FileAtomically -Path $ConfigPath");
+const configCommitted = config.indexOf("$configCommitted = $true", configCommit);
+const markerPublish = config.indexOf("Write-DreamSkinAppearanceMarker", configCommit);
+assert.ok(configCommit >= 0 && configCommitted > configCommit && markerPublish > configCommitted,
+  "config commit is not recorded before marker publication");
+
+const restore = read("windows/scripts/restore-dream-skin.ps1");
+contains(restore, "config.restored.toml", "restore completion archive is not fixed and retryable");
+contains(restore, "$transactionCommitted = $false", "restore transaction has no commit boundary");
+contains(restore, "$transactionCommitted = $true", "restore transaction never commits");
+contains(restore, "Remove-DreamSkinRecoveryArtifact", "state and paused cleanup are not strict");
+contains(restore, "Codex could not be reopened automatically. The restore is complete", "post-commit relaunch failure is not nonfatal");
+contains(restore, "Get-DreamSkinRecoveryArtifactSnapshot", "restore cannot roll lifecycle artifacts back exactly");
+contains(restore, "Restore-DreamSkinRecoveryArtifactSnapshot", "restore does not restore entry artifacts on failure");
+contains(restore, "Publish-DreamSkinConfigBackupArchive", "restore consumes its live backup before publishing completion evidence");
+const stateCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path $StatePath");
+const pauseCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')");
+const archiveCommit = restore.indexOf("Publish-DreamSkinConfigBackupArchive");
+const markerCleanupToken = "Remove-DreamSkinRecoveryArtifact -Path $backupMarkerPath";
+const markerCommit = restore.indexOf(markerCleanupToken, pauseCommit);
+const backupCommit = restore.indexOf("Remove-DreamSkinRecoveryArtifact -Path $backup",
+  markerCommit + markerCleanupToken.length);
+const committed = restore.indexOf("$transactionCommitted = $true", backupCommit);
+const relaunch = restore.indexOf("Start-Process -FilePath $relaunchCodex.Executable", committed);
+assert.ok(archiveCommit >= 0 && stateCommit > archiveCommit && pauseCommit > stateCommit &&
+  markerCommit > pauseCommit && backupCommit > markerCommit && committed > backupCommit && relaunch > committed,
+"restore does not publish proof, stage cleanup, remove live recovery artifacts, commit, then relaunch");
+
+contains(adapter, "$Operation = 'status'", "missing or unknown operation is not normalized to Protocol v1 status");
+contains(adapter, "$restoreRecoveryAvailable", "node-free Restore lacks an artifact-backed recovery gate");
+contains(adapter, "CODEX_NOT_INSTALLED", "Restore cannot pass a recoverable missing-Codex status");
+const studioWindows = read("windows/scripts/studio-windows.ps1");
+contains(studioWindows, "Get-DreamSkinSafeThemeDisplayName", "theme names are not sanitized at the protocol boundary");
+contains(studioWindows, "[char]0x2028", "Unicode line separators are not redacted from theme display names");
+contains(studioWindows, "Get-DreamSkinStudioRecoveryState", "status and adapter do not share recovery classification");
+contains(studioWindows, "'stale' { $availableActions = @('restore', 'uninstall') }",
+  "stale status still advertises Apply or Verify");
+contains(studioWindows, "$completed = $completionEvidence -and -not $liveBackup -and -not $backupMarkerPresent",
+  "fixed completion evidence ignores a leftover live backup marker");
+contains(studioWindows, "$activeThemePresent = Test-DreamSkinStudioPathEntry -Path $activeThemeRoot",
+  "never-applied recovery ignores an orphan active-theme entry");
+
+for (const contract of [
+  'x:Name="RefreshButton"', 'Click="RefreshButton_Click"',
+  'x:Name="VerifyButton"', 'Click="VerifyButton_Click"',
+]) contains(xaml, contract, `Windows UI control missing: ${contract}`);
+for (const contract of [
+  "RefreshButton.IsEnabled", "VerifyButton.IsEnabled", "RefreshButton_Click", "VerifyButton_Click",
+  "DispatchAsync(EngineOperation.Verify)", "RefreshStatusAsync()", "_confirming = true",
+]) contains(window, contract, `Windows UI dispatcher/busy contract missing: ${contract}`);
+const uninstallStart = window.indexOf("UninstallButton_Click");
+const uninstallHandler = window.slice(uninstallStart, window.indexOf("ShowSafeOperationFailure", uninstallStart));
+assert.match(uninstallHandler, /_confirming = true[\s\S]*ShowDialog\(\)[\s\S]*finally[\s\S]*_confirming = false/,
+  "uninstall modal does not hold confirmation policy for its full lifetime");
+
+const coordinatorPath = path.join(repo, "windows/studio/SingleInstanceCoordinator.cs");
+assert.ok(fs.existsSync(coordinatorPath), "per-user single-instance IPC coordinator is missing");
+const coordinator = fs.existsSync(coordinatorPath) ? fs.readFileSync(coordinatorPath, "utf8") : "";
+for (const contract of [
+  "NamedPipeServerStream", "NamedPipeClientStream", "PipeOptions.CurrentUserOnly",
+  '"activate"', '"prepare-uninstall"', "OwnerProcessId", "WaitForExit", "CancellationTokenSource",
+  "RequestReadTimeout", "MonitorClientDisconnectAsync", "responseTimeout",
+]) contains(coordinator, contract, `single-instance handoff missing: ${contract}`);
+contains(app, "SingleInstanceCoordinator", "App startup does not use the IPC coordinator");
+contains(app, "prepareUninstall ? null : TimeSpan.FromSeconds(15)",
+  "interactive prepare-uninstall still has activation's short response deadline");
+contains(window, "ActivateFromSecondInstance", "existing owner cannot activate from a second launch");
+contains(window, "PrepareUninstallFromOwnerAsync", "existing owner cannot perform delegated uninstall");
+contains(window, "TryReserveHandoff", "owner promises release without synchronously reserving the UI");
+contains(window, "CancelHandoffReservation", "failed response delivery cannot cancel the handoff reservation");
+
+contains(inno, "VersionInfoVersion={#AppVersion}.0", "setup FileVersion is not derived from windows/VERSION");
+contains(inno, "VersionInfoProductVersion={#AppVersion}.0", "setup ProductVersion is not derived from windows/VERSION");
+contains(inno, "VersionInfoProductTextVersion={#AppVersion}", "setup textual ProductVersion is not derived from windows/VERSION");
+contains(builder, "$setupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($setupPath)",
+  "matching-host builder does not inspect setup PE metadata");
+contains(builder, "$setupVersionInfo.ProductVersion -cne $Version", "setup ProductVersion is not verified");
+contains(builder, "$setupVersionInfo.FileVersion -cne \"$Version.0\"", "setup FileVersion is not verified");
+assert.ok(builder.indexOf("$setupVersionInfo =", builder.indexOf("$setupPath =")) <
+  builder.indexOf("Sign-And-Verify -Path $setupPath"), "setup metadata is checked only after signing/publication");
 
 const status = read("windows/scripts/status-dream-skin.ps1");
 const protocol = read("windows/studio/EngineProtocol.cs");

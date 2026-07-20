@@ -84,7 +84,16 @@ final class StudioAppController: NSObject, ObservableObject, NSApplicationDelega
     }
 
     func diagnostics() {
-        Task { await model.refresh(.status) }
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/CodexDreamSkinStudio", isDirectory: true)
+        guard NSWorkspace.shared.open(directory) else {
+            let alert = NSAlert()
+            alert.messageText = "Diagnostics could not be opened."
+            alert.informativeText = "Try again, or reinstall Dream Skin if the problem continues."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
     }
 
     func quit() {

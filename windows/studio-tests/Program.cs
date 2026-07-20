@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -21,6 +22,34 @@ static async Task ThrowsAsync<T>(Func<Task> action, string message) where T : Ex
   try { await action(); }
   catch (T) { return; }
   throw new InvalidOperationException(message);
+}
+
+static async Task<Process> StartInstanceOwnerAsync(string scope, string mode, string readyPath, string tracePath)
+{
+  var process = Process.Start(new ProcessStartInfo
+  {
+    FileName = Environment.ProcessPath!,
+    UseShellExecute = false,
+    ArgumentList = { "--single-instance-owner", scope, mode, readyPath, tracePath }
+  })!;
+  var deadline = DateTime.UtcNow.AddSeconds(5);
+  while (!File.Exists(readyPath) && DateTime.UtcNow < deadline)
+  {
+    if (process.HasExited) throw new InvalidOperationException("Controlled single-instance owner exited before readiness.");
+    await Task.Delay(20);
+  }
+  if (!File.Exists(readyPath)) throw new InvalidOperationException("Controlled single-instance owner did not become ready.");
+  return process;
+}
+
+static void StopControlledProcess(Process process)
+{
+  if (!process.HasExited)
+  {
+    try { process.Kill(entireProcessTree: true); } catch { }
+    process.WaitForExit(5000);
+  }
+  process.Dispose();
 }
 
 static string Mutate(string json, Action<JsonObject> mutation)
@@ -57,6 +86,57 @@ static async Task RunChildAsync(string[] arguments)
       return;
     case "--engine-grandchild":
       await Task.Delay(Timeout.InfiniteTimeSpan);
+      return;
+    case "--single-instance-owner":
+      var scope = arguments[1];
+      var mode = arguments[2];
+      var readyPath = arguments[3];
+      var tracePath = arguments[4];
+      using (var coordinator = new SingleInstanceCoordinator(scope))
+      {
+        if (!coordinator.TryAcquireOwnership()) throw new InvalidOperationException("Controlled owner could not acquire ownership.");
+        if (mode != "no-server")
+        {
+          var reservation = new HandoffReservation();
+          coordinator.StartServer(async (request, cancellationToken) =>
+          {
+            File.AppendAllText(tracePath, request.Command + Environment.NewLine);
+            if (mode == "delayed-response") await Task.Delay(TimeSpan.FromSeconds(16), cancellationToken);
+            if (mode == "disconnect-before-mutation")
+            {
+              try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
+              catch (OperationCanceledException)
+              {
+                File.AppendAllText(tracePath, "cancelled-before-mutation" + Environment.NewLine);
+                return new SingleInstanceResponse(1, Environment.ProcessId, false);
+              }
+              File.AppendAllText(tracePath, "mutation-entered" + Environment.NewLine);
+            }
+            var releaseOwner = request.Command == "prepare-uninstall" && mode == "success" ||
+              request.Command == "activate" && mode == "version-handoff" &&
+              !String.Equals(request.ExecutablePath, Environment.ProcessPath, StringComparison.OrdinalIgnoreCase);
+            var exitCode = request.Command == "prepare-uninstall" ? mode switch
+            {
+              "failure" => 7,
+              "busy" => 9,
+              "delayed-response" => 7,
+              _ => 0
+            } : 0;
+            if (releaseOwner && !reservation.TryBegin(busy: false, confirming: false)) {
+              return new SingleInstanceResponse(1, Environment.ProcessId, false);
+            }
+            return new SingleInstanceResponse(exitCode, Environment.ProcessId, releaseOwner);
+          }, (response, delivered) =>
+          {
+            if (!response.ReleaseOwner) return;
+            if (delivered) Environment.Exit(0);
+            reservation.Cancel();
+            File.AppendAllText(tracePath, "reservation-cancelled" + Environment.NewLine);
+          });
+        }
+        await File.WriteAllTextAsync(readyPath, Environment.ProcessId.ToString());
+        await Task.Delay(Timeout.InfiniteTimeSpan);
+      }
       return;
   }
   throw new InvalidOperationException("Unknown controlled child mode.");
@@ -113,6 +193,141 @@ Throws<ArgumentException>(() => EngineClient.BuildArguments(EngineOperation.Appl
 Throws<ArgumentException>(() => EngineClient.BuildArguments(EngineOperation.Pause, adapterPath, true, false, false, false), "Pause authorization was accepted.");
 Assert(!MainWindow.AllowsTermination(busy: true), "Busy window termination was allowed.");
 Assert(MainWindow.AllowsTermination(busy: false), "Idle window termination was vetoed.");
+Assert(MainWindow.AllowsRefresh(busy: false, confirming: false), "Idle status refresh was unavailable.");
+Assert(!MainWindow.AllowsRefresh(busy: true, confirming: false), "Busy status refresh was allowed.");
+Assert(!MainWindow.AllowsRefresh(busy: false, confirming: true), "Confirmation allowed a concurrent status refresh.");
+var handoffReservation = new HandoffReservation();
+Assert(handoffReservation.TryBegin(busy: false, confirming: false), "Idle handoff could not reserve the owner.");
+Assert(!MainWindow.AllowsDispatch(busy: false, confirming: false, handoffReservation.IsActive),
+  "An operation entered after the owner promised release.");
+Assert(!MainWindow.AllowsTermination(busy: false, handoffReserved: true),
+  "Owner exit bypassed a pending release response.");
+handoffReservation.Cancel();
+Assert(MainWindow.AllowsDispatch(busy: false, confirming: false, handoffReservation.IsActive),
+  "Failed response delivery did not release the handoff reservation.");
+
+var instanceRoot = Path.Combine(Path.GetTempPath(), $"dream-skin-instance-{Guid.NewGuid():N}");
+Directory.CreateDirectory(instanceRoot);
+try
+{
+  var successScope = $"success-{Guid.NewGuid():N}";
+  var successReady = Path.Combine(instanceRoot, "success.ready");
+  var successTrace = Path.Combine(instanceRoot, "success.trace");
+  var successOwner = await StartInstanceOwnerAsync(successScope, "success", successReady, successTrace);
+  try
+  {
+    using var client = new SingleInstanceCoordinator(successScope);
+    Assert(!client.TryAcquireOwnership(), "Second instance acquired ownership while the owner was alive.");
+    var activated = await client.ForwardAsync("activate", Environment.ProcessPath!,
+      TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    Assert(activated.ExitCode == 0 && activated.OwnerProcessId == successOwner.Id && !activated.ReleaseOwner,
+      "Ordinary activation did not return the live owner identity.");
+    Assert(!successOwner.HasExited, "Ordinary activation terminated the owner.");
+    var prepared = await client.ForwardAsync("prepare-uninstall", Environment.ProcessPath!,
+      TimeSpan.FromSeconds(5), responseTimeout: null);
+    Assert(prepared.ExitCode == 0 && prepared.OwnerProcessId == successOwner.Id && prepared.ReleaseOwner,
+      "Successful prepare-uninstall did not propagate success and release intent.");
+    Assert(successOwner.HasExited, "Successful prepare-uninstall returned before the owner executable was released.");
+    Assert((await File.ReadAllTextAsync(successTrace)).Contains("activate") &&
+      (await File.ReadAllTextAsync(successTrace)).Contains("prepare-uninstall"),
+      "Owner did not receive both control commands.");
+  }
+  finally { StopControlledProcess(successOwner); }
+
+  foreach (var (mode, expectedExit) in new[] { ("failure", 7), ("busy", 9) })
+  {
+    var scope = $"{mode}-{Guid.NewGuid():N}";
+    var ready = Path.Combine(instanceRoot, $"{mode}.ready");
+    var trace = Path.Combine(instanceRoot, $"{mode}.trace");
+    var owner = await StartInstanceOwnerAsync(scope, mode, ready, trace);
+    try
+    {
+      using var client = new SingleInstanceCoordinator(scope);
+      var response = await client.ForwardAsync("prepare-uninstall", Environment.ProcessPath!,
+        TimeSpan.FromSeconds(5), responseTimeout: null);
+      Assert(response.ExitCode == expectedExit && !response.ReleaseOwner,
+        $"{mode} prepare-uninstall did not preserve its exact failure code.");
+      Assert(!owner.HasExited, $"{mode} prepare-uninstall terminated the owner.");
+    }
+    finally { StopControlledProcess(owner); }
+  }
+
+  var timeoutScope = $"timeout-{Guid.NewGuid():N}";
+  var timeoutOwner = await StartInstanceOwnerAsync(timeoutScope, "no-server",
+    Path.Combine(instanceRoot, "timeout.ready"), Path.Combine(instanceRoot, "timeout.trace"));
+  try
+  {
+    using var client = new SingleInstanceCoordinator(timeoutScope);
+    await ThrowsAsync<TimeoutException>(async () =>
+      await client.ForwardAsync("activate", Environment.ProcessPath!,
+        TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(250)),
+      "A missing owner pipe did not fail within the response timeout.");
+  }
+  finally { StopControlledProcess(timeoutOwner); }
+
+  var handoffScope = $"handoff-{Guid.NewGuid():N}";
+  var handoffOwner = await StartInstanceOwnerAsync(handoffScope, "version-handoff",
+    Path.Combine(instanceRoot, "handoff.ready"), Path.Combine(instanceRoot, "handoff.trace"));
+  try
+  {
+    using var client = new SingleInstanceCoordinator(handoffScope);
+    var response = await client.ForwardAsync("activate", @"C:\new-version\CodexDreamSkinStudio.exe",
+      TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    Assert(response.ExitCode == 0 && response.ReleaseOwner && handoffOwner.HasExited,
+      "Version handoff returned before the prior executable was released.");
+  }
+  finally { StopControlledProcess(handoffOwner); }
+
+  var delayedScope = $"delayed-{Guid.NewGuid():N}";
+  var delayedOwner = await StartInstanceOwnerAsync(delayedScope, "delayed-response",
+    Path.Combine(instanceRoot, "delayed.ready"), Path.Combine(instanceRoot, "delayed.trace"));
+  try
+  {
+    using var client = new SingleInstanceCoordinator(delayedScope);
+    var elapsed = Stopwatch.StartNew();
+    var response = await client.ForwardAsync("prepare-uninstall", Environment.ProcessPath!,
+      TimeSpan.FromSeconds(5), responseTimeout: null);
+    Assert(response.ExitCode == 7 && elapsed.Elapsed >= TimeSpan.FromSeconds(15),
+      "Interactive prepare-uninstall retained activation's short response deadline.");
+  }
+  finally { StopControlledProcess(delayedOwner); }
+
+  var silentScope = $"silent-{Guid.NewGuid():N}";
+  var silentOwner = await StartInstanceOwnerAsync(silentScope, "failure",
+    Path.Combine(instanceRoot, "silent.ready"), Path.Combine(instanceRoot, "silent.trace"));
+  try
+  {
+    using var silent = new NamedPipeClientStream(".", SingleInstanceCoordinator.GetPipeName(silentScope),
+      PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+    await silent.ConnectAsync(5000);
+    await Task.Delay(SingleInstanceCoordinator.RequestReadTimeout + TimeSpan.FromMilliseconds(500));
+    using var client = new SingleInstanceCoordinator(silentScope);
+    var response = await client.ForwardAsync("activate", Environment.ProcessPath!,
+      TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    Assert(response.ExitCode == 0, "A connected silent client monopolized the owner pipe.");
+  }
+  finally { StopControlledProcess(silentOwner); }
+
+  var disconnectScope = $"disconnect-{Guid.NewGuid():N}";
+  var disconnectTrace = Path.Combine(instanceRoot, "disconnect.trace");
+  var disconnectOwner = await StartInstanceOwnerAsync(disconnectScope, "disconnect-before-mutation",
+    Path.Combine(instanceRoot, "disconnect.ready"), disconnectTrace);
+  try
+  {
+    using var client = new SingleInstanceCoordinator(disconnectScope);
+    await ThrowsAsync<TimeoutException>(async () => await client.ForwardAsync("prepare-uninstall",
+      Environment.ProcessPath!, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(250)),
+      "A disconnected prepare-uninstall client did not time out.");
+    var deadline = DateTime.UtcNow.AddSeconds(5);
+    while ((!File.Exists(disconnectTrace) || !File.ReadAllText(disconnectTrace).Contains("cancelled-before-mutation")) &&
+      DateTime.UtcNow < deadline) await Task.Delay(20);
+    var trace = File.ReadAllText(disconnectTrace);
+    Assert(trace.Contains("cancelled-before-mutation") && !trace.Contains("mutation-entered"),
+      "Owner mutation started after the prepare-uninstall client disconnected.");
+  }
+  finally { StopControlledProcess(disconnectOwner); }
+}
+finally { Directory.Delete(instanceRoot, recursive: true); }
 
 var progress = new List<EngineProgress>();
 EngineProtocol.ParseProgress("DREAM_SKIN_PROGRESS=checking\r\nDREAM_SKIN_PROGRESS=applying\r\n", new InlineProgress<EngineProgress>(progress.Add));

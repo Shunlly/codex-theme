@@ -88,7 +88,7 @@ try {
       await fs.readFile(fixture.config, "utf8"),
       `[desktop]\nkeepMe = true\n${assignment}\n`,
     );
-    await assert.rejects(fs.access(fixture.backup), { code: "ENOENT" });
+    await fs.access(fixture.backup);
   }
 
   const layoutCases = [
@@ -108,6 +108,7 @@ try {
     const result = await runThemeConfig("restore", fixture.config, fixture.backup);
     assert.equal(result.code, 0, `${label}\n${result.stderr}`);
     assert.equal(await fs.readFile(fixture.config, "utf8"), expected);
+    await fs.access(fixture.backup);
   }
 
   const bom = Buffer.from([0xef, 0xbb, 0xbf]);
@@ -122,6 +123,7 @@ try {
     await fs.readFile(bomFixture.config),
     Buffer.concat([bom, Buffer.from(`[desktop]\nappearanceTheme = "system"\n`)]),
   );
+  await fs.access(bomFixture.backup);
 
   const unrelatedEscaped = await writeFixture(
     "unrelated-escaped-keys",
@@ -141,6 +143,7 @@ try {
 appearanceTheme = "system"
 `,
   );
+  await fs.access(unrelatedEscaped.backup);
 
   const ambiguousLayouts = [
     `["desktop"]\nkeepMe = true\n`,
@@ -207,6 +210,22 @@ variant = "dark"
     await fs.access(fixture.backup);
     await assert.rejects(fs.access(`${fixture.config}.dream-skin.lock`), { code: "ENOENT" });
   }
+
+  const invalidExistingBackup = await writeFixture(
+    "invalid-existing-install-backup",
+    `appearanceTheme = "system"`,
+  );
+  await fs.writeFile(invalidExistingBackup.backup, "{}\n");
+  const invalidExistingConfigBytes = await fs.readFile(invalidExistingBackup.config);
+  const invalidExistingBackupBytes = await fs.readFile(invalidExistingBackup.backup);
+  const invalidExistingInstall = await runThemeConfig(
+    "install",
+    invalidExistingBackup.config,
+    invalidExistingBackup.backup,
+  );
+  assert.notEqual(invalidExistingInstall.code, 0, "install accepted an invalid existing recovery backup");
+  assert.deepEqual(await fs.readFile(invalidExistingBackup.config), invalidExistingConfigBytes);
+  assert.deepEqual(await fs.readFile(invalidExistingBackup.backup), invalidExistingBackupBytes);
 
   console.log("PASS: theme config install/restore accepts only editable TOML and complete single-line string backups.");
 } finally {

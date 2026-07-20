@@ -369,9 +369,18 @@ async function main() {
       content = `${content.trimEnd()}${preferredNewline}${preferredNewline}[desktop]${preferredNewline}`;
       section = desktopSection(content);
     }
+    let existingBackup = null;
+    let backupExists = false;
     try {
-      await fs.access(backupPath);
-    } catch {
+      const backupBytes = await fs.readFile(backupPath);
+      existingBackup = JSON.parse(decodeStrictUtf8(backupBytes, "Theme backup"));
+      backupExists = true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw new Error(`Could not read the theme backup: ${error.message}`);
+    }
+    if (backupExists) {
+      validateBackup(existingBackup);
+    } else {
       const values = {};
       for (const key of settings.keys()) {
         const { matches } = settingLines(section.body, key);
@@ -420,7 +429,6 @@ async function main() {
     const hasSavedSetting = [...settings.keys()].some((key) => backup.values[key]);
     if (!hasSavedSetting) {
       await assertConfigUnchanged(originalBytes, originalStat);
-      await fs.unlink(backupPath);
       console.log("Restored the saved base-theme keys.");
       return;
     }
@@ -435,7 +443,6 @@ async function main() {
   assertEditableToml(restored);
   await assertConfigUnchanged(originalBytes, originalStat);
   await atomicWrite(configPath, restored, originalStat.mode & 0o777, originalBytes, originalStat);
-  await fs.unlink(backupPath);
   console.log("Restored the saved base-theme keys.");
 }
 

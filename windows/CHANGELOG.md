@@ -13,6 +13,10 @@
 
 - Apps & Features removal is idempotent after a never-applied or completed restore and can recover when Codex is missing, while unsafe state, reparse points, cancellation, and restore failures still block removal.
 - Normal window close and tray Exit are disabled while a Studio operation is active so the adapter process tree is not left running without its UI.
+- Config marker publication failures retain the exact recovery backup. Restore now publishes fixed `config.restored.toml` completion proof, removes lifecycle state and live recovery artifacts inside the same rollback-protected transaction, commits before relaunch, and never rolls back settings written after Codex reopens.
+- A per-user current-user-only named pipe activates a hidden resident window, delegates Apps & Features removal with exact exit propagation, releases the owning executable before success, and hands ownership to a newly installed version.
+- Studio now exposes action-gated Verify and Refresh controls, blocks tray mutations for the full uninstall dialog lifetime, and redacts path-like or control-character theme display names while preserving Chinese names.
+- Windows setup executables now derive file and product version resources from `windows/VERSION`, and the matching-host builder verifies that metadata before signing or publication.
 
 ### Verification
 

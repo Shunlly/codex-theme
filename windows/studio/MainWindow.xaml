@@ -36,6 +36,8 @@
                   automation:AutomationProperties.Name="主要操作" ToolTip="安装、应用或继续使用主题" />
           <Button x:Name="PauseButton" Content="暂停" Click="PauseButton_Click"
                   automation:AutomationProperties.Name="暂停主题" ToolTip="暂停显示主题，保留可继续使用的会话" />
+          <Button x:Name="VerifyButton" Content="验证" Click="VerifyButton_Click"
+                  automation:AutomationProperties.Name="验证主题" ToolTip="验证当前主题状态" />
         </WrapPanel>
       </StackPanel>
 
@@ -49,6 +51,8 @@
                     automation:AutomationProperties.Name="完全恢复 Codex" ToolTip="关闭主题会话并恢复标准外观" />
             <Button x:Name="DiagnosticsButton" Content="打开诊断" Click="DiagnosticsButton_Click"
                     automation:AutomationProperties.Name="打开诊断文件夹" ToolTip="在文件资源管理器中打开诊断文件夹" />
+            <Button x:Name="RefreshButton" Content="刷新" Click="RefreshButton_Click"
+                    automation:AutomationProperties.Name="刷新状态" ToolTip="重新检查当前状态" />
           </WrapPanel>
         </StackPanel>
       </Border>

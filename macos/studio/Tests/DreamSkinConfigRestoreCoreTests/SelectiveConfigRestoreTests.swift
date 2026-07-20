@@ -90,7 +90,7 @@ final class SelectiveConfigRestoreTests: TestCase {
             keepMe = "保留"
             """.appending("\n").utf8)
         )
-        XCTAssertFalse(fileManager.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: fixture.backup.path))
     }
 
 #if !canImport(XCTest)
@@ -364,7 +364,7 @@ final class SelectiveConfigRestoreTests: TestCase {
                 try String(contentsOf: fixture.config, encoding: .utf8),
                 "[desktop]\nkeepMe = true\n\(assignment)\n"
             )
-            XCTAssertFalse(fileManager.fileExists(atPath: fixture.backup.path))
+            XCTAssertTrue(fileManager.fileExists(atPath: fixture.backup.path))
         }
     }
 
@@ -552,7 +552,7 @@ final class SelectiveConfigRestoreTests: TestCase {
 #if !canImport(XCTest)
     @Test
 #endif
-    func testAllNullSettingsWithoutDesktopDeleteBackupWithoutRewritingConfig() throws {
+    func testAllNullSettingsWithoutDesktopPreserveBackupWithoutRewritingConfig() throws {
         let fixture = try makeFixture(config: "model = \"gpt-5\"\nkeepMe = true\n")
         let originalIdentity = try fileIdentity(fixture.config)
 
@@ -560,13 +560,13 @@ final class SelectiveConfigRestoreTests: TestCase {
 
         XCTAssertEqual(try String(contentsOf: fixture.config, encoding: .utf8), "model = \"gpt-5\"\nkeepMe = true\n")
         XCTAssertEqual(try fileIdentity(fixture.config), originalIdentity)
-        XCTAssertFalse(fileManager.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: fixture.backup.path))
     }
 
 #if !canImport(XCTest)
     @Test
 #endif
-    func testSuccessfulRestoreAtomicallyReplacesConfigBeforeDeletingBackup() throws {
+    func testSuccessfulRestoreAtomicallyReplacesConfigAndPreservesBackupForLifecycleCommit() throws {
         let fixture = try makeFixture(
             config: "[desktop]\nappearanceTheme = \"dark\"\nkeepMe = true\n",
             appearanceTheme: "appearanceTheme = \"system\"",
@@ -580,7 +580,7 @@ final class SelectiveConfigRestoreTests: TestCase {
         XCTAssertEqual(try String(contentsOf: fixture.config, encoding: .utf8), "[desktop]\nappearanceTheme = \"system\"\nkeepMe = true\n")
         XCTAssertNotEqual(try fileIdentity(fixture.config), originalIdentity)
         XCTAssertEqual(try posixPermissions(fixture.config), 0o640)
-        XCTAssertFalse(fileManager.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: fixture.backup.path))
         XCTAssertFalse(fileManager.fileExists(atPath: fixture.config.path + ".dream-skin.lock"))
         XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: fixture.directory.path).contains { $0.hasSuffix(".tmp") })
     }

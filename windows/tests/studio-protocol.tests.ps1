@@ -135,7 +135,8 @@ function Start-StudioProcess {
     [Parameter(Mandatory = $true)][object]$Case,
     [Parameter(Mandatory = $true)][string]$Scenario,
     [string]$Operation = 'status',
-    [string[]]$ExtraArguments = @()
+    [string[]]$ExtraArguments = @(),
+    [switch]$OmitOperation
   )
   $stdoutPath = Join-Path $Case.Root "stdout-$([guid]::NewGuid().ToString('N')).txt"
   $stderrPath = Join-Path $Case.Root "stderr-$([guid]::NewGuid().ToString('N')).txt"
@@ -156,7 +157,8 @@ function Start-StudioProcess {
     $env:DREAM_SKIN_TEST_ARGV = $Case.ArgvPath
     $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $Case.StateTemplate
     $env:DREAM_SKIN_TEST_RENDERER_TRACE = Join-Path $Case.Root 'renderer-trace.txt'
-    $argumentLine = "-NoProfile -File `"$adapterPath`" -Operation $Operation"
+    $argumentLine = "-NoProfile -File `"$adapterPath`""
+    if (-not $OmitOperation) { $argumentLine += " -Operation $Operation" }
     if ($ExtraArguments.Count -gt 0) { $argumentLine += ' ' + ($ExtraArguments -join ' ') }
     $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentLine -PassThru `
       -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
@@ -197,6 +199,10 @@ function Complete-StudioProcess {
     'INVALID_REQUEST', 'CODEX_CLOSE_REQUIRED', 'RESTART_REQUIRED', 'STATE_UNSAFE',
     'CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED', 'RUNTIME_INVALID', 'OPERATION_BUSY'
   )
+  if ($null -ne $envelope.error -and $envelope.error.code -eq 'OPERATION_FAILED' -and
+    -not (Test-Path -LiteralPath $Invocation.Case.ArgvPath)) {
+    $preflightError = $true
+  }
   if (-not $stderr -and -not $preflightError) {
     throw 'Studio operation omitted its progress marker.'
   }
@@ -208,9 +214,11 @@ function Invoke-Studio {
     [Parameter(Mandatory = $true)][object]$Case,
     [Parameter(Mandatory = $true)][string]$Scenario,
     [string]$Operation = 'status',
-    [string[]]$ExtraArguments = @()
+    [string[]]$ExtraArguments = @(),
+    [switch]$OmitOperation
   )
-  $invocation = Start-StudioProcess -Case $Case -Scenario $Scenario -Operation $Operation -ExtraArguments $ExtraArguments
+  $invocation = Start-StudioProcess -Case $Case -Scenario $Scenario -Operation $Operation `
+    -ExtraArguments $ExtraArguments -OmitOperation:$OmitOperation
   return Complete-StudioProcess -Invocation $invocation
 }
 
@@ -296,10 +304,9 @@ foreach ($required in @(
   "`$childArguments += '-AdapterLockHeld'",
   "`$startInfo.EnvironmentVariables['DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'] = \"`$PID\"",
   "@('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')",
-  "`$status.Error.code -in @('STATE_UNSAFE', 'RUNTIME_INVALID')",
   "New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official'",
-  'function Test-DreamSkinPathEntry',
-  '$appearanceMarker = Get-DreamSkinAppearanceMarkerPath -BackupPath $restoreBackup',
+  'Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot',
+  '$recovery.Completed -or $recovery.NeverApplied',
   '$status.State.codex -ne ''running''',
   'Assert-DreamSkinNoReparseComponents -Path $stateRoot'
 )) {
@@ -362,12 +369,35 @@ foreach ($required in @('[switch]$CloseRunning', 'if ($ForceRestart -and -not $C
 $restoreStop = $restoreSourceContract.IndexOf('Stop-DreamSkinCodex -Codex $codex', [StringComparison]::Ordinal)
 $restoreWrite = $restoreSourceContract.IndexOf('Ensure-DreamSkinManagedDirectory', [StringComparison]::Ordinal)
 if ($restoreStop -lt 0 -or $restoreWrite -le $restoreStop) { throw 'Restore mutates managed state before Codex closes.' }
-$restoreRelaunch = $restoreSourceContract.IndexOf('Start-Process -FilePath $relaunchCodex.Executable', [StringComparison]::Ordinal)
-$restoreArchive = $restoreSourceContract.IndexOf('Archive-DreamSkinConfigBackup -BackupPath $backup', [StringComparison]::Ordinal)
+$restorePublish = $restoreSourceContract.IndexOf('Publish-DreamSkinConfigBackupArchive -BackupPath $backup', [StringComparison]::Ordinal)
+$restoreStateCleanup = $restoreSourceContract.IndexOf('Remove-DreamSkinRecoveryArtifact -Path $StatePath', [StringComparison]::Ordinal)
+$restorePauseCleanup = $restoreSourceContract.IndexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path `$StateRoot 'paused')", [StringComparison]::Ordinal)
+$restoreMarkerToken = 'Remove-DreamSkinRecoveryArtifact -Path $backupMarkerPath'
+$restoreMarkerCleanup = if ($restorePauseCleanup -ge 0) {
+  $restoreSourceContract.IndexOf($restoreMarkerToken, $restorePauseCleanup, [StringComparison]::Ordinal)
+} else { -1 }
+$restoreBackupCleanup = if ($restoreMarkerCleanup -ge 0) {
+  $restoreSourceContract.IndexOf('Remove-DreamSkinRecoveryArtifact -Path $backup',
+    $restoreMarkerCleanup + $restoreMarkerToken.Length, [StringComparison]::Ordinal)
+} else { -1 }
+$restoreCommit = if ($restoreBackupCleanup -ge 0) {
+  $restoreSourceContract.IndexOf('$transactionCommitted = $true', $restoreBackupCleanup, [StringComparison]::Ordinal)
+} else { -1 }
+$restoreRelaunch = if ($restoreCommit -ge 0) {
+  $restoreSourceContract.IndexOf('Start-Process -FilePath $relaunchCodex.Executable', $restoreCommit, [StringComparison]::Ordinal)
+} else { -1 }
 $shortcutCleanup = $restoreSourceContract.IndexOf("(Join-Path `$desktop 'Codex Dream Skin.lnk')", [StringComparison]::Ordinal)
-if ($restoreRelaunch -lt 0 -or $restoreArchive -le $restoreRelaunch -or $shortcutCleanup -le $restoreArchive -or
+if (-not $restoreSourceContract.Contains("Join-Path `$StateRoot 'config.restored.toml'") -or
+  -not $restoreSourceContract.Contains('$transactionCommitted = $false') -or
+  -not $restoreSourceContract.Contains('Get-DreamSkinRecoveryArtifactSnapshot') -or
+  -not $restoreSourceContract.Contains('Restore-DreamSkinRecoveryArtifactSnapshot') -or
+  $restorePublish -lt 0 -or $restoreStateCleanup -le $restorePublish -or
+  $restorePauseCleanup -le $restoreStateCleanup -or $restoreMarkerCleanup -le $restorePauseCleanup -or
+  $restoreBackupCleanup -le $restoreMarkerCleanup -or $restoreCommit -le $restoreBackupCleanup -or
+  $restoreRelaunch -le $restoreCommit -or $shortcutCleanup -le $restorePublish -or
+  -not $restoreSourceContract.Contains('if (-not $transactionCommitted -and $configChanged') -or
   -not $restoreSourceContract.Contains('Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreBytes')) {
-  throw 'Restore does not preserve config, backup, state, and shortcuts until relaunch succeeds.'
+  throw 'Restore does not publish proof, clean lifecycle state, remove live recovery artifacts, commit, and only then relaunch.'
 }
 
 $themeSourceContract = [IO.File]::ReadAllText((Join-Path $Root 'scripts\theme-windows.ps1'))
@@ -404,6 +434,7 @@ New-Item -ItemType Directory -Path $scriptsRoot -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\studio-windows.ps1') -Destination $scriptsRoot
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\status-dream-skin.ps1') -Destination $scriptsRoot
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\studio-adapter.ps1') -Destination $scriptsRoot
+Copy-Item -LiteralPath (Join-Path $Root 'scripts\config-utf8.ps1') -Destination $scriptsRoot
 [IO.File]::WriteAllText((Join-Path $engineRoot 'VERSION'), '1.3.0', $utf8NoBom)
 [IO.File]::WriteAllText($injectorPath, '// staged injector', $utf8NoBom)
 
@@ -441,7 +472,7 @@ switch ($name) {
     Remove-Item -LiteralPath (Join-Path $stateRoot 'paused') -Force -ErrorAction SilentlyContinue
     if ($scenario -ne 'uninstall-incomplete') {
       Move-Item -LiteralPath (Join-Path $stateRoot 'config.before-dream-skin.toml') `
-        -Destination (Join-Path $stateRoot 'config.restored-test.toml') -Force
+        -Destination (Join-Path $stateRoot 'config.restored.toml') -Force
     }
     if ($args -contains '-NoRelaunch') {
       [IO.File]::WriteAllText((Join-Path $stateRoot 'test-codex-stopped'), 'stopped')
@@ -497,6 +528,8 @@ public static class StudioFakeNode {
 Add-Type -TypeDefinition $fakeNodeSource -OutputAssembly $nodePath -OutputType ConsoleApplication | Out-Null
 
 $commonStub = @'
+. (Join-Path $PSScriptRoot 'config-utf8.ps1')
+
 function Enter-DreamSkinOperationLock {
   $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   $mutex = [Threading.Mutex]::new($false, "Local\CodexDreamSkin.$sid.Operation")
@@ -655,9 +688,10 @@ function Add-RealLifecycleTrace {
 function Enter-DreamSkinOperationLock { Add-RealLifecycleTrace 'lock-enter'; return [pscustomobject]@{ Held = $true } }
 function Exit-DreamSkinOperationLock { param([object]$Mutex) Add-RealLifecycleTrace 'lock-exit' }
 function New-RealLifecycleCodex {
+  $executable = $env:DREAM_SKIN_REAL_CODEX_EXE
   return [pscustomobject]@{
-    Executable = 'C:\Program Files\WindowsApps\OpenAI.Codex.Test\app\ChatGPT.exe'
-    PackageRoot = 'C:\Program Files\WindowsApps\OpenAI.Codex.Test'
+    Executable = $executable
+    PackageRoot = Split-Path -Parent $executable
     PackageFullName = 'OpenAI.Codex_2.0.0.0_x64__test'
     PackageFamilyName = 'OpenAI.Codex_test'
     Version = '2.0.0.0'
@@ -688,7 +722,11 @@ function Get-DreamSkinCodexProcesses {
   Add-RealLifecycleTrace 'codex-process'
   if ($env:DREAM_SKIN_TEST_SCENARIO -match '^real-(?:install|start|pause)' -or
     $env:DREAM_SKIN_TEST_SCENARIO -in @(
-      'real-restore-unauthorized', 'real-restore-timeout', 'real-restore-force', 'real-uninstall-force'
+      'real-restore-unauthorized', 'real-restore-timeout', 'real-restore-force',
+      'real-restore-state-unlink-fail', 'real-restore-paused-unlink-fail',
+      'real-restore-archive-fail', 'real-restore-marker-unlink-fail',
+      'real-restore-launch-fail', 'real-restore-post-launch-write',
+      'real-uninstall-force'
     )) {
     return @([pscustomobject]@{ ProcessId = 5151 })
   }
@@ -750,27 +788,38 @@ function Restore-DreamSkinConfigBackup {
   param([string]$ConfigPath, [string]$BackupPath, [string]$RecoveryBackupPath)
   Restore-DreamSkinBaseTheme -ConfigPath $ConfigPath -BackupPath $BackupPath
 }
-function Archive-DreamSkinConfigBackup {
-  param([string]$BackupPath, [string]$ArchivePath)
-  Add-RealLifecycleTrace 'archive-backup'
-  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-archive-fail') { throw 'fixture archive failure' }
-  [IO.File]::Move($BackupPath, $ArchivePath)
-}
 function Write-DreamSkinBytesAtomically {
   param([string]$Path, [byte[]]$Bytes, [byte[]]$ExpectedBytes)
-  Add-RealLifecycleTrace 'config-rollback'
+  if ([IO.Path]::GetFileName($Path) -ceq 'config.restored.toml') {
+    Add-RealLifecycleTrace 'archive-backup'
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-archive-fail') { throw 'fixture archive failure' }
+  } elseif ([IO.Path]::GetFileName($Path) -ceq 'config.toml') {
+    Add-RealLifecycleTrace 'config-rollback'
+  }
   [IO.File]::WriteAllBytes($Path, $Bytes)
 }
 function Start-Process {
   param([string]$FilePath, [object]$ArgumentList, [object]$WindowStyle, [switch]$PassThru,
     [string]$RedirectStandardOutput, [string]$RedirectStandardError)
   Add-RealLifecycleTrace 'start-process'
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-launch-fail') { throw 'fixture relaunch failure' }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-post-launch-write') {
+    [IO.File]::WriteAllText((Join-Path $env:USERPROFILE '.codex\config.toml'), 'post-launch', [Text.UTF8Encoding]::new($false))
+  }
   return [pscustomobject]@{ Id = 7000; HasExited = $false }
 }
 function Stop-Process { param([object]$InputObject, [int]$Id, [switch]$Force, [object]$ErrorAction) Add-RealLifecycleTrace 'stop-process' }
 function Remove-Item {
   param([string]$LiteralPath, [switch]$Force, [switch]$Recurse, [object]$ErrorAction)
   Add-RealLifecycleTrace "remove:$LiteralPath"
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-state-unlink-fail' -and
+    [IO.Path]::GetFileName($LiteralPath) -ceq 'state.json') { throw 'fixture state unlink failure' }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-paused-unlink-fail' -and
+    [IO.Path]::GetFileName($LiteralPath) -ceq 'paused') { throw 'fixture paused unlink failure' }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-marker-unlink-fail' -and
+    [IO.Path]::GetFileName($LiteralPath) -ceq 'config.before-dream-skin.toml.appearance.json') {
+    throw 'fixture backup marker unlink failure'
+  }
   $testRoot = [IO.Path]::GetFullPath($env:DREAM_SKIN_REAL_CASE_ROOT).TrimEnd('\') + '\'
   if ([IO.Path]::GetFullPath($LiteralPath).StartsWith($testRoot, [StringComparison]::OrdinalIgnoreCase)) {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Force:$Force -Recurse:$Recurse -ErrorAction SilentlyContinue
@@ -790,6 +839,7 @@ function Get-DreamSkinThemePaths {
     Images = (Join-Path $StateRoot 'images'); PauseFile = (Join-Path $StateRoot 'paused'); State = (Join-Path $StateRoot 'state.json')
   }
 }
+function Assert-DreamSkinNoReparseComponents { param([string]$Path) }
 function Ensure-DreamSkinManagedDirectory {
   param([string]$Path, [string]$Root)
   Add-RealThemeTrace 'ensure'
@@ -827,11 +877,39 @@ function New-RealLifecycleCase {
   New-Item -ItemType Directory -Path $appData -Force | Out-Null
   [IO.File]::WriteAllText((Join-Path $userProfile '.codex\config.toml'), 'original', $utf8NoBom)
   [IO.File]::WriteAllText((Join-Path $stateRoot 'config.before-dream-skin.toml'), 'backup', $utf8NoBom)
+  [IO.File]::WriteAllText((Join-Path $stateRoot 'config.before-dream-skin.toml.appearance.json'), 'marker', $utf8NoBom)
   [IO.File]::WriteAllText((Join-Path $stateRoot 'state.json'), 'preserve-state', $utf8NoBom)
+  $codexExecutable = Join-Path $caseRoot 'Codex.exe'
+  [IO.File]::WriteAllText($codexExecutable, 'fixture executable', $utf8NoBom)
   return [pscustomobject]@{
     Root = $caseRoot; LocalAppData = $localAppData; StateRoot = $stateRoot; UserProfile = $userProfile
-    AppData = $appData; TracePath = (Join-Path $caseRoot 'trace.txt')
+    AppData = $appData; TracePath = (Join-Path $caseRoot 'trace.txt'); CodexExecutable = $codexExecutable
   }
+}
+
+function New-RealRestoreRollbackBaseline {
+  param([Parameter(Mandatory = $true)][object]$Case)
+  $archive = Join-Path $Case.StateRoot 'config.restored.toml'
+  [IO.File]::WriteAllText((Join-Path $Case.StateRoot 'paused'), 'paused-before', $utf8NoBom)
+  [IO.File]::WriteAllText($archive, 'prior-archive', $utf8NoBom)
+  [IO.File]::WriteAllText("$archive.appearance.json", 'prior-archive-marker', $utf8NoBom)
+  return [pscustomobject]@{
+    ConfigBytes = [IO.File]::ReadAllBytes((Join-Path $Case.UserProfile '.codex\config.toml'))
+    StateSnapshot = @(Get-StateSnapshot -Root $Case.StateRoot)
+  }
+}
+
+function Assert-RealRestoreRolledBack {
+  param(
+    [Parameter(Mandatory = $true)][object]$Case,
+    [Parameter(Mandatory = $true)][object]$Baseline,
+    [Parameter(Mandatory = $true)][string]$Message
+  )
+  $configBytes = [IO.File]::ReadAllBytes((Join-Path $Case.UserProfile '.codex\config.toml'))
+  if ([Convert]::ToBase64String($configBytes) -cne [Convert]::ToBase64String($Baseline.ConfigBytes)) {
+    throw "$Message Config bytes changed."
+  }
+  Assert-Equal (Get-StateSnapshot -Root $Case.StateRoot) @($Baseline.StateSnapshot) $Message
 }
 
 function Invoke-RealLifecycle {
@@ -849,7 +927,7 @@ function Invoke-RealLifecycle {
     'LOCALAPPDATA', 'USERPROFILE', 'HOME', 'APPDATA', 'DREAM_SKIN_TEST_SCENARIO',
     'DREAM_SKIN_TEST_NODE_VERSION', 'DREAM_SKIN_TEST_INJECTOR', 'DREAM_SKIN_REAL_COMMON',
     'DREAM_SKIN_REAL_TRACE', 'DREAM_SKIN_REAL_NODE', 'DREAM_SKIN_REAL_CASE_ROOT',
-    'DREAM_SKIN_REAL_PARENT_PID', 'DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'
+    'DREAM_SKIN_REAL_PARENT_PID', 'DREAM_SKIN_REAL_CODEX_EXE', 'DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'
   )) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
   $operationMutex = $null
   try {
@@ -866,6 +944,7 @@ function Invoke-RealLifecycle {
       $env:DREAM_SKIN_REAL_NODE = $nodePath
       $env:DREAM_SKIN_REAL_CASE_ROOT = $Case.Root
       $env:DREAM_SKIN_REAL_PARENT_PID = "$PID"
+      $env:DREAM_SKIN_REAL_CODEX_EXE = $Case.CodexExecutable
       if ($LockOwner -in @('self', 'valid')) { $env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID = "$PID" }
       elseif ($LockOwner -eq 'invalid') { $env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID = '1' }
       else { Remove-Item Env:DREAM_SKIN_ADAPTER_LOCK_OWNER_PID -ErrorAction SilentlyContinue }
@@ -911,6 +990,7 @@ function Assert-TraceOrder {
 }
 
 try {
+  $realEngineSnapshot = @(Get-StateSnapshot -Root $realRoot)
   $privacyRejected = $false
   try { Assert-NoPrivateStudioData -Value ([pscustomobject]@{ injectorPid = 42 }) -UserProfile 'C:\Users\example' } catch { $privacyRejected = $true }
   if (-not $privacyRejected) { throw 'Privacy assertion did not reject a synthetic leaked key.' }
@@ -928,11 +1008,11 @@ try {
     @{ Name = 'stopped'; Args = @{ NoState = $true }; Exit = 0; Ok = $true; Codex = 'stopped'; Session = 'official'; Restart = $false; Actions = @('apply', 'restore', 'uninstall'); Error = $null; Recovery = @() },
     @{ Name = 'running'; Args = @{ NoState = $true }; Exit = 0; Ok = $true; Codex = 'running'; Session = 'official'; Restart = $true; Actions = @('apply', 'restore', 'verify', 'uninstall'); Error = $null; Recovery = @() },
     @{ Name = 'active'; Args = @{}; Exit = 0; Ok = $true; Codex = 'running'; Session = 'active'; Restart = $false; Actions = @('pause', 'resume', 'restore', 'verify', 'uninstall'); Error = $null; Recovery = @() },
-    @{ Name = 'stale'; Args = @{}; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('apply', 'restore', 'verify', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') },
-    @{ Name = 'reused'; Args = @{}; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('apply', 'restore', 'verify', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') },
-    @{ Name = 'damaged'; Args = @{ DamagedState = $true }; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('apply', 'restore', 'verify', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') },
+    @{ Name = 'stale'; Args = @{}; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('restore', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') },
+    @{ Name = 'reused'; Args = @{}; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('restore', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') },
+    @{ Name = 'damaged'; Args = @{ DamagedState = $true }; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('restore', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') },
     @{ Name = 'secondary-install'; Args = @{ SecondaryState = $true }; Exit = 0; Ok = $true; Codex = 'running'; Session = 'active'; Restart = $false; Actions = @('pause', 'resume', 'restore', 'verify', 'uninstall'); Error = $null; Recovery = @() },
-    @{ Name = 'saved-stopped'; Args = @{ SecondaryState = $true }; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('apply', 'restore', 'verify', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') }
+    @{ Name = 'saved-stopped'; Args = @{ SecondaryState = $true }; Exit = 1; Ok = $false; Codex = 'running'; Session = 'stale'; Restart = $false; Actions = @('restore', 'uninstall'); Error = 'STATE_UNSAFE'; Recovery = @('restore', 'diagnostics', 'cancel') }
   )
   foreach ($definition in $cases) {
     $caseArguments = $definition.Args
@@ -943,6 +1023,21 @@ try {
     Assert-StudioResult -Result $result -ExitCode $definition.Exit -Ok $definition.Ok -Install 'ready' `
       -Codex $definition.Codex -Session $definition.Session -ThemeName '午夜极光' -RequiresRestart $definition.Restart `
       -Verified $null -AvailableActions $definition.Actions -ErrorCode $definition.Error -RecoveryActions $definition.Recovery
+  }
+
+  foreach ($unsafeThemeName in @(
+    '../private-theme', 'C:\private-theme', "line$([char]0x1f)break", "line$([char]0x85)break",
+    "line$([char]0x2028)break", "line$([char]0x2029)break"
+  )) {
+    $unsafeTheme = New-CaseRoot -Name "unsafe-theme-$([guid]::NewGuid().ToString('N'))" -NoState
+    [IO.File]::WriteAllText((Join-Path $unsafeTheme.StateRoot 'active-theme\theme.json'),
+      ([pscustomobject]@{ name = $unsafeThemeName; image = 'theme.jpg' } | ConvertTo-Json -Compress), $utf8NoBom)
+    $before = Get-StateSnapshot -Root $unsafeTheme.StateRoot
+    $result = Invoke-Studio -Case $unsafeTheme -Scenario 'stopped'
+    Assert-Equal (Get-StateSnapshot -Root $unsafeTheme.StateRoot) $before 'Unsafe theme-name status mutated state.'
+    Assert-StudioResult -Result $result -ExitCode 0 -Ok $true -Install 'ready' -Codex 'stopped' `
+      -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+      -AvailableActions @('apply', 'restore', 'uninstall') -ErrorCode $null
   }
 
   $paused = New-CaseRoot -Name 'paused' -NoState
@@ -1039,7 +1134,7 @@ try {
   [IO.File]::WriteAllText($versionPath, 'invalid', $utf8NoBom)
   $result = Invoke-Studio -Case $residualActive -Scenario 'active-exact-runtime' -ExtraArguments @('-Deep')
   Assert-StudioResult -Result $result -ExitCode 1 -Ok $false -Install 'not-installed' -Codex 'running' -Session 'stale' `
-    -ThemeName '午夜极光' -RequiresRestart $false -Verified $null -AvailableActions @('install') `
+    -ThemeName '午夜极光' -RequiresRestart $false -Verified $null -AvailableActions @('restore', 'uninstall') `
     -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('restore', 'diagnostics', 'cancel')
   [IO.File]::WriteAllText($versionPath, '1.3.0', $utf8NoBom)
 
@@ -1082,6 +1177,16 @@ try {
     -ErrorCode 'OPERATION_BUSY' -RecoveryActions @('retry', 'cancel')
 
   $invalid = New-CaseRoot -Name 'invalid' -NoState
+  $before = Get-StateSnapshot -Root $invalid.StateRoot
+  $result = Invoke-Studio -Case $invalid -Scenario 'stopped' -OmitOperation
+  Assert-Equal (Get-StateSnapshot -Root $invalid.StateRoot) $before 'Missing operation mutated state.'
+  Assert-StudioResult -Result $result -Operation 'status' -ExitCode 2 -Ok $false -Install 'not-installed' `
+    -Codex 'not-installed' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'INVALID_REQUEST' -RecoveryActions @('cancel')
+  $result = Invoke-Studio -Case $invalid -Scenario 'stopped' -Operation 'unknown-operation'
+  Assert-StudioResult -Result $result -Operation 'status' -ExitCode 2 -Ok $false -Install 'not-installed' `
+    -Codex 'not-installed' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'INVALID_REQUEST' -RecoveryActions @('cancel')
   foreach ($invalidRequest in @(
     @{ Operation = 'status'; Arguments = @('-DeleteUserThemes') },
     @{ Operation = 'status'; Arguments = @('-ForceAuthorized') },
@@ -1251,6 +1356,25 @@ try {
   Assert-ChildInvocation -Case $wrongRuntimeRestore `
     -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning|-AdapterLockHeld'
 
+  $missingCodexRestore = New-CaseRoot -Name 'missing-codex-restore' -NoState
+  $result = Invoke-Studio -Case $missingCodexRestore -Scenario 'missing-codex' -Operation 'restore'
+  Assert-StudioResult -Result $result -Operation 'restore' -ExitCode 0 -Ok $true -Install 'not-installed' `
+    -Codex 'not-installed' -Session 'official' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @('install', 'uninstall') -ErrorCode $null
+  Assert-ChildInvocation -Case $missingCodexRestore `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-AdapterLockHeld'
+
+  $missingCodexWithoutBackup = New-CaseRoot -Name 'missing-codex-restore-without-backup' -NoState
+  Remove-Item -LiteralPath (Join-Path $missingCodexWithoutBackup.StateRoot 'config.before-dream-skin.toml') -Force
+  $before = Get-ProtectedSnapshot -Case $missingCodexWithoutBackup
+  $result = Invoke-Studio -Case $missingCodexWithoutBackup -Scenario 'missing-codex' -Operation 'restore'
+  Assert-Equal (Get-ProtectedSnapshot -Case $missingCodexWithoutBackup) $before `
+    'Missing-Codex restore without recovery backup changed protected state.'
+  Assert-StudioResult -Result $result -Operation 'restore' -ExitCode 1 -Ok $false -Install 'not-installed' `
+    -Codex 'not-installed' -Session 'stale' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
+  Assert-NoChildOrLog -Case $missingCodexWithoutBackup
+
   $restoreUnauthorized = New-CaseRoot -Name 'restore-unauthorized' -NoState
   $before = Get-StateSnapshot -Root $restoreUnauthorized.StateRoot
   $result = Invoke-Studio -Case $restoreUnauthorized -Scenario 'lifecycle-restore' -Operation 'restore'
@@ -1333,6 +1457,7 @@ try {
 
   $neverApplied = New-CaseRoot -Name 'uninstall-never-applied' -NoState
   Remove-Item -LiteralPath (Join-Path $neverApplied.StateRoot 'config.before-dream-skin.toml') -Force
+  Remove-Item -LiteralPath (Join-Path $neverApplied.StateRoot 'active-theme') -Recurse -Force
   $before = Get-ProtectedSnapshot -Case $neverApplied
   $result = Invoke-Studio -Case $neverApplied -Scenario 'stopped' -Operation 'uninstall'
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
@@ -1341,9 +1466,23 @@ try {
   Assert-Equal (Get-ProtectedSnapshot -Case $neverApplied) $before 'Never-applied uninstall changed retained theme state.'
   Assert-NoChildOrLog -Case $neverApplied
 
+  $lostManagedRecovery = New-CaseRoot -Name 'uninstall-lost-managed-recovery' -NoState
+  Remove-Item -LiteralPath (Join-Path $lostManagedRecovery.StateRoot 'config.before-dream-skin.toml') -Force
+  Remove-Item -LiteralPath (Join-Path $lostManagedRecovery.StateRoot 'active-theme') -Recurse -Force
+  [IO.File]::WriteAllText((Join-Path $lostManagedRecovery.UserProfile '.codex\config.toml'),
+    "[desktop]`r`nappearanceLightCodeThemeId = `"codex`"`r`n", $utf8NoBom)
+  $before = Get-ProtectedSnapshot -Case $lostManagedRecovery
+  $result = Invoke-Studio -Case $lostManagedRecovery -Scenario 'stopped' -Operation 'uninstall'
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 1 -Ok $false -Install 'not-installed' `
+    -Codex 'stopped' -Session 'stale' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $lostManagedRecovery) $before `
+    'Managed config with lost recovery evidence changed protected state.'
+  Assert-NoChildOrLog -Case $lostManagedRecovery
+
   $alreadyRestored = New-CaseRoot -Name 'uninstall-already-restored' -NoState
   Move-Item -LiteralPath (Join-Path $alreadyRestored.StateRoot 'config.before-dream-skin.toml') `
-    -Destination (Join-Path $alreadyRestored.StateRoot 'config.restored-test.toml')
+    -Destination (Join-Path $alreadyRestored.StateRoot 'config.restored.toml')
   $before = Get-ProtectedSnapshot -Case $alreadyRestored
   foreach ($attempt in 1..2) {
     $result = Invoke-Studio -Case $alreadyRestored -Scenario 'stopped' -Operation 'uninstall'
@@ -1351,6 +1490,31 @@ try {
   }
   Assert-Equal (Get-ProtectedSnapshot -Case $alreadyRestored) $before 'Repeated uninstall changed restored state.'
   Assert-NoChildOrLog -Case $alreadyRestored
+
+  $incompleteRestored = New-CaseRoot -Name 'uninstall-incomplete-restored-marker' -NoState
+  $incompleteBackup = Join-Path $incompleteRestored.StateRoot 'config.before-dream-skin.toml'
+  Move-Item -LiteralPath $incompleteBackup -Destination (Join-Path $incompleteRestored.StateRoot 'config.restored.toml')
+  [IO.File]::WriteAllText("$incompleteBackup.appearance.json", '{}', $utf8NoBom)
+  $before = Get-ProtectedSnapshot -Case $incompleteRestored
+  $result = Invoke-Studio -Case $incompleteRestored -Scenario 'stopped' -Operation 'uninstall'
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 1 -Ok $false -Install 'not-installed' `
+    -Codex 'stopped' -Session 'stale' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $incompleteRestored) $before `
+    'Fixed proof with a live backup marker changed protected state.'
+  Assert-NoChildOrLog -Case $incompleteRestored
+
+  $orphanActiveTheme = New-CaseRoot -Name 'uninstall-orphan-active-theme' -NoState
+  Remove-Item -LiteralPath (Join-Path $orphanActiveTheme.StateRoot 'config.before-dream-skin.toml') -Force
+  Remove-Item -LiteralPath (Join-Path $orphanActiveTheme.StateRoot 'active-theme\theme.json') -Force
+  $before = Get-ProtectedSnapshot -Case $orphanActiveTheme
+  $result = Invoke-Studio -Case $orphanActiveTheme -Scenario 'stopped' -Operation 'uninstall'
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 1 -Ok $false -Install 'not-installed' `
+    -Codex 'stopped' -Session 'stale' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $orphanActiveTheme) $before `
+    'Orphan active-theme entry changed protected state.'
+  Assert-NoChildOrLog -Case $orphanActiveTheme
 
   $malformedBackup = New-CaseRoot -Name 'uninstall-malformed-backup' -NoState
   $malformedBackupPath = Join-Path $malformedBackup.StateRoot 'config.before-dream-skin.toml'
@@ -1382,21 +1546,22 @@ try {
   $orphanAppearance = New-CaseRoot -Name 'uninstall-orphan-appearance' -NoState
   $orphanBackup = Join-Path $orphanAppearance.StateRoot 'config.before-dream-skin.toml'
   Remove-Item -LiteralPath $orphanBackup -Force
-  [IO.File]::WriteAllText((Get-DreamSkinAppearanceMarkerPath -BackupPath $orphanBackup), '{}', $utf8NoBom)
+  [IO.File]::WriteAllText("$orphanBackup.appearance.json", '{}', $utf8NoBom)
   $before = Get-ProtectedSnapshot -Case $orphanAppearance
   $result = Invoke-Studio -Case $orphanAppearance -Scenario 'stopped' -Operation 'uninstall'
-  if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'OPERATION_FAILED') {
-    throw 'Orphan appearance marker was treated as affirmative restore proof.'
-  }
+  Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 1 -Ok $false -Install 'not-installed' `
+    -Codex 'stopped' -Session 'stale' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
   Assert-Equal (Get-ProtectedSnapshot -Case $orphanAppearance) $before 'Orphan appearance recovery failure changed protected state.'
+  Assert-NoChildOrLog -Case $orphanAppearance
 
   $runningWithoutArtifacts = New-CaseRoot -Name 'uninstall-running-without-artifacts' -NoState
   Remove-Item -LiteralPath (Join-Path $runningWithoutArtifacts.StateRoot 'config.before-dream-skin.toml') -Force
   $before = Get-ProtectedSnapshot -Case $runningWithoutArtifacts
   $result = Invoke-Studio -Case $runningWithoutArtifacts -Scenario 'running' -Operation 'uninstall'
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 1 -Ok $false -Install 'not-installed' `
-    -Codex 'running' -Session 'official' -ThemeName '午夜极光' -RequiresRestart $true -Verified $null `
-    -AvailableActions @('install') -ErrorCode 'RESTART_REQUIRED' -RecoveryActions @('authorize-restart', 'cancel')
+    -Codex 'running' -Session 'stale' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @() -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('diagnostics', 'cancel')
   Assert-Equal (Get-ProtectedSnapshot -Case $runningWithoutArtifacts) $before 'Running-Codex uninstall changed protected state before authorization.'
   Assert-NoChildOrLog -Case $runningWithoutArtifacts
 
@@ -1428,6 +1593,7 @@ try {
 
   $neverAppliedDelete = New-CaseRoot -Name 'uninstall-never-applied-delete' -NoState
   Remove-Item -LiteralPath (Join-Path $neverAppliedDelete.StateRoot 'config.before-dream-skin.toml') -Force
+  Remove-Item -LiteralPath (Join-Path $neverAppliedDelete.StateRoot 'active-theme') -Recurse -Force
   New-Item -ItemType Directory -Path (Join-Path $neverAppliedDelete.StateRoot 'themes') -Force | Out-Null
   New-Item -ItemType Directory -Path (Join-Path $neverAppliedDelete.StateRoot 'images') -Force | Out-Null
   $result = Invoke-Studio -Case $neverAppliedDelete -Scenario 'stopped' -Operation 'uninstall' `
@@ -1661,29 +1827,165 @@ try {
   $realRestoreForce = New-RealLifecycleCase -Name 'restore-force'
   $realConfig = Join-Path $realRestoreForce.UserProfile '.codex\config.toml'
   $realBackup = Join-Path $realRestoreForce.StateRoot 'config.before-dream-skin.toml'
+  $realArchive = Join-Path $realRestoreForce.StateRoot 'config.restored.toml'
   $realState = Join-Path $realRestoreForce.StateRoot 'state.json'
   $realResult = Invoke-RealLifecycle -Case $realRestoreForce -ScriptName 'restore-dream-skin.ps1' `
     -Scenario 'real-restore-force' `
     -Arguments @('-RestoreBaseTheme', '-NoRelaunch', '-CloseRunning', '-ForceRestart')
   if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or
-    (Test-Path -LiteralPath $realBackup) -or (Test-Path -LiteralPath $realState)) {
+    (Test-Path -LiteralPath $realBackup) -or -not (Test-Path -LiteralPath $realArchive) -or
+    (Test-Path -LiteralPath $realState)) {
     throw 'Production restore did not complete after both close authorization levels.'
   }
   Assert-TraceOrder -Trace $realResult.Trace -Expected @('stop:True', 'ensure', 'restore-config', 'archive-backup') `
     -Message 'Production restore did not propagate force before restore writes.'
 
-  $realRestoreFailure = New-RealLifecycleCase -Name 'restore-rollback'
+  $realStateFailure = New-RealLifecycleCase -Name 'restore-state-unlink-failure'
+  $realConfig = Join-Path $realStateFailure.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realStateFailure.StateRoot 'config.before-dream-skin.toml'
+  $realArchive = Join-Path $realStateFailure.StateRoot 'config.restored.toml'
+  $realState = Join-Path $realStateFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realStateFailure.StateRoot 'paused'
+  $realBackupMarker = "$realBackup.appearance.json"
+  $realArchiveMarker = "$realArchive.appearance.json"
+  $realBaseline = New-RealRestoreRollbackBaseline -Case $realStateFailure
+  $realResult = Invoke-RealLifecycle -Case $realStateFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-state-unlink-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realPaused" -or
+    $realResult.Trace -contains 'start-process') {
+    throw 'State cleanup failure did not retain retryable restore recovery data.'
+  }
+  Assert-RealRestoreRolledBack -Case $realStateFailure -Baseline $realBaseline `
+    -Message 'State cleanup failure did not restore every entry artifact exactly.'
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'restore-config', 'archive-backup', "remove:$realState", 'config-rollback'
+  ) -Message 'State cleanup failure did not roll config and published proof back before relaunch.'
+
+  $realResult = Invoke-RealLifecycle -Case $realStateFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-uninstall-retry' -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
+  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or
+    (Test-Path -LiteralPath $realBackup) -or (Test-Path -LiteralPath $realBackupMarker) -or
+    (Test-Path -LiteralPath $realState) -or (Test-Path -LiteralPath $realPaused) -or
+    -not (Test-Path -LiteralPath $realArchive) -or -not (Test-Path -LiteralPath $realArchiveMarker)) {
+    throw 'Uninstall could not retry and commit a restore after state cleanup failed.'
+  }
+
+  $realPausedFailure = New-RealLifecycleCase -Name 'restore-paused-unlink-failure'
+  $realConfig = Join-Path $realPausedFailure.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realPausedFailure.StateRoot 'config.before-dream-skin.toml'
+  $realArchive = Join-Path $realPausedFailure.StateRoot 'config.restored.toml'
+  $realState = Join-Path $realPausedFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realPausedFailure.StateRoot 'paused'
+  $realBaseline = New-RealRestoreRollbackBaseline -Case $realPausedFailure
+  $realResult = Invoke-RealLifecycle -Case $realPausedFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-paused-unlink-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realBackup" -or
+    $realResult.Trace -contains 'start-process') {
+    throw 'Pause cleanup failure did not leave a retryable backup and exact remaining marker.'
+  }
+  Assert-RealRestoreRolledBack -Case $realPausedFailure -Baseline $realBaseline `
+    -Message 'Pause cleanup failure did not restore every entry artifact exactly.'
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'restore-config', 'archive-backup', "remove:$realState", "remove:$realPaused", 'config-rollback'
+  ) -Message 'Pause cleanup failure did not roll config and published proof back before relaunch.'
+
+  $realRestoreFailure = New-RealLifecycleCase -Name 'restore-archive-failure'
   $realConfig = Join-Path $realRestoreFailure.UserProfile '.codex\config.toml'
   $realBackup = Join-Path $realRestoreFailure.StateRoot 'config.before-dream-skin.toml'
+  $realArchive = Join-Path $realRestoreFailure.StateRoot 'config.restored.toml'
   $realState = Join-Path $realRestoreFailure.StateRoot 'state.json'
+  $realBaseline = New-RealRestoreRollbackBaseline -Case $realRestoreFailure
   $realResult = Invoke-RealLifecycle -Case $realRestoreFailure -ScriptName 'restore-dream-skin.ps1' `
-    -Scenario 'real-restore-archive-fail' -Arguments @('-RestoreBaseTheme', '-NoRelaunch')
-  if ($realResult.ExitCode -eq 0 -or [IO.File]::ReadAllText($realConfig) -cne 'original' -or
-    -not (Test-Path -LiteralPath $realBackup) -or -not (Test-Path -LiteralPath $realState)) {
-    throw 'Production restore failure did not preserve config, backup, and state.'
+    -Scenario 'real-restore-archive-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realState" -or
+    $realResult.Trace -contains 'start-process') {
+    throw 'Archive failure did not preserve a retryable backup without relaunching Codex.'
   }
+  Assert-RealRestoreRolledBack -Case $realRestoreFailure -Baseline $realBaseline `
+    -Message 'Archive publication failure did not restore every entry artifact exactly.'
   Assert-TraceOrder -Trace $realResult.Trace -Expected @('restore-config', 'archive-backup', 'config-rollback') `
-    -Message 'Production restore did not roll config back after cleanup failed.'
+    -Message 'Archive failure did not roll config back before any relaunch.'
+
+  $realResult = Invoke-RealLifecycle -Case $realRestoreFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-retry' -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or
+    (Test-Path -LiteralPath $realBackup) -or -not (Test-Path -LiteralPath $realArchive)) {
+    throw 'Restore retry did not commit the retained backup after archive failure.'
+  }
+
+  $realMarkerFailure = New-RealLifecycleCase -Name 'restore-marker-unlink-failure'
+  $realConfig = Join-Path $realMarkerFailure.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realMarkerFailure.StateRoot 'config.before-dream-skin.toml'
+  $realBackupMarker = "$realBackup.appearance.json"
+  $realArchive = Join-Path $realMarkerFailure.StateRoot 'config.restored.toml'
+  $realArchiveMarker = "$realArchive.appearance.json"
+  $realState = Join-Path $realMarkerFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realMarkerFailure.StateRoot 'paused'
+  $realBaseline = New-RealRestoreRollbackBaseline -Case $realMarkerFailure
+  $realResult = Invoke-RealLifecycle -Case $realMarkerFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-marker-unlink-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realBackup" -or
+    $realResult.Trace -contains 'start-process') {
+    throw 'Backup marker cleanup failure reported a committed restore or relaunched Codex.'
+  }
+  Assert-RealRestoreRolledBack -Case $realMarkerFailure -Baseline $realBaseline `
+    -Message 'Backup marker cleanup failure did not restore every entry artifact exactly.'
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'restore-config', 'archive-backup', "remove:$realState", "remove:$realPaused",
+    "remove:$realBackupMarker", 'config-rollback'
+  ) -Message 'Backup marker cleanup failure crossed or escaped the restore transaction.'
+
+  $realResult = Invoke-RealLifecycle -Case $realMarkerFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-marker-retry' -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or
+    (Test-Path -LiteralPath $realBackup) -or (Test-Path -LiteralPath $realBackupMarker) -or
+    (Test-Path -LiteralPath $realState) -or (Test-Path -LiteralPath $realPaused) -or
+    -not (Test-Path -LiteralPath $realArchive) -or -not (Test-Path -LiteralPath $realArchiveMarker)) {
+    throw 'Restore could not retry and commit after backup marker cleanup failed.'
+  }
+
+  $realConfig = Join-Path $realRestoreFailure.UserProfile '.codex\config.toml'
+  $realArchive = Join-Path $realRestoreFailure.StateRoot 'config.restored.toml'
+  $archiveBytes = [IO.File]::ReadAllBytes($realArchive)
+  [IO.File]::WriteAllText($realConfig, 'after-complete', $utf8NoBom)
+  [IO.File]::WriteAllText($realRestoreFailure.TracePath, '', $utf8NoBom)
+  $realResult = Invoke-RealLifecycle -Case $realRestoreFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-repeat' -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'after-complete' -or
+    [Convert]::ToBase64String($archiveBytes) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($realArchive)) -or
+    $realResult.Trace -contains 'restore-config' -or $realResult.Trace -contains 'archive-backup') {
+    throw 'Repeated restore did not use fixed completion evidence idempotently.'
+  }
+
+  $realLaunchFailure = New-RealLifecycleCase -Name 'restore-launch-failure'
+  $realConfig = Join-Path $realLaunchFailure.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realLaunchFailure.StateRoot 'config.before-dream-skin.toml'
+  $realArchive = Join-Path $realLaunchFailure.StateRoot 'config.restored.toml'
+  $realState = Join-Path $realLaunchFailure.StateRoot 'state.json'
+  $realResult = Invoke-RealLifecycle -Case $realLaunchFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-launch-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or
+    (Test-Path -LiteralPath $realBackup) -or -not (Test-Path -LiteralPath $realArchive) -or
+    (Test-Path -LiteralPath $realState) -or $realResult.Trace -contains 'config-rollback' -or
+    (($realResult.Stdout + $realResult.Stderr) -notlike '*Codex could not be reopened automatically. The restore is complete*')) {
+    throw 'Relaunch failure rolled back or failed an already committed restore.'
+  }
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @('restore-config', 'archive-backup', 'start-process') `
+    -Message 'Relaunch was attempted before restore commit.'
+
+  $realPostLaunch = New-RealLifecycleCase -Name 'restore-post-launch-write'
+  $realConfig = Join-Path $realPostLaunch.UserProfile '.codex\config.toml'
+  $realBackup = Join-Path $realPostLaunch.StateRoot 'config.before-dream-skin.toml'
+  $realArchive = Join-Path $realPostLaunch.StateRoot 'config.restored.toml'
+  $realResult = Invoke-RealLifecycle -Case $realPostLaunch -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-restore-post-launch-write' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
+  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'post-launch' -or
+    (Test-Path -LiteralPath $realBackup) -or -not (Test-Path -LiteralPath $realArchive) -or
+    $realResult.Trace -contains 'config-rollback') {
+    throw 'A post-launch Codex config write was overwritten by restore rollback.'
+  }
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @('restore-config', 'archive-backup', 'start-process') `
+    -Message 'Codex relaunched before the restore completion archive committed.'
 
   $realUninstall = New-RealLifecycleCase -Name 'uninstall-order'
   $realResult = Invoke-RealLifecycle -Case $realUninstall -ScriptName 'restore-dream-skin.ps1' `
@@ -1711,6 +2013,9 @@ try {
   Assert-TraceOrder -Trace $realResult.Trace `
     -Expected @('stop:True', 'restore-config', 'archive-backup', "remove:$([Environment]::GetFolderPath('Desktop'))\Codex Dream Skin.lnk") `
     -Message 'Production uninstall did not stop Codex before restore and shortcut cleanup.'
+
+  Assert-Equal (Get-StateSnapshot -Root $realRoot) $realEngineSnapshot `
+    'Lifecycle success and rollback paths changed the versioned engine.'
 
   Write-Host 'PASS: Windows Studio status and lifecycle protocol.'
 } finally {

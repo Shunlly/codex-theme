@@ -28,7 +28,11 @@ function Write-InvalidRequest {
 }
 
 $operations = @('preflight', 'install', 'apply', 'status', 'pause', 'resume', 'restore', 'verify', 'uninstall')
-if (-not $Operation -or $Operation -notin $operations -or $UnknownArguments.Count -gt 0) { Write-InvalidRequest }
+if (-not $Operation -or $Operation -notin $operations) {
+  $Operation = 'status'
+  Write-InvalidRequest
+}
+if ($UnknownArguments.Count -gt 0) { Write-InvalidRequest }
 if ($ForceAuthorized -and -not $RestartAuthorized) { Write-InvalidRequest }
 if ($DeleteUserThemes -and $Operation -ne 'uninstall') { Write-InvalidRequest }
 if ($Deep -and $Operation -notin @('preflight', 'status')) { Write-InvalidRequest }
@@ -91,18 +95,6 @@ function Test-DreamSkinResumeHotPath {
     $identity = Get-DreamSkinVerifiedCdpIdentity -Port ([int]$state.port) -Codex $codex
     return $null -ne $identity -and $identity.BrowserId -ceq "$($state.browserId)"
   } catch {
-    return $false
-  }
-}
-
-function Test-DreamSkinPathEntry {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  try {
-    $null = [IO.File]::GetAttributes([IO.Path]::GetFullPath($Path))
-    return $true
-  } catch [IO.FileNotFoundException] {
-    return $false
-  } catch [IO.DirectoryNotFoundException] {
     return $false
   }
 }
@@ -202,10 +194,6 @@ function Exit-DreamSkinChildFailure {
 $status = $null
 $operationLock = $null
 $stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
-$restoreBackup = Join-Path $stateRoot 'config.before-dream-skin.toml'
-$appearanceMarker = Get-DreamSkinAppearanceMarkerPath -BackupPath $restoreBackup
-$statePath = Join-Path $stateRoot 'state.json'
-$pausedPath = Join-Path $stateRoot 'paused'
 try {
   try {
     $operationLock = Enter-DreamSkinOperationLock
@@ -223,9 +211,13 @@ try {
   }
 
   $status = Get-DreamSkinLifecycleStatus
+  $recovery = Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot
+  $restoreRecoveryAvailable = $recovery.LiveBackup -or $recovery.Completed
+  $uninstallRecoveryAvailable = $restoreRecoveryAvailable -or $recovery.NeverApplied
   $recoveringStatusError = $null -ne $status.Error -and (
-    ($Operation -eq 'restore' -and $status.Error.code -in @('STATE_UNSAFE', 'RUNTIME_INVALID')) -or
-    ($Operation -eq 'uninstall' -and
+    ($Operation -eq 'restore' -and $restoreRecoveryAvailable -and
+      $status.Error.code -in @('STATE_UNSAFE', 'RUNTIME_INVALID', 'CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED')) -or
+    ($Operation -eq 'uninstall' -and $uninstallRecoveryAvailable -and
       $status.Error.code -in @('STATE_UNSAFE', 'RUNTIME_INVALID', 'CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED'))
   )
   if (-not $status.Ok -and -not $recoveringStatusError) {
@@ -234,31 +226,19 @@ try {
   }
   $canSkipCompletedUninstall = $Operation -eq 'uninstall' -and
     $status.State.install -eq 'not-installed' -and $status.State.session -eq 'official' -and
-    $status.State.codex -ne 'running'
+    $status.State.codex -ne 'running' -and ($recovery.Completed -or $recovery.NeverApplied)
   if ($canSkipCompletedUninstall) {
-    Assert-DreamSkinNoReparseComponents -Path $stateRoot
-    if ((Test-DreamSkinPathEntry -Path $stateRoot) -and
-      -not (Test-Path -LiteralPath $stateRoot -PathType Container)) {
-      throw 'The Dream Skin state root is not a safe directory.'
-    }
-    $recoveryArtifactsPresent = $false
-    foreach ($path in @($restoreBackup, $appearanceMarker, $statePath, $pausedPath)) {
-      Assert-DreamSkinNoReparseComponents -Path $path
-      if (Test-DreamSkinPathEntry -Path $path) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-          throw 'A Dream Skin recovery artifact is not a safe file.'
-        }
-        $recoveryArtifactsPresent = $true
-      }
-    }
-    if (-not $recoveryArtifactsPresent) {
-      [Console]::Error.WriteLine('DREAM_SKIN_PROGRESS=uninstalling')
-      if ($DeleteUserThemes) { Remove-DreamSkinUserThemeData -StateRoot $stateRoot }
-      $uninstalledState = New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official' `
-        -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @('install')
-      Write-DreamSkinStudioEnvelope -Operation $Operation -Ok $true -State $uninstalledState -Error $null
-      exit 0
-    }
+    [Console]::Error.WriteLine('DREAM_SKIN_PROGRESS=uninstalling')
+    if ($DeleteUserThemes) { Remove-DreamSkinUserThemeData -StateRoot $stateRoot }
+    $uninstalledState = New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official' `
+      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @('install')
+    Write-DreamSkinStudioEnvelope -Operation $Operation -Ok $true -State $uninstalledState -Error $null
+    exit 0
+  }
+  if (($Operation -eq 'restore' -and -not $restoreRecoveryAvailable) -or
+    ($Operation -eq 'uninstall' -and -not $uninstallRecoveryAvailable)) {
+    Exit-DreamSkinStudioError -Code 'OPERATION_FAILED' -Message 'Safe restore evidence is unavailable.' `
+      -RecoveryActions @('diagnostics', 'cancel') -State $status.State
   }
   if ($Operation -eq 'install' -and $status.State.codex -eq 'running' -and -not $RestartAuthorized) {
     Exit-DreamSkinStudioError -Code 'CODEX_CLOSE_REQUIRED' -Message 'Codex must close before Studio can be installed.' `
@@ -330,12 +310,17 @@ try {
   if ($child.ExitCode -ne 0) { Exit-DreamSkinChildFailure -Child $child -State $status.State }
 
   $postStatus = Get-DreamSkinLifecycleStatus
+  $unavailableCodexAfterRestore = $Operation -eq 'restore' -and -not $postStatus.Ok -and
+    $null -ne $postStatus.Error -and
+    $postStatus.Error.code -in @('CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED') -and
+    $postStatus.State.install -eq 'not-installed' -and $postStatus.State.session -eq 'official' -and
+    $postStatus.State.codex -ne 'running'
   $unavailableCodexAfterUninstall = $Operation -eq 'uninstall' -and -not $postStatus.Ok -and
     $null -ne $postStatus.Error -and
     $postStatus.Error.code -in @('CODEX_NOT_INSTALLED', 'CODEX_FIRST_RUN_REQUIRED') -and
     $postStatus.State.install -eq 'not-installed' -and $postStatus.State.session -eq 'official' -and
     $postStatus.State.codex -ne 'running'
-  if (-not $postStatus.Ok -and -not $unavailableCodexAfterUninstall) {
+  if (-not $postStatus.Ok -and -not $unavailableCodexAfterRestore -and -not $unavailableCodexAfterUninstall) {
     if ($null -ne $postStatus.Error -and $postStatus.Error.code -eq 'STATE_UNSAFE') {
       Exit-DreamSkinStudioError -Code 'STATE_UNSAFE' -Message 'Theme state needs recovery before it can be used.' `
         -RecoveryActions @('restore', 'diagnostics', 'cancel') -State $postStatus.State
