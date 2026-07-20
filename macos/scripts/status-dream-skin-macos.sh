@@ -277,7 +277,8 @@ if [ "$STUDIO_JSON" = "true" ]; then
     CDP_OK="true"
   fi
   [ "$CDP_OK" = "true" ] && VERIFIED="true"
-  if [ "$CODEX" = "running" ] && [ "$VERIFIED" != "true" ]; then
+  if [ "$CODEX_RUNNING" = "true" ] && [ "$CODEX" != "not-installed" ] \
+    && [ "$VERIFIED" != "true" ]; then
     REQUIRES_RESTART="true"
   fi
 

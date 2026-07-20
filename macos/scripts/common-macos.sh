@@ -725,7 +725,27 @@ recorded_injector_process_matches() {
   # A recorded PID is only safe to signal when the complete launch identity
   # was persisted.  Do not fall back to the current process paths: a stale or
   # hand-edited state file must fail closed instead of authorizing a reused PID.
-  [ -n "$expected_start" ] && [ -n "$expected_node" ] && [ -n "$expected_injector" ] || return 1
+  [ -n "$expected_start" ] || return 1
+  launched_injector_process_matches \
+    "$pid" "$expected_node" "$expected_injector" "$expected_port" "$expected_browser_id" \
+    || return 1
+  actual_start="$(process_started_at "$pid")"
+  [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ] || return 1
+  return 0
+}
+
+launched_injector_process_matches() {
+  local pid="$1"
+  local expected_node="${2:-}"
+  local expected_injector="${3:-}"
+  local expected_port="${4:-}"
+  local expected_browser_id="${5:-}"
+  local command_line=""
+  local command_lower=""
+  local node_lower=""
+  local injector_lower=""
+
+  [ -n "$expected_node" ] && [ -n "$expected_injector" ] || return 1
   case "$expected_port" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -747,8 +767,6 @@ recorded_injector_process_matches() {
     *" --browser-id $expected_browser_id --theme-dir "*) ;;
     *) return 1 ;;
   esac
-  actual_start="$(process_started_at "$pid")"
-  [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ] || return 1
   return 0
 }
 
@@ -1005,9 +1023,67 @@ write_state() {
       createdAt: new Date().toISOString()
     };
     const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-    fs.renameSync(temporary, file);
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, file);
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
   ' "$STATE_PATH" "$SKIN_VERSION" "$port" "$injector_pid" "$injector_started_at" "$INJECTOR" "$NODE" "$node_ver" "$bundle" "$exe" "$app_ver" "$team" "$PROJECT_ROOT" "$THEME_DIR" "$codex_pid" "$browser_id" "$(/usr/bin/uname -m)"
+}
+
+owned_injector_process_matches() {
+  local pid="$1"
+  local started_at="$2"
+  local node="$3"
+  local injector="$4"
+  local port="$5"
+  local browser_id="$6"
+  if [ -n "$started_at" ]; then
+    recorded_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"
+  else
+    launched_injector_process_matches "$pid" "$node" "$injector" "$port" "$browser_id"
+  fi
+}
+
+stop_injector_process() {
+  local pid="$1"
+  local started_at="$2"
+  local node="$3"
+  local injector="$4"
+  local port="$5"
+  local browser_id="$6"
+  /bin/kill -0 "$pid" 2>/dev/null || {
+    /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
+    wait "$pid" 2>/dev/null || true
+    return 0
+  }
+  if ! owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"; then
+    if ! /bin/kill -0 "$pid" 2>/dev/null || [ -z "$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)" ]; then
+      /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    printf 'Dream Skin injector PID %s is live but its identity does not match; refusing to signal it.\n' "$pid" >&2
+    return 1
+  fi
+  /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
+  /bin/kill -TERM "$pid" 2>/dev/null || true
+  local deadline=$((SECONDS + 6))
+  while /bin/kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.2; done
+  if owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"; then
+    /bin/kill -KILL "$pid" 2>/dev/null || true
+  fi
+  deadline=$((SECONDS + 2))
+  while owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" \
+    && [ "$SECONDS" -lt "$deadline" ]; do
+    /bin/sleep 0.1
+  done
+  wait "$pid" 2>/dev/null || true
+  if owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"; then
+    printf 'Could not stop the Dream Skin injector (PID %s).\n' "$pid" >&2
+    return 1
+  fi
 }
 
 stop_recorded_injector() {
@@ -1063,38 +1139,7 @@ stop_recorded_injector() {
     printf 'Recorded Dream Skin injector identity is incomplete; state was preserved.\n' >&2
     return 1
   fi
-  /bin/kill -0 "$pid" 2>/dev/null || {
-    /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
-    return 0
-  }
-  if ! recorded_injector_process_matches "$pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" "$saved_browser_id"; then
-    # The process may have exited between the initial kill -0 probe and the
-    # identity check. A dead (or already reaped) recorded PID is safe to
-    # forget; a live PID with mismatched identity is never signalled.
-    if ! /bin/kill -0 "$pid" 2>/dev/null || [ -z "$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)" ]; then
-      /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
-      return 0
-    fi
-    printf 'Recorded injector PID %s is live but its identity does not match; refusing to signal it.\n' "$pid" >&2
-    return 1
-  fi
-  /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
-  /bin/kill -TERM "$pid" 2>/dev/null || true
-  local deadline=$((SECONDS + 6))
-  while /bin/kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.2; done
-  if recorded_injector_process_matches "$pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" "$saved_browser_id"; then
-    /bin/kill -KILL "$pid" 2>/dev/null || true
-  fi
-  deadline=$((SECONDS + 2))
-  while recorded_injector_process_matches "$pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" "$saved_browser_id" \
-    && [ "$SECONDS" -lt "$deadline" ]; do
-    /bin/sleep 0.1
-  done
-  if recorded_injector_process_matches "$pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" "$saved_browser_id"; then
-    printf 'Could not stop the recorded Dream Skin injector (PID %s).\n' "$pid" >&2
-    return 1
-  fi
-  return 0
+  stop_injector_process "$pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" "$saved_browser_id"
 }
 
 state_has_complete_injector_identity() {
@@ -1153,12 +1198,33 @@ recover_damaged_injector_state_without_live_candidate() {
   fi
 }
 
+record_launched_injector() {
+  local pid="$1"
+  local port="$2"
+  local browser_id="$3"
+  local started_at=""
+  started_at="$(process_started_at "$pid" 2>/dev/null || true)"
+  if [ -z "$started_at" ]; then
+    stop_injector_process "$pid" "" "$NODE" "$INJECTOR" "$port" "$browser_id" \
+      || printf 'Could not roll back the unrecorded Dream Skin injector (PID %s).\n' "$pid" >&2
+    printf 'Could not record the injector process start time.\n' >&2
+    return 1
+  fi
+  LAUNCHED_INJECTOR_PID="$pid"
+  LAUNCHED_INJECTOR_STARTED_AT="$started_at"
+}
+
 launch_injector_daemon() {
   local port="$1"
   local browser_id="$2"
   local pid=""
   local deadline=$((SECONDS + 10))
-  browser_id_is_valid "$browser_id" || fail "The CDP Browser ID is missing or invalid."
+  LAUNCHED_INJECTOR_PID=""
+  LAUNCHED_INJECTOR_STARTED_AT=""
+  browser_id_is_valid "$browser_id" || {
+    printf 'The CDP Browser ID is missing or invalid.\n' >&2
+    return 1
+  }
   : > "$INJECTOR_LOG"
   : > "$INJECTOR_ERROR_LOG"
   /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
@@ -1169,11 +1235,13 @@ launch_injector_daemon() {
   pid="$!"
   /bin/sleep 0.08
   if [ -n "$pid" ] && /bin/kill -0 "$pid" 2>/dev/null; then
-    printf '%s\n' "$pid"
-    return 0
+    record_launched_injector "$pid" "$port" "$browser_id"
+    return
   fi
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
   if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ]; then
-    fail "The injector did not start. See $INJECTOR_ERROR_LOG and $INJECTOR_LOG"
+    printf 'The injector did not start. See %s and %s\n' "$INJECTOR_ERROR_LOG" "$INJECTOR_LOG" >&2
+    return 1
   fi
 
   # Fallback: launchctl submit
@@ -1184,20 +1252,47 @@ launch_injector_daemon() {
     pid="$(/bin/launchctl print "gui/$(/usr/bin/id -u)/$INJECTOR_JOB_LABEL" 2>/dev/null \
       | /usr/bin/awk '/^[[:space:]]*pid = [0-9]+/{print $3; exit}')"
     if [ -n "$pid" ] && /bin/kill -0 "$pid" 2>/dev/null; then
-      printf '%s\n' "$pid"
-      return 0
+      record_launched_injector "$pid" "$port" "$browser_id"
+      return
     fi
     # Also detect the nohup node process by command line
     pid="$(/bin/ps -axo pid=,command= | /usr/bin/awk -v inj="$INJECTOR" -v port="$port" -v browser="$browser_id" '
       index($0, inj) && index($0, "--watch") && index($0, "--port " port " --browser-id " browser " --theme-dir ") { print $1; exit }
     ')"
     if [ -n "$pid" ] && /bin/kill -0 "$pid" 2>/dev/null; then
-      printf '%s\n' "$pid"
-      return 0
+      record_launched_injector "$pid" "$port" "$browser_id"
+      return
     fi
     /bin/sleep 0.2
   done
-  fail "The injector did not start. See $INJECTOR_ERROR_LOG and $INJECTOR_LOG"
+  printf 'The injector did not start. See %s and %s\n' "$INJECTOR_ERROR_LOG" "$INJECTOR_LOG" >&2
+  return 1
+}
+
+start_watcher() {
+  local port="$1"
+  local browser_id="$2"
+  local codex_pid="${3:-0}"
+  local pid=""
+  local started_at=""
+  launch_injector_daemon "$port" "$browser_id" || return 1
+  pid="$LAUNCHED_INJECTOR_PID"
+  started_at="$LAUNCHED_INJECTOR_STARTED_AT"
+  /bin/sleep 0.15
+  if ! /bin/kill -0 "$pid" 2>/dev/null; then
+    stop_injector_process "$pid" "$started_at" "$NODE" "$INJECTOR" "$port" "$browser_id" || true
+    printf 'The injector exited during startup. See %s\n' "$INJECTOR_ERROR_LOG" >&2
+    return 1
+  fi
+  if ! write_state "$port" "$pid" "$started_at" "$codex_pid" "$browser_id"; then
+    stop_injector_process "$pid" "$started_at" "$NODE" "$INJECTOR" "$port" "$browser_id" \
+      || printf 'Could not roll back the unpublished Dream Skin injector (PID %s).\n' "$pid" >&2
+    return 1
+  fi
+  STARTED_WATCHER_PID="$pid"
+  STARTED_WATCHER_AT="$started_at"
+  LAUNCHED_INJECTOR_PID=""
+  LAUNCHED_INJECTOR_STARTED_AT=""
 }
 
 # Resolve Node quickly: prefer known Codex path, else full runtime check.
@@ -1279,13 +1374,8 @@ hot_reapply_theme() {
     return 0
   fi
   stop_recorded_injector 2>/dev/null || return 1
-  inj_pid="$(launch_injector_daemon "$port" "$browser_id")"
-  /bin/kill -0 "$inj_pid" 2>/dev/null || return 1
-  started_at="$(process_started_at "$inj_pid")"
   codex_pid="$(codex_main_pids 2>/dev/null | /usr/bin/head -n 1)"
-  [ -n "$started_at" ] || started_at="$(/bin/date)"
-  write_state "$port" "$inj_pid" "$started_at" "${codex_pid:-0}" "$browser_id"
-  return 0
+  start_watcher "$port" "$browser_id" "${codex_pid:-0}" || return 1
 }
 
 # Always tear down any leftover launchd babysitter for the themed Codex process.

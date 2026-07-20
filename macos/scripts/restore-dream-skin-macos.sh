@@ -38,6 +38,10 @@ while [ "$#" -gt 0 ]; do
     *) fail "Unknown restore argument: $1" ;;
   esac
 done
+CODEX_FIRST_RUN_REQUIRED="false"
+if [ ! -e "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
+  CODEX_FIRST_RUN_REQUIRED="true"
+fi
 
 CODEX_AVAILABLE="false"
 NODE_AVAILABLE="false"
@@ -65,7 +69,8 @@ fi
 NATIVE_CONFIG_RESTORE=""
 NATIVE_CONFIG_RESTORE_IDENTITY=""
 NATIVE_CONFIG_RESTORE_ROOT=""
-if [ "$RESTORE_BASE_THEME" = "true" ] && [ "$NODE_AVAILABLE" != "true" ]; then
+if [ "$RESTORE_BASE_THEME" = "true" ] && [ "$NODE_AVAILABLE" != "true" ] \
+  && { [ -e "$CONFIG_PATH" ] || [ -L "$CONFIG_PATH" ]; }; then
   NATIVE_CONFIG_RESTORE_ROOT="$PROJECT_ROOT"
   NATIVE_CONFIG_RESTORE="$NATIVE_CONFIG_RESTORE_ROOT/bin/dream-skin-config-restore"
   NATIVE_CONFIG_RESTORE_IDENTITY="$(native_restore_helper_identity "$NATIVE_CONFIG_RESTORE_ROOT" "$NATIVE_CONFIG_RESTORE")" \
@@ -149,7 +154,11 @@ if [ "$RESTORE_BASE_THEME" = "true" ]; then
     CODEX_RUNNING="false"
   fi
   if [ -f "$THEME_BACKUP_PATH" ]; then
-    if [ "$NODE_AVAILABLE" = "true" ]; then
+    if [ ! -e "$CONFIG_PATH" ] && [ ! -L "$CONFIG_PATH" ]; then
+      live_theme_backup_is_valid \
+        || fail "The selective pre-install theme backup is invalid; restore state was preserved."
+      printf 'Codex config is already absent; no managed appearance settings remain.\n'
+    elif [ "$NODE_AVAILABLE" = "true" ]; then
       "$NODE" "$SCRIPT_DIR/theme-config.mjs" restore "$CONFIG_PATH" "$THEME_BACKUP_PATH"
     else
       [ "$(native_restore_helper_identity "$NATIVE_CONFIG_RESTORE_ROOT" "$NATIVE_CONFIG_RESTORE")" = "$NATIVE_CONFIG_RESTORE_IDENTITY" ] \
@@ -179,7 +188,9 @@ fi
 
 if [ "$RESTART_CODEX" = "true" ]; then
   [ "$CODEX_RUNNING" = "true" ] && stop_codex "$FORCE_STOP_AUTHORIZED"
-  if [ "$CODEX_APP_VALIDATED" = "true" ]; then
+  if [ "$CODEX_FIRST_RUN_REQUIRED" = "true" ]; then
+    printf 'Codex was not reopened because config.toml is absent; complete first-run setup manually.\n'
+  elif [ "$CODEX_APP_VALIDATED" = "true" ]; then
     launch_codex_normally \
       || printf 'Codex could not be reopened automatically. The restore is complete; open Codex normally.\n' >&2
   else

@@ -30,6 +30,7 @@ LOCK_RACE_A_PID=""
 LOCK_RACE_B_PID=""
 LOCK_GATE_HOLDER_PID=""
 RECOVERY_WATCHER_PID=""
+FIRST_RUN_CODEX_PID=""
 cleanup() {
   [ -z "$RESPONDER_PID" ] || /bin/kill -TERM "$RESPONDER_PID" 2>/dev/null || true
   [ -z "$RESPONDER_PID" ] || wait "$RESPONDER_PID" 2>/dev/null || true
@@ -45,6 +46,14 @@ cleanup() {
   [ -z "$LOCK_GATE_HOLDER_PID" ] || wait "$LOCK_GATE_HOLDER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WATCHER_PID" ] || /bin/kill -TERM "$RECOVERY_WATCHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WATCHER_PID" ] || wait "$RECOVERY_WATCHER_PID" 2>/dev/null || true
+  if [ -n "$FIRST_RUN_CODEX_PID" ]; then
+    /bin/kill -TERM "$FIRST_RUN_CODEX_PID" 2>/dev/null || true
+    cleanup_deadline=$((SECONDS + 5))
+    while /bin/kill -0 "$FIRST_RUN_CODEX_PID" 2>/dev/null \
+      && [ "$SECONDS" -lt "$cleanup_deadline" ]; do /bin/sleep 0.02; done
+    /bin/kill -KILL "$FIRST_RUN_CODEX_PID" 2>/dev/null || true
+    wait "$FIRST_RUN_CODEX_PID" 2>/dev/null || true
+  fi
   /bin/rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -84,7 +93,10 @@ STUB
 run_watcher_fixture() (
   source "$WATCHER_FIXTURE/common-macos.sh"
   NODE=/usr/bin/false
+  process_started_at() { printf 'fixture-start\n'; }
+  launched_injector_process_matches() { [ "$1" = "4242" ]; }
   launch_injector_daemon 9341 Browser-A
+  printf '%s\n' "$LAUNCHED_INJECTOR_PID"
 )
 
 : > "$WATCHER_MARKER"
@@ -1240,18 +1252,28 @@ while [ "$#" -gt 0 ]; do
 done
 state="$HOME/Library/Application Support/CodexDreamSkinStudio/state.json"
 archive="$HOME/Library/Application Support/CodexDreamSkinStudio/theme-backup.restored.json"
+backup="$HOME/Library/Application Support/CodexDreamSkinStudio/theme-backup.json"
 installed="$HOME/.codex/codex-dream-skin-studio"
 if [ -e "$state" ]; then
   printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"stale","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":["restore","uninstall"],"verified":null},"error":{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["restore","diagnostics","cancel"]}}\n' "$operation"
   exit 1
 fi
-if [ -d "$installed" ] && [ ! -L "$installed" ] && [ ! -f "$archive" ]; then
+if [ -d "$installed" ] && [ ! -L "$installed" ] && [ ! -f "$archive" ] && [ ! -f "$backup" ]; then
   printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"stale","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["diagnostics","cancel"]}}\n' "$operation"
   exit 1
 fi
 actions='["install"]'
 [ ! -d "$installed" ] || actions='["install","uninstall"]'
-printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":%s,"verified":null},"error":{"code":"CODEX_NOT_INSTALLED","message":"Codex is not installed.","recoveryActions":["cancel"]}}\n' "$operation" "$actions"
+[ ! -f "$backup" ] || actions='["restore","uninstall"]'
+codex="${RECOVERY_CODEX_STATE:-not-installed}"
+code=CODEX_NOT_INSTALLED
+message='Codex is not installed.'
+if [ "$codex" = "needs-first-run" ]; then
+  code=CODEX_FIRST_RUN_REQUIRED
+  message='Open Codex and complete first-run setup.'
+fi
+printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"%s","session":"official","operation":"idle","themeName":null,"requiresRestart":false,"availableActions":%s,"verified":null},"error":{"code":"%s","message":"%s","recoveryActions":["cancel"]}}\n' \
+  "$operation" "$codex" "$actions" "$code" "$message"
 exit 1
 STUB
 : > "$RECOVERY_BUNDLED/scripts/theme-config.mjs"
@@ -1358,6 +1380,225 @@ for recovery_operation in restore uninstall; do
     [ ! -e "$RECOVERY_NODE_MARKER" ] || { printf 'unsafe Node was executed during native recovery.\n' >&2; exit 1; }
   done
 done
+
+# A valid live backup remains completion proof when config.toml disappeared.
+# Restore is retryable, Uninstall continues, and default recovery preserves themes.
+for recovery_codex in not-installed needs-first-run; do
+  recreate_native_recovery
+  /bin/rm -f "$RECOVERY_CONFIG" "$RECOVERY_STATE/state.json" \
+    "$RECOVERY_STATE/theme-backup.restored.json"
+  /bin/mkdir -p "$RECOVERY_STATE/themes/user-theme" "$RECOVERY_STATE/theme"
+  /usr/bin/printf 'user theme sentinel\n' > "$RECOVERY_STATE/themes/user-theme/theme.json"
+  /usr/bin/printf 'active theme sentinel\n' > "$RECOVERY_STATE/theme/theme.json"
+  RECOVERY_THEME_BEFORE="$(/usr/bin/shasum -a 256 \
+    "$RECOVERY_STATE/themes/user-theme/theme.json" "$RECOVERY_STATE/theme/theme.json")"
+
+  for recovery_attempt in first retry; do
+    set +e
+    /usr/bin/env HOME="$RECOVERY_HOME" RECOVERY_CODEX_STATE="$recovery_codex" \
+      "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+      > "$RECOVERY_FIXTURE/missing-config-$recovery_codex-$recovery_attempt.json" \
+      2> "$RECOVERY_FIXTURE/missing-config-$recovery_codex-$recovery_attempt.stderr"
+    RECOVERY_EXIT="$?"
+    set -e
+    [ "$RECOVERY_EXIT" -eq 0 ] || {
+      printf 'Missing-config %s restore %s failed.\n' "$recovery_codex" "$recovery_attempt" >&2
+      /bin/cat "$RECOVERY_FIXTURE/missing-config-$recovery_codex-$recovery_attempt.json" >&2 || true
+      exit 1
+    }
+    [ ! -e "$RECOVERY_CONFIG" ] && [ ! -L "$RECOVERY_CONFIG" ]
+    [ ! -e "$RECOVERY_BACKUP" ] && [ -f "$RECOVERY_STATE/theme-backup.restored.json" ]
+    [ ! -e "$RECOVERY_STATE/state.json" ] && [ ! -L "$RECOVERY_STATE/state.json" ]
+  done
+
+  set +e
+  /usr/bin/env HOME="$RECOVERY_HOME" RECOVERY_CODEX_STATE="$recovery_codex" \
+    "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" uninstall \
+    > "$RECOVERY_FIXTURE/missing-config-$recovery_codex-uninstall.json" \
+    2> "$RECOVERY_FIXTURE/missing-config-$recovery_codex-uninstall.stderr"
+  RECOVERY_EXIT="$?"
+  set -e
+  [ "$RECOVERY_EXIT" -eq 0 ] || {
+    printf 'Missing-config %s uninstall failed.\n' "$recovery_codex" >&2
+    /bin/cat "$RECOVERY_FIXTURE/missing-config-$recovery_codex-uninstall.json" >&2 || true
+    exit 1
+  }
+  [ ! -e "$RECOVERY_CONFIG" ] && [ ! -L "$RECOVERY_CONFIG" ]
+  [ ! -e "$RECOVERY_INSTALLED" ] && [ ! -L "$RECOVERY_INSTALLED" ]
+  [ "$RECOVERY_THEME_BEFORE" = "$(/usr/bin/shasum -a 256 \
+    "$RECOVERY_STATE/themes/user-theme/theme.json" "$RECOVERY_STATE/theme/theme.json")" ]
+done
+
+# A bundle-present first-run Codex can still be running even though config.toml
+# is absent. Preserve that fact through status and authorization, close only
+# the exact validated process, and never relaunch into first-run setup.
+FIRST_RUN_FIXTURE="$TMP/running-first-run"
+FIRST_RUN_HOME="$FIRST_RUN_FIXTURE/home"
+FIRST_RUN_BUNDLED="$FIRST_RUN_FIXTURE/bundled"
+FIRST_RUN_STATE="$FIRST_RUN_HOME/Library/Application Support/CodexDreamSkinStudio"
+FIRST_RUN_CONFIG="$FIRST_RUN_HOME/.codex/config.toml"
+FIRST_RUN_BACKUP="$FIRST_RUN_STATE/theme-backup.json"
+FIRST_RUN_ARCHIVE="$FIRST_RUN_STATE/theme-backup.restored.json"
+FIRST_RUN_MARKER="$FIRST_RUN_FIXTURE/lifecycle.log"
+FIRST_RUN_BUNDLE="$FIRST_RUN_HOME/Applications/ChatGPT.app"
+FIRST_RUN_CODEX_EXE="$FIRST_RUN_BUNDLE/Contents/MacOS/ChatGPT"
+FIRST_RUN_CODEX_SOURCE="$FIRST_RUN_FIXTURE/ChatGPT.c"
+/bin/mkdir -p "$FIRST_RUN_BUNDLED/bin" "$FIRST_RUN_BUNDLED/scripts" \
+  "$FIRST_RUN_HOME/.codex" "$FIRST_RUN_STATE/themes/user-theme" "$FIRST_RUN_STATE/theme" \
+  "$FIRST_RUN_BUNDLE/Contents/MacOS"
+/bin/cp "$ROOT/VERSION" "$FIRST_RUN_BUNDLED/VERSION"
+/bin/cp "$ROOT/bin/dream-skin-config-restore" "$FIRST_RUN_BUNDLED/bin/"
+/bin/cp "$ROOT/scripts/studio-adapter-macos.sh" "$ROOT/scripts/status-dream-skin-macos.sh" \
+  "$ROOT/scripts/restore-dream-skin-macos.sh" "$FIRST_RUN_BUNDLED/scripts/"
+/bin/cp "$ROOT/scripts/common-macos.sh" "$FIRST_RUN_BUNDLED/scripts/common-production-macos.sh"
+: > "$FIRST_RUN_BUNDLED/scripts/theme-config.mjs"
+: > "$FIRST_RUN_BUNDLED/scripts/injector.mjs"
+/usr/bin/sed > "$FIRST_RUN_CODEX_SOURCE" <<'STUB'
+#include <signal.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t running = 1;
+
+static void stop_process(int signal_number) {
+  (void)signal_number;
+  running = 0;
+}
+
+int main(void) {
+  signal(SIGTERM, stop_process);
+  signal(SIGINT, stop_process);
+  while (running) pause();
+  return 0;
+}
+STUB
+/usr/bin/clang -Os "$FIRST_RUN_CODEX_SOURCE" -o "$FIRST_RUN_CODEX_EXE"
+/usr/bin/sed > "$FIRST_RUN_BUNDLE/Contents/Info.plist" <<'STUB'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.openai.codex</string>
+  <key>CFBundleExecutable</key>
+  <string>ChatGPT</string>
+  <key>CFBundleShortVersionString</key>
+  <string>fixture</string>
+</dict>
+</plist>
+STUB
+/usr/bin/sed \
+  -e "s|__MARKER__|$FIRST_RUN_MARKER|g" \
+  > "$FIRST_RUN_BUNDLED/scripts/common-macos.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/common-production-macos.sh"
+try_validate_codex_app_identity() {
+  [ "$CODEX_BUNDLE" = "$CODEX_APP_BUNDLE" ] \
+    && [ "$CODEX_EXE" = "$CODEX_APP_BUNDLE/Contents/MacOS/ChatGPT" ] || return 1
+  CODEX_APP_VALIDATED="true"
+  CODEX_APP_CONTROL_VALIDATED="true"
+  CODEX_TEAM_ID="$EXPECTED_CODEX_TEAM_ID"
+  export CODEX_APP_VALIDATED CODEX_APP_CONTROL_VALIDATED CODEX_TEAM_ID
+}
+try_validate_codex_app_control_identity() { try_validate_codex_app_identity; }
+try_require_macos_node_runtime() {
+  NODE_RUNTIME_VALIDATED="false"
+  unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
+  return 1
+}
+release_codex_launchd_job() { :; }
+verified_cdp_browser_id() { return 1; }
+stop_codex() {
+  [ "${CODEX_APP_VALIDATED:-false}" = "true" ] \
+    && [ "${CODEX_APP_CONTROL_VALIDATED:-false}" = "true" ] \
+    || fail "Fixture Codex control identity was not validated."
+  [ "$(codex_main_pids)" = "$DREAM_SKIN_TEST_CODEX_PID" ] \
+    || fail "Fixture Codex PID did not match the validated executable."
+  printf 'verified-stop:%s\n' "$DREAM_SKIN_TEST_CODEX_PID" >> "__MARKER__"
+  /bin/kill -TERM "$DREAM_SKIN_TEST_CODEX_PID"
+  local deadline=$((SECONDS + 5))
+  while codex_is_running && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.02; done
+  codex_is_running && fail "Fixture Codex did not stop."
+  return 0
+}
+launch_codex_normally() { printf 'relaunch\n' >> "__MARKER__"; }
+STUB
+/bin/chmod 755 "$FIRST_RUN_BUNDLED/bin/dream-skin-config-restore" \
+  "$FIRST_RUN_BUNDLED/scripts/"*.sh "$FIRST_RUN_CODEX_EXE"
+/usr/bin/printf 'user theme sentinel\n' > "$FIRST_RUN_STATE/themes/user-theme/theme.json"
+/usr/bin/printf 'active theme sentinel\n' > "$FIRST_RUN_STATE/theme/theme.json"
+"$NODE" -e '
+  const fs = require("node:fs");
+  fs.writeFileSync(process.argv[1], `${JSON.stringify({
+    schemaVersion: 1,
+    platform: "darwin",
+    configPath: process.argv[2],
+    values: {
+      appearanceTheme: `appearanceTheme = "system"`,
+      appearanceDarkCodeThemeId: null,
+    },
+  })}\n`);
+' "$FIRST_RUN_BACKUP" "$FIRST_RUN_CONFIG"
+FIRST_RUN_THEME_BEFORE="$(/usr/bin/shasum -a 256 \
+  "$FIRST_RUN_STATE/themes/user-theme/theme.json" "$FIRST_RUN_STATE/theme/theme.json")"
+"$FIRST_RUN_CODEX_EXE" &
+FIRST_RUN_CODEX_PID="$!"
+/bin/sleep 0.1
+/usr/bin/pgrep -x ChatGPT | /usr/bin/grep -Fx "$FIRST_RUN_CODEX_PID" >/dev/null
+
+set +e
+/usr/bin/env HOME="$FIRST_RUN_HOME" CODEX_APP_BUNDLE="$FIRST_RUN_BUNDLE" \
+  "$FIRST_RUN_BUNDLED/scripts/status-dream-skin-macos.sh" --studio-json --deep --operation restore \
+  > "$FIRST_RUN_FIXTURE/status.json"
+FIRST_RUN_STATUS_EXIT="$?"
+set -e
+[ "$FIRST_RUN_STATUS_EXIT" -eq 1 ]
+"$NODE" -e '
+  const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (value.state?.codex !== "needs-first-run" || value.state?.requiresRestart !== true) {
+    throw new Error(`running first-run status lost the live Codex fact: ${JSON.stringify(value)}`);
+  }
+' "$FIRST_RUN_FIXTURE/status.json"
+
+set +e
+/usr/bin/env HOME="$FIRST_RUN_HOME" CODEX_APP_BUNDLE="$FIRST_RUN_BUNDLE" \
+  DREAM_SKIN_TEST_CODEX_PID="$FIRST_RUN_CODEX_PID" \
+  "$FIRST_RUN_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+  > "$FIRST_RUN_FIXTURE/unauthorized.json" 2> "$FIRST_RUN_FIXTURE/unauthorized.stderr"
+FIRST_RUN_RESTORE_EXIT="$?"
+set -e
+[ "$FIRST_RUN_RESTORE_EXIT" -eq 1 ]
+"$NODE" -e '
+  const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (value.error?.code !== "RESTART_REQUIRED") throw new Error(`unexpected first-run authorization result: ${JSON.stringify(value)}`);
+' "$FIRST_RUN_FIXTURE/unauthorized.json"
+/bin/kill -0 "$FIRST_RUN_CODEX_PID"
+[ -f "$FIRST_RUN_BACKUP" ] && [ ! -e "$FIRST_RUN_ARCHIVE" ] && [ ! -e "$FIRST_RUN_MARKER" ]
+
+set +e
+/usr/bin/env HOME="$FIRST_RUN_HOME" CODEX_APP_BUNDLE="$FIRST_RUN_BUNDLE" \
+  DREAM_SKIN_TEST_CODEX_PID="$FIRST_RUN_CODEX_PID" \
+  "$FIRST_RUN_BUNDLED/scripts/studio-adapter-macos.sh" restore --restart-authorized \
+  > "$FIRST_RUN_FIXTURE/authorized.json" 2> "$FIRST_RUN_FIXTURE/authorized.stderr"
+FIRST_RUN_RESTORE_EXIT="$?"
+set -e
+[ "$FIRST_RUN_RESTORE_EXIT" -eq 0 ] || {
+  /bin/cat "$FIRST_RUN_FIXTURE/authorized.json" >&2 || true
+  /bin/cat "$FIRST_RUN_FIXTURE/authorized.stderr" >&2 || true
+  /bin/cat "$FIRST_RUN_STATE/studio-operation.log" >&2 || true
+  exit 1
+}
+"$NODE" -e '
+  const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (!value.ok || value.operation !== "restore") throw new Error(`authorized first-run restore failed: ${JSON.stringify(value)}`);
+' "$FIRST_RUN_FIXTURE/authorized.json"
+[ ! -e "$FIRST_RUN_CONFIG" ] && [ ! -L "$FIRST_RUN_CONFIG" ]
+[ ! -e "$FIRST_RUN_BACKUP" ] && [ -f "$FIRST_RUN_ARCHIVE" ]
+[ "$(/bin/cat "$FIRST_RUN_MARKER")" = "verified-stop:$FIRST_RUN_CODEX_PID" ]
+[ "$FIRST_RUN_THEME_BEFORE" = "$(/usr/bin/shasum -a 256 \
+  "$FIRST_RUN_STATE/themes/user-theme/theme.json" "$FIRST_RUN_STATE/theme/theme.json")" ]
+wait "$FIRST_RUN_CODEX_PID" 2>/dev/null || true
+FIRST_RUN_CODEX_PID=""
 
 # A restored partial engine stays removable through the fixed completion proof;
 # losing that proof must fail closed without deleting the engine.

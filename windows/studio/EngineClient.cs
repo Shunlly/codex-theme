@@ -14,16 +14,24 @@ internal interface IEngineProcessRunner
 
 internal sealed class EngineClient
 {
+  private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(5);
   private readonly IEngineProcessRunner _runner;
   private readonly string _systemRoot;
+  private readonly TimeSpan _operationTimeout;
   private int _busy;
 
-  internal EngineClient() : this(new EngineProcessRunner(), Environment.GetEnvironmentVariable("SystemRoot") ?? throw new InvalidOperationException("SystemRoot is unavailable.")) { }
+  internal EngineClient() : this(new EngineProcessRunner(),
+    Environment.GetEnvironmentVariable("SystemRoot") ?? throw new InvalidOperationException("SystemRoot is unavailable."),
+    DefaultOperationTimeout) { }
 
-  internal EngineClient(IEngineProcessRunner runner, string systemRoot)
+  internal EngineClient(IEngineProcessRunner runner, string systemRoot) : this(runner, systemRoot, DefaultOperationTimeout) { }
+
+  internal EngineClient(IEngineProcessRunner runner, string systemRoot, TimeSpan operationTimeout)
   {
+    if (operationTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(operationTimeout));
     _runner = runner;
     _systemRoot = systemRoot;
+    _operationTimeout = operationTimeout;
   }
 
   internal async Task<EngineEnvelope> RunAsync(
@@ -41,7 +49,9 @@ internal sealed class EngineClient
       var adapterPath = Path.Combine(AppContext.BaseDirectory, "engine", "scripts", "studio-adapter.ps1");
       var arguments = BuildArguments(operation, adapterPath, restartAuthorized, forceAuthorized, deleteUserThemes, deep);
       var powershell = Path.Combine(_systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-      var result = await _runner.RunAsync(powershell, arguments, progress, cancellationToken);
+      using var operationDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+      operationDeadline.CancelAfter(_operationTimeout);
+      var result = await _runner.RunAsync(powershell, arguments, progress, operationDeadline.Token);
       if (result.ExitCode is not (0 or 1 or 2)) throw new InvalidDataException("The engine process failed without a domain response.");
       EngineProtocol.ParseProgress(result.StandardError, null);
       var envelope = EngineProtocol.Parse(result.StandardOutput, operation);
@@ -101,10 +111,15 @@ internal sealed class EngineProcessRunner : IEngineProcessRunner
     foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
 
     using var process = new Process { StartInfo = startInfo };
+    cancellationToken.ThrowIfCancellationRequested();
     if (!process.Start()) throw new InvalidOperationException("The engine process could not start.");
     var stdoutTask = ReadStandardOutputAsync(process.StandardOutput.BaseStream);
     var stderrTask = ReadProgressAsync(process.StandardError.BaseStream, progress);
-    try { await process.WaitForExitAsync(cancellationToken); }
+    try
+    {
+      await Task.WhenAll(process.WaitForExitAsync(cancellationToken), stdoutTask, stderrTask)
+        .WaitAsync(cancellationToken);
+    }
     catch (OperationCanceledException cancellation)
     {
       try { process.Kill(entireProcessTree: true); } catch { }
@@ -113,8 +128,7 @@ internal sealed class EngineProcessRunner : IEngineProcessRunner
       ExceptionDispatchInfo.Capture(cancellation).Throw();
       throw new UnreachableException();
     }
-    var outputs = await Task.WhenAll(stdoutTask, stderrTask);
-    return new EngineProcessResult(process.ExitCode, outputs[0], outputs[1]);
+    return new EngineProcessResult(process.ExitCode, await stdoutTask, await stderrTask);
   }
 
   private static async Task<string> ReadStandardOutputAsync(Stream stream)

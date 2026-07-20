@@ -123,7 +123,7 @@ public partial class MainWindow : Window
     ShowWindow();
     if (!ConfirmPrepareUninstall()) return 1;
     if (cancellationToken.IsCancellationRequested) return 1;
-    if (!await DispatchAsync(EngineOperation.Uninstall, bypassAvailability: true) ||
+    if (!await DispatchAsync(EngineOperation.Uninstall, bypassAvailability: true, cancellationToken: cancellationToken) ||
       cancellationToken.IsCancellationRequested) return 1;
     return TryReserveHandoff() ? 0 : 1;
   }
@@ -139,7 +139,8 @@ public partial class MainWindow : Window
     return await DispatchAsync(EngineOperation.Status, bypassAvailability: true);
   }
 
-  private async Task<bool> DispatchAsync(EngineOperation operation, bool deleteUserThemes = false, bool bypassAvailability = false)
+  private async Task<bool> DispatchAsync(EngineOperation operation, bool deleteUserThemes = false,
+    bool bypassAvailability = false, CancellationToken cancellationToken = default)
   {
     if (!AllowsDispatch(_busy, _confirming, _handoff.IsActive)) return false;
     if (!bypassAvailability && !CanRun(operation)) return false;
@@ -149,7 +150,7 @@ public partial class MainWindow : Window
     {
       while (true)
       {
-        var result = await RunOnceAsync(operation, restartAuthorized, forceAuthorized, deleteUserThemes);
+        var result = await RunOnceAsync(operation, restartAuthorized, forceAuthorized, deleteUserThemes, cancellationToken);
         _envelope = result;
         UpdateView();
         if (result.Ok)
@@ -197,7 +198,8 @@ public partial class MainWindow : Window
     }
   }
 
-  private async Task<EngineEnvelope> RunOnceAsync(EngineOperation operation, bool restartAuthorized, bool forceAuthorized, bool deleteUserThemes)
+  private async Task<EngineEnvelope> RunOnceAsync(EngineOperation operation, bool restartAuthorized,
+    bool forceAuthorized, bool deleteUserThemes, CancellationToken cancellationToken)
   {
     _busy = true;
     OperationProgress.Visibility = Visibility.Visible;
@@ -206,7 +208,7 @@ public partial class MainWindow : Window
     var progress = new Progress<EngineProgress>(value => ProgressText.Text = ProgressTextFor(value));
     return await _client.RunAsync(operation, restartAuthorized, forceAuthorized, deleteUserThemes,
       deep: operation is EngineOperation.Preflight or EngineOperation.Status, progress: progress,
-      cancellationToken: CancellationToken.None);
+      cancellationToken: cancellationToken);
   }
 
   private bool ConfirmRestart()

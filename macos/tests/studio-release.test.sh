@@ -140,7 +140,16 @@ NODE="${NODE:-$(command -v node || true)}"
   for (const required of ["git -C \"$REPO_ROOT\" write-tree", "git -C \"$REPO_ROOT\" archive", "SNAPSHOT_PACKAGE="]) {
     if (!source.includes(required)) throw new Error(`builder is missing index snapshot step: ${required}`);
   }
-  const afterGuard = source.slice(source.indexOf("verify_swift_build_inputs\n") + 1);
+  for (const required of [
+    "verify_snapshot_build_inputs",
+    "diff --quiet --no-ext-diff",
+    "ls-files --others --exclude-standard",
+    "ls-files --others --ignored --exclude-standard",
+    ":(exclude)macos/studio/.build/**",
+  ]) {
+    if (!source.includes(required)) throw new Error(`builder is missing complete live-input gate: ${required}`);
+  }
+  const afterGuard = source.slice(source.indexOf("verify_snapshot_build_inputs\n") + 1);
   if (afterGuard.includes(`--package-path "$PACKAGE"`)) {
     throw new Error("post-guard Swift command still references the live package");
   }
@@ -155,6 +164,9 @@ MOUNT_POINT=""
 UNTRACKED_SWIFT=""
 UNTRACKED_SWIFT_SYMLINK=""
 MODE_SWIFT=""
+DIRTY_INPUT=""
+DIRTY_BACKUP=""
+UNTRACKED_RELEASE_INPUT=""
 UNREADABLE_DIR=""
 RACE_PID=""
 LEGACY_SENTINEL="$ROOT/macos/release/preserve-legacy-$$.keep"
@@ -167,6 +179,8 @@ cleanup() {
   [ -z "$UNTRACKED_SWIFT" ] || /bin/rm -f "$UNTRACKED_SWIFT"
   [ -z "$UNTRACKED_SWIFT_SYMLINK" ] || /bin/rm -f "$UNTRACKED_SWIFT_SYMLINK"
   [ -z "$MODE_SWIFT" ] || /bin/rm -f "$MODE_SWIFT"
+  [ -z "$DIRTY_INPUT" ] || /bin/cp -p "$DIRTY_BACKUP" "$DIRTY_INPUT"
+  [ -z "$UNTRACKED_RELEASE_INPUT" ] || /bin/rm -f "$UNTRACKED_RELEASE_INPUT"
   [ -z "$UNREADABLE_DIR" ] || /bin/chmod 700 "$UNREADABLE_DIR" 2>/dev/null || true
   [ -z "$RACE_PID" ] || /bin/kill -TERM "$RACE_PID" 2>/dev/null || true
   [ -z "$RACE_PID" ] || wait "$RACE_PID" 2>/dev/null || true
@@ -192,7 +206,7 @@ expect_build_input_rejection() {
   local label="$1"
   snapshot_release > "$TMP/release-before-$label"
   if "$BUILD" --adhoc >"$TMP/$label.out" 2>"$TMP/$label.err"; then
-    printf 'Studio release builder accepted an unsafe Swift input: %s.\n' "$label" >&2
+    printf 'Studio release builder accepted an unsafe input: %s.\n' "$label" >&2
     exit 1
   fi
   /usr/bin/printf '%s\n' \
@@ -204,17 +218,37 @@ expect_build_input_rejection() {
   /usr/bin/cmp "$TMP/release-before-$label" "$TMP/release-after-$label"
 }
 
+expect_dirty_input_rejection() {
+  local relative="$1"
+  local label="$2"
+  DIRTY_INPUT="$ROOT/$relative"
+  DIRTY_BACKUP="$TMP/$label.original"
+  /bin/cp -p "$DIRTY_INPUT" "$DIRTY_BACKUP"
+  /usr/bin/printf '\nrelease-input-fixture-%s\n' "$label" >> "$DIRTY_INPUT"
+  expect_build_input_rejection "$label"
+  /bin/cp -p "$DIRTY_BACKUP" "$DIRTY_INPUT"
+  DIRTY_INPUT=""
+  DIRTY_BACKUP=""
+}
+
 VERSION_INDEX="$TMP/version-index-fixture"
 /bin/cp -P "$(/usr/bin/git -C "$ROOT" rev-parse --git-path index)" "$VERSION_INDEX"
 VERSION_BLOB="$(/usr/bin/git -C "$ROOT" rev-parse ':README.md')"
 /usr/bin/env GIT_INDEX_FILE="$VERSION_INDEX" /usr/bin/git -C "$ROOT" update-index \
   --cacheinfo "100644,$VERSION_BLOB,macos/VERSION"
+DIRTY_INPUT="$ROOT/macos/VERSION"
+DIRTY_BACKUP="$TMP/version-live.original"
+/bin/cp -p "$DIRTY_INPUT" "$DIRTY_BACKUP"
+/bin/cp "$ROOT/README.md" "$DIRTY_INPUT"
 snapshot_release > "$TMP/release-before-invalid-version"
 if /usr/bin/env GIT_INDEX_FILE="$VERSION_INDEX" \
   "$BUILD" --adhoc >"$TMP/invalid-version.out" 2>"$TMP/invalid-version.err"; then
   printf 'Studio release builder accepted an invalid snapshot VERSION.\n' >&2
   exit 1
 fi
+/bin/cp -p "$DIRTY_BACKUP" "$DIRTY_INPUT"
+DIRTY_INPUT=""
+DIRTY_BACKUP=""
 /usr/bin/printf 'The macOS release version is invalid.\n' > "$TMP/invalid-version.expected"
 /usr/bin/cmp "$TMP/invalid-version.expected" "$TMP/invalid-version.err"
 [ ! -s "$TMP/invalid-version.out" ]
@@ -263,6 +297,31 @@ NODE
 /usr/bin/find "$RELEASE_DIR" -mindepth 1 -maxdepth 1 -exec /usr/bin/basename {} \; \
   | LC_ALL=C /usr/bin/sort > "$TMP/release-root"
 /usr/bin/cmp "$TMP/expected-release-root" "$TMP/release-root"
+
+expect_dirty_input_rejection macos/studio/Resources/Info.plist dirty-info-plist
+expect_dirty_input_rejection macos/scripts/studio-adapter-macos.sh dirty-runtime-script
+expect_dirty_input_rejection macos/assets/renderer-inject.js dirty-runtime-asset
+expect_dirty_input_rejection macos/presets/preset-midnight-aurora/theme.json dirty-preset
+expect_dirty_input_rejection studio/protocol/fixtures-v1.json dirty-protocol
+expect_dirty_input_rejection macos/VERSION dirty-version
+
+UNTRACKED_RELEASE_INPUT="$ROOT/macos/scripts/untracked-release-input-$$.sh"
+/usr/bin/printf '#!/bin/bash\nexit 99\n' > "$UNTRACKED_RELEASE_INPUT"
+expect_build_input_rejection untracked-runtime-input
+/bin/rm -f "$UNTRACKED_RELEASE_INPUT"
+UNTRACKED_RELEASE_INPUT="$ROOT/macos/presets/untracked-release-symlink-$$"
+/bin/ln -s preset-midnight-aurora "$UNTRACKED_RELEASE_INPUT"
+expect_build_input_rejection untracked-preset-symlink
+/bin/rm -f "$UNTRACKED_RELEASE_INPUT"
+UNTRACKED_RELEASE_INPUT="$ROOT/macos/scripts/ignored-release-input-$$.tmp"
+/usr/bin/printf 'ignored release input\n' > "$UNTRACKED_RELEASE_INPUT"
+expect_build_input_rejection ignored-runtime-input
+/bin/rm -f "$UNTRACKED_RELEASE_INPUT"
+UNTRACKED_RELEASE_INPUT="$ROOT/macos/presets/ignored-release-symlink-$$.tmp"
+/bin/ln -s preset-midnight-aurora "$UNTRACKED_RELEASE_INPUT"
+expect_build_input_rejection ignored-preset-symlink
+/bin/rm -f "$UNTRACKED_RELEASE_INPUT"
+UNTRACKED_RELEASE_INPUT=""
 
 UNTRACKED_SWIFT_SYMLINK="$ROOT/macos/studio/Sources/DreamSkinStudioCore/Task10UntrackedSymlinkGuard_$$.swift"
 /bin/ln -s EngineProtocol.swift "$UNTRACKED_SWIFT_SYMLINK"

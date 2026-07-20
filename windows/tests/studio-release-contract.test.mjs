@@ -139,6 +139,7 @@ contains(app, '"--prepare-uninstall"', "prepare-uninstall argument missing");
 contains(app, "Shutdown(1)", "unknown arguments or mutex contention do not fail closed");
 
 const window = read("windows/studio/MainWindow.xaml.cs");
+const engineClient = read("windows/studio/EngineClient.cs");
 const xaml = read("windows/studio/MainWindow.xaml");
 contains(window, "EngineOperation.Uninstall", "existing uninstall operation is not reused");
 contains(window, "DispatchAsync", "existing dispatcher is not reused");
@@ -156,6 +157,25 @@ for (const contract of [
   "if (!_explicitExit && !AllowsTermination(_busy, _handoff.IsActive))",
 ]) contains(window, contract, `busy termination policy missing: ${contract}`);
 assert.doesNotMatch(window, /_operationCancellation\.Cancel\(\)/, "normal UI termination still cancels the engine tree");
+for (const contract of [
+  "DispatchAsync(EngineOperation.Uninstall, bypassAvailability: true, cancellationToken: cancellationToken)",
+  "CancellationToken cancellationToken = default",
+  "RunOnceAsync(operation, restartAuthorized, forceAuthorized, deleteUserThemes, cancellationToken)",
+  "cancellationToken: cancellationToken",
+]) contains(window, contract, `production cancellation chain missing: ${contract}`);
+assert.doesNotMatch(window, /cancellationToken:\s*CancellationToken\.None/,
+  "production engine invocation discards cancellation");
+const cancellationCatch = window.indexOf("catch (OperationCanceledException)");
+const dispatchFinally = window.indexOf("finally", cancellationCatch);
+const busyRecovery = window.indexOf("_busy = false", dispatchFinally);
+assert.ok(cancellationCatch >= 0 && dispatchFinally > cancellationCatch && busyRecovery > dispatchFinally,
+  "cancelled production dispatch does not recover UI busy state");
+for (const contract of [
+  "DefaultOperationTimeout", "CreateLinkedTokenSource(cancellationToken)",
+  "CancelAfter(_operationTimeout)",
+  "Task.WhenAll(process.WaitForExitAsync(cancellationToken), stdoutTask, stderrTask)",
+  "WaitAsync(cancellationToken)", "process.Kill(entireProcessTree: true)",
+]) contains(engineClient, contract, `bounded production engine runner missing: ${contract}`);
 assert.doesNotMatch(app, /DeleteUserThemes/);
 
 const config = read("windows/scripts/config-utf8.ps1");
@@ -175,6 +195,10 @@ for (const fault of [
   `Windows recovery fault is injected but never exercised: ${fault}`);
 contains(windowsTests, "managed-missing-recovery", "direct install missing-recovery regression is absent");
 contains(studioProgramTests, 'mode == "delivery-failure"', "real pipe delivery-failure regression is absent");
+for (const regression of [
+  "disconnect-active-engine", "active-engine-cancelled", "Production engine invocation ignored its deadline",
+  "Production deadline did not reach the process boundary", "Runner cancellation left the controlled grandchild alive",
+]) contains(studioProgramTests, regression, `Windows cancellation/deadline regression is missing: ${regression}`);
 contains(config, "function Test-DreamSkinLiveConfigBackup", "live config recovery evidence has no shared strict validator");
 contains(config, "function Test-DreamSkinRestoreCompleted", "completed restore state has no shared predicate");
 contains(config, "completion evidence marker exists without its archive",

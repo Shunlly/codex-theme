@@ -167,10 +167,10 @@ recovery_artifact_is_available() {
 if [ "$status_exit" -ne 0 ] && [ -n "$status_error" ]; then
   case "$OPERATION:$status_error:$status_install" in
     install:STATE_UNSAFE:not-installed) ;;
-    restore:STATE_UNSAFE:*|restore:CODEX_NOT_INSTALLED:*)
+    restore:STATE_UNSAFE:*|restore:CODEX_NOT_INSTALLED:*|restore:CODEX_FIRST_RUN_REQUIRED:*)
       recovery_artifact_is_available || { printf '%s\n' "$STATUS_JSON"; exit 1; }
       ;;
-    uninstall:STATE_UNSAFE:*|uninstall:CODEX_NOT_INSTALLED:*)
+    uninstall:STATE_UNSAFE:*|uninstall:CODEX_NOT_INSTALLED:*|uninstall:CODEX_FIRST_RUN_REQUIRED:*)
       recovery_artifact_is_available || { printf '%s\n' "$STATUS_JSON"; exit 1; }
       ;;
     *) printf '%s\n' "$STATUS_JSON"; exit 1 ;;
@@ -197,12 +197,16 @@ case "$OPERATION" in
   pause) progress="pausing"; command_root="$INSTALL_ROOT"; args=() ;;
   restore)
     progress="restoring"; command_root="$status_root"; args=(--restore-base-theme)
-    [ "$codex_state" = "not-installed" ] || args+=(--restart-codex)
+    case "$codex_state:$requires_restart" in
+      running:*|stopped:*|needs-first-run:true) args+=(--restart-codex) ;;
+    esac
     ;;
   verify) progress="verifying"; command_root="$INSTALL_ROOT"; args=(--reload) ;;
   uninstall)
     progress="uninstalling"; command_root="$status_root"; args=(--restore-base-theme)
-    [ "$codex_state" = "not-installed" ] || args+=(--restart-codex)
+    case "$codex_state:$requires_restart" in
+      running:*|stopped:*|needs-first-run:true) args+=(--restart-codex) ;;
+    esac
     args+=(--uninstall)
     ;;
 esac
@@ -273,12 +277,13 @@ if [ "$OPERATION" = "uninstall" ]; then
   STATUS_JSON="$("$command_root/scripts/status-dream-skin-macos.sh" --studio-json --deep --operation uninstall 2>>"$OPERATION_LOG")"
   status_exit="$?"
   set -e
-  restored_without_codex="false"
+  restored_without_config="false"
   if [ "$status_exit" -ne 0 ] \
-    && [ "$(json_field error.code 2>/dev/null || true)" = "CODEX_NOT_INSTALLED" ]; then
-    restored_without_codex="true"
+    && { [ "$(json_field error.code 2>/dev/null || true)" = "CODEX_NOT_INSTALLED" ] \
+      || [ "$(json_field error.code 2>/dev/null || true)" = "CODEX_FIRST_RUN_REQUIRED" ]; }; then
+    restored_without_config="true"
   fi
-  { [ "$status_exit" -eq 0 ] || [ "$restored_without_codex" = "true" ]; } \
+  { [ "$status_exit" -eq 0 ] || [ "$restored_without_config" = "true" ]; } \
     && [ "$(json_field state.session)" = "official" ] \
     || emit_error OPERATION_FAILED "The Studio restore could not be verified." '["retry","restore","diagnostics","cancel"]'
 
@@ -309,7 +314,7 @@ status_exit="$?"
 set -e
 if [ "$status_exit" -ne 0 ]; then
   status_error="$(json_field error.code 2>/dev/null || true)"
-  if [ "$status_error" = "CODEX_NOT_INSTALLED" ] \
+  if { [ "$status_error" = "CODEX_NOT_INSTALLED" ] || [ "$status_error" = "CODEX_FIRST_RUN_REQUIRED" ]; } \
     && [ "$(json_field state.session)" = "official" ] \
     && { [ "$OPERATION" = "restore" ] || [ "$OPERATION" = "uninstall" ]; }; then
     state_json="$(printf '%s' "$STATUS_JSON" | /usr/bin/plutil -extract state json -o - -)"

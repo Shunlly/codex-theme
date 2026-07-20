@@ -5,7 +5,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 MACOS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 REPO_ROOT="$(cd "$MACOS_ROOT/.." && pwd -P)"
-PACKAGE="$MACOS_ROOT/studio"
 RELEASE_ROOT="$MACOS_ROOT/release"
 
 if [ "$#" -ne 1 ]; then
@@ -117,25 +116,25 @@ verify_index_snapshot_modes() {
   done < <(/usr/bin/git -C "$REPO_ROOT" ls-tree -r -z "$INDEX_TREE" -- "${SNAPSHOT_PATHS[@]}")
 }
 
-verify_swift_build_inputs() {
-  local source_root="$PACKAGE/Sources"
-  local entry=""
-  local relative=""
-  verify_tracked_regular_file macos/studio/Package.swift
-  [ -d "$source_root" ] && [ ! -L "$source_root" ] || release_input_error
-  /usr/bin/find "$source_root" -print >/dev/null 2>&1 || release_input_error
-  while IFS= read -r -d '' entry; do
-    [ ! -L "$entry" ] || release_input_error
-    if [ -d "$entry" ]; then continue; fi
-    [ -f "$entry" ] || release_input_error
-    relative="${entry#"$REPO_ROOT/"}"
-    [ "$relative" != "$entry" ] || release_input_error
-    verify_tracked_regular_file "$relative"
-  done < <(/usr/bin/find "$source_root" -mindepth 1 -print0)
+verify_snapshot_build_inputs() {
+  local source=""
+  local untracked=""
+  local ignored=""
+  /usr/bin/git -C "$REPO_ROOT" diff --quiet --no-ext-diff \
+    "$INDEX_TREE" -- "${SNAPSHOT_PATHS[@]}" || release_input_error
+  untracked="$(/usr/bin/git -C "$REPO_ROOT" ls-files --others --exclude-standard -- \
+    "${SNAPSHOT_PATHS[@]}")" || release_input_error
+  ignored="$(/usr/bin/git -C "$REPO_ROOT" ls-files --others --ignored --exclude-standard -- \
+    "${SNAPSHOT_PATHS[@]}" ':(exclude)macos/studio/.build/**')" || release_input_error
+  [ -z "$untracked" ] && [ -z "$ignored" ] || release_input_error
+  while IFS= read -r -d '' source; do
+    verify_tracked_regular_file "$source"
+  done < <(/usr/bin/git -C "$REPO_ROOT" ls-tree -r -z --name-only \
+    "$INDEX_TREE" -- "${SNAPSHOT_PATHS[@]}")
 }
 
-verify_swift_build_inputs
 verify_index_snapshot_modes
+verify_snapshot_build_inputs
 [ "$(/usr/bin/git -C "$REPO_ROOT" write-tree 2>/dev/null)" = "$INDEX_TREE" ] \
   || release_input_error
 

@@ -112,6 +112,21 @@ static async Task RunChildAsync(string[] arguments)
               }
               File.AppendAllText(tracePath, "mutation-entered" + Environment.NewLine);
             }
+            if (mode == "disconnect-active-engine")
+            {
+              var runner = new BlockingRunner();
+              var client = new EngineClient(runner, @"C:\Windows", TimeSpan.FromMinutes(1));
+              var active = client.RunAsync(EngineOperation.Status, deep: true, cancellationToken: cancellationToken);
+              await runner.Started.Task;
+              File.AppendAllText(tracePath, "active-engine-started" + Environment.NewLine);
+              try { await active; }
+              catch (OperationCanceledException)
+              {
+                File.AppendAllText(tracePath, "active-engine-cancelled" + Environment.NewLine);
+                return new SingleInstanceResponse(1, Environment.ProcessId, false);
+              }
+              throw new InvalidOperationException("Disconnected active engine was not cancelled.");
+            }
             if (mode == "delivery-failure")
             {
               if (!reservation.TryBegin(busy: false, confirming: false)) {
@@ -336,6 +351,34 @@ try
   }
   finally { StopControlledProcess(disconnectOwner); }
 
+  var activeDisconnectScope = $"active-disconnect-{Guid.NewGuid():N}";
+  var activeDisconnectTrace = Path.Combine(instanceRoot, "active-disconnect.trace");
+  var activeDisconnectOwner = await StartInstanceOwnerAsync(activeDisconnectScope, "disconnect-active-engine",
+    Path.Combine(instanceRoot, "active-disconnect.ready"), activeDisconnectTrace);
+  try
+  {
+    using (var client = new NamedPipeClientStream(".", SingleInstanceCoordinator.GetPipeName(activeDisconnectScope),
+      PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+    {
+      await client.ConnectAsync(5000);
+      using var writer = new StreamWriter(client, new UTF8Encoding(false), 1024, leaveOpen: true);
+      await writer.WriteLineAsync(JsonSerializer.Serialize(new SingleInstanceRequest("prepare-uninstall", Environment.ProcessPath!)));
+      await writer.FlushAsync();
+      var startedDeadline = DateTime.UtcNow.AddSeconds(5);
+      while ((!File.Exists(activeDisconnectTrace) || !File.ReadAllText(activeDisconnectTrace).Contains("active-engine-started")) &&
+        DateTime.UtcNow < startedDeadline) await Task.Delay(20);
+      Assert(File.Exists(activeDisconnectTrace) && File.ReadAllText(activeDisconnectTrace).Contains("active-engine-started"),
+        "Pipe-disconnect fixture did not start its engine call.");
+    }
+    var cancelledDeadline = DateTime.UtcNow.AddSeconds(5);
+    while (!File.ReadAllText(activeDisconnectTrace).Contains("active-engine-cancelled") &&
+      DateTime.UtcNow < cancelledDeadline) await Task.Delay(20);
+    Assert(File.ReadAllText(activeDisconnectTrace).Contains("active-engine-cancelled"),
+      "Active engine call ignored named-pipe disconnect cancellation.");
+    Assert(!activeDisconnectOwner.HasExited, "Cancelled active engine call released the resident owner.");
+  }
+  finally { StopControlledProcess(activeDisconnectOwner); }
+
   var deliveryFailureScope = $"delivery-failure-{Guid.NewGuid():N}";
   var deliveryFailureTrace = Path.Combine(instanceRoot, "delivery-failure.trace");
   var deliveryFailureGate = deliveryFailureTrace + ".gate";
@@ -409,6 +452,17 @@ await cancelling.Started.Task;
 cancellation.Cancel();
 await ThrowsAsync<OperationCanceledException>(async () => await cancelled, "Cancellation did not propagate.");
 Assert(cancelling.Cancelled, "Cancellation did not reach the process boundary.");
+
+Throws<ArgumentOutOfRangeException>(() =>
+  new EngineClient(new FakeRunner(new EngineProcessResult(0, valid, "")), "C:\\Windows", TimeSpan.Zero),
+  "A non-positive production engine deadline was accepted.");
+var deadlineRunner = new BlockingRunner();
+var deadlineClient = new EngineClient(deadlineRunner, "C:\\Windows", TimeSpan.FromMilliseconds(100));
+var deadlineExpired = deadlineClient.RunAsync(EngineOperation.Status, deep: true);
+await deadlineRunner.Started.Task;
+await ThrowsAsync<OperationCanceledException>(async () => await deadlineExpired.WaitAsync(TimeSpan.FromSeconds(5)),
+  "Production engine invocation ignored its deadline.");
+Assert(deadlineRunner.Cancelled, "Production deadline did not reach the process boundary.");
 
 var realRunner = new EngineProcessRunner();
 var realProgress = new List<EngineProgress>();

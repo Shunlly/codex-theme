@@ -46,6 +46,12 @@ fi
 
 DEBUG_READY="false"
 BROWSER_ID=""
+OPENED_MANAGED_CDP_SESSION="false"
+rollback_new_managed_cdp_session() {
+  [ "$STUDIO_STRICT_VERIFY" = "true" ] && [ "$OPENED_MANAGED_CDP_SESSION" = "true" ] || return 0
+  stop_codex "$FORCE_STOP_AUTHORIZED"
+  launch_codex_normally
+}
 if BROWSER_ID="$(verified_cdp_browser_id "$PORT")"; then DEBUG_READY="true"; fi
 
 if codex_is_running && [ "$DEBUG_READY" = "false" ]; then
@@ -72,13 +78,17 @@ if [ "$DEBUG_READY" = "false" ]; then
   PORT="$(select_available_port "$PORT")"
   printf 'Launching Codex with skin debug port %s…\n' "$PORT" >&2
   launch_codex_with_cdp "$PORT"
+  OPENED_MANAGED_CDP_SESSION="true"
   # Some builds open the window slowly; also try activating the app once.
   /usr/bin/open -na "$CODEX_BUNDLE" --args --remote-debugging-address=127.0.0.1 --remote-debugging-port="$PORT" >/dev/null 2>&1 || true
   if ! wait_for_cdp "$PORT"; then
+    rollback_new_managed_cdp_session
     fail "Codex did not expose a verified loopback CDP endpoint on port $PORT within 45 seconds. See $APP_LOG and $APP_ERROR_LOG"
   fi
-  BROWSER_ID="$(verified_cdp_browser_id "$PORT")" \
-    || fail "Codex exposed CDP without a stable numeric-loopback Browser ID."
+  if ! BROWSER_ID="$(verified_cdp_browser_id "$PORT")"; then
+    rollback_new_managed_cdp_session
+    fail "Codex exposed CDP without a stable numeric-loopback Browser ID."
+  fi
 fi
 
 if [ "$FOREGROUND_INJECTOR" = "true" ]; then
@@ -89,15 +99,13 @@ if [ "$FOREGROUND_INJECTOR" = "true" ]; then
   exec "$NODE" "$INJECTOR" --watch --port "$PORT" --browser-id "$BROWSER_ID" --theme-dir "$THEME_DIR"
 fi
 
-if [ -z "$INJECTOR_PID" ]; then
-  INJECTOR_PID="$(launch_injector_daemon "$PORT" "$BROWSER_ID")"
-fi
-/bin/sleep 0.15
-/bin/kill -0 "$INJECTOR_PID" 2>/dev/null || fail "The injector exited during startup. See $INJECTOR_ERROR_LOG"
-INJECTOR_STARTED_AT="$(process_started_at "$INJECTOR_PID")"
-[ -n "$INJECTOR_STARTED_AT" ] || fail "Could not record the injector process start time."
 CODEX_PID="$(codex_main_pids | /usr/bin/head -n 1)"
-write_state "$PORT" "$INJECTOR_PID" "$INJECTOR_STARTED_AT" "$CODEX_PID" "$BROWSER_ID"
+if ! start_watcher "$PORT" "$BROWSER_ID" "$CODEX_PID"; then
+  rollback_new_managed_cdp_session
+  fail "The injector could not be started and recorded safely."
+fi
+INJECTOR_PID="$STARTED_WATCHER_PID"
+INJECTOR_STARTED_AT="$STARTED_WATCHER_AT"
 
 # Soft verify: keep the injector even if secondary selectors differ by Codex version.
 VERIFY_OUTPUT="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dream-skin-verify.XXXXXX")"
