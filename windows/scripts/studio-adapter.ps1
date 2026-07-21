@@ -256,7 +256,7 @@ try {
       -RecoveryActions @('authorize-restart', 'cancel') -State $status.State -RequiresRestart
   }
   if ($Operation -in @('restore', 'uninstall') -and
-    $status.State.requiresRestart -and -not $RestartAuthorized) {
+    ($status.State.codex -eq 'running' -or $status.State.requiresRestart) -and -not $RestartAuthorized) {
     Exit-DreamSkinStudioError -Code 'RESTART_REQUIRED' -Message 'Codex must restart once to restore the official session.' `
       -RecoveryActions @('authorize-restart', 'cancel') -State $status.State -RequiresRestart
   }

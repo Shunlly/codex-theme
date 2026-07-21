@@ -40,6 +40,11 @@ studio_operation_is_busy() (
   lifecycle_lock_is_busy
 )
 
+status_renderer_rollback_is_valid() (
+  . "$PROJECT_ROOT/scripts/common-macos.sh" >/dev/null 2>&1 || exit 1
+  renderer_rollback_evidence_is_valid
+)
+
 if [ "$STUDIO_JSON" = "true" ] && studio_operation_is_busy; then
   printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"busy","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"OPERATION_BUSY","message":"Another Studio operation is already running.","recoveryActions":["retry","cancel"]}}\n' \
     "$OPERATION"
@@ -53,6 +58,7 @@ CDP_OK="false"
 THEME_NAME=""
 CODEX_RUNNING="false"
 SAVED_BROWSER_ID=""
+ROLLBACK_EVIDENCE_UNSAFE="false"
 
 read_json_field() {
   # Parse machine-written JSON (one key per line) without python3, which macOS
@@ -75,14 +81,22 @@ injector_identity_matches() {
   local expected_injector="$4"
   local expected_port="$5"
   local expected_browser_id="$6"
+  local expected_theme_dir="$7"
+  local expected_activation_gate="${8:-}"
   local command_line command_lower node_lower injector_lower actual_start
 
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" != "0" ] || return 1
-  [ -n "$expected_start" ] && [ -n "$expected_node" ] && [ -n "$expected_injector" ] || return 1
+  [ -n "$expected_start" ] && [ -n "$expected_node" ] && [ -n "$expected_injector" ] \
+    && [ "$expected_theme_dir" = "$THEME_DIR" ] || return 1
   case "$expected_port" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$expected_browser_id" ] && [ "${#expected_browser_id}" -le 200 ] || return 1
   case "$expected_browser_id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  if [ -n "$expected_activation_gate" ]; then
+    [ "${expected_activation_gate%/*}" = "$STATE_ROOT" ] || return 1
+    case "${expected_activation_gate##*/}" in .watcher-activation.??????) ;; *) return 1 ;; esac
+    case "${expected_activation_gate##*.watcher-activation.}" in *[!A-Za-z0-9]*) return 1 ;; esac
+  fi
   [ "$(/bin/ps -p "$pid" -o uid= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')" = "$(/usr/bin/id -u)" ] \
     || return 1
   /bin/kill -0 "$pid" 2>/dev/null || return 1
@@ -97,7 +111,15 @@ injector_identity_matches() {
   # Requiring that following token prevents 93410 from matching saved port
   # 9341 via a loose prefix pattern.
   case "$command_lower" in *"--port $expected_port --browser-id "*) ;; *) return 1 ;; esac
-  case "$command_line" in *" --browser-id $expected_browser_id --theme-dir "*) ;; *) return 1 ;; esac
+  case "$command_line" in
+    *" --browser-id $expected_browser_id --theme-dir $expected_theme_dir --activation-gate $expected_activation_gate")
+      [ -n "$expected_activation_gate" ] || return 1
+      ;;
+    *" --browser-id $expected_browser_id --theme-dir $expected_theme_dir")
+      [ -z "$expected_activation_gate" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
   actual_start="$(LC_ALL=C TZ=UTC /bin/ps -p "$pid" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
   [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ] && return 0
   # Compatibility for schema-v5 state written before start times were UTC/C.
@@ -121,7 +143,15 @@ if [ -f "$STATE_PATH" ]; then
   saved_node="$(read_json_field "$STATE_PATH" nodePath)"
   saved_injector="$(read_json_field "$STATE_PATH" injectorPath)"
   SAVED_BROWSER_ID="$(read_json_field "$STATE_PATH" browserId)"
-  if injector_identity_matches "${pid:-}" "$saved_start" "$saved_node" "$saved_injector" "$PORT" "$SAVED_BROWSER_ID"; then
+  saved_theme_dir="$(read_json_field "$STATE_PATH" themeDir)"
+  injector_protocol="$(read_json_field "$STATE_PATH" injectorProtocol)"
+  saved_activation_gate=""
+  if [ "$injector_protocol" = "4" ]; then
+    saved_activation_gate="$(read_json_field "$STATE_PATH" activationGate)"
+  fi
+  if injector_identity_matches \
+    "${pid:-}" "$saved_start" "$saved_node" "$saved_injector" "$PORT" \
+    "$SAVED_BROWSER_ID" "$saved_theme_dir" "$saved_activation_gate"; then
     INJECTOR_ALIVE="true"
     SESSION="active"
   elif [ "${SESSION:-}" = "paused" ] && [ "${pid:-}" = "0" ]; then
@@ -136,6 +166,7 @@ if [ -f "$STATE_PATH" ]; then
 fi
 if [ -e "$ROLLBACK_STATE_PATH" ] || [ -L "$ROLLBACK_STATE_PATH" ]; then
   SESSION="stale"
+  status_renderer_rollback_is_valid || ROLLBACK_EVIDENCE_UNSAFE="true"
 fi
 
 safe_theme_display_name() {
@@ -314,11 +345,14 @@ if [ "$STUDIO_JSON" = "true" ]; then
     && [ ! -e "$STATE_PATH" ] && [ ! -L "$STATE_PATH" ] \
     && [ ! -e "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]; then
     if [ "$RESTORE_PROOF_VALID" = "true" ]; then
-      ACTIONS='["install","uninstall"]'
+      ACTIONS='["install","restore","uninstall"]'
     else
       STUDIO_SESSION="stale"
       ACTIONS='[]'
     fi
+  fi
+  if [ "$ROLLBACK_EVIDENCE_UNSAFE" = "true" ]; then
+    ACTIONS='[]'
   fi
 
   case "$CODEX" in
@@ -336,7 +370,11 @@ if [ "$STUDIO_JSON" = "true" ]; then
   if [ "$STUDIO_SESSION" = "stale" ]; then
     OK="false"
     EXIT_CODE=1
-    ERROR='{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["restore","diagnostics","cancel"]}'
+    if [ "$ROLLBACK_EVIDENCE_UNSAFE" = "true" ]; then
+      ERROR='{"code":"STATE_UNSAFE","message":"Renderer rollback evidence is unsafe or damaged.","recoveryActions":["diagnostics","cancel"]}'
+    else
+      ERROR='{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["restore","diagnostics","cancel"]}'
+    fi
   fi
 
   printf '{"schemaVersion":1,"ok":%s,"operation":"%s","state":{"install":"%s","codex":"%s","session":"%s","operation":"idle","themeName":%s,"requiresRestart":%s,"availableActions":%s,"verified":%s},"error":%s}\n' \

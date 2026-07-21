@@ -161,8 +161,10 @@ status_has_action() {
   return 1
 }
 recovery_artifact_is_available() {
-  live_recovery_backup_is_safe \
+  status_has_action "$OPERATION" \
+    && { live_recovery_backup_is_safe \
     || { status_has_action uninstall && restored_theme_backup_is_valid; }
+    }
 }
 if [ "$status_exit" -ne 0 ] && [ -n "$status_error" ]; then
   case "$OPERATION:$status_error:$status_install" in

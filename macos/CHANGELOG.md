@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Full and hot starts now keep a new watcher inert until its exact PID/start/argv identity and durable rollback record are published; interrupted starts can be restored without leaving an untracked reinjector.
+- Complete Restore consumes its exact private stage and identity-bound live backup only after the completion archive is verified, preserving replacements and retained quarantine evidence on uncertainty.
 - Complete Restore and uninstall remain usable through the bundled native helper when the installed engine is partial, the validated Node runtime is unavailable, or Codex itself is absent; a valid completed-restore proof keeps the restored engine removable without Terminal.
 - Complete Restore retains its recovery backup until state cleanup succeeds, validates one fixed completion archive before accepting it as proof, and remains retryable after cleanup/archive faults or relaunch failure.
 - CDP discovery now rejects wildcard, non-loopback, malformed, and mixed listener bindings; every watcher is anchored to the strictly parsed `/json/version` Browser ID across verify, pause, restore, status, doctor, and hot reload.

@@ -65,6 +65,7 @@ function Restore-DreamSkinRecoveryArtifactSnapshot {
 }
 
 $operationLock = $null
+$missingConfigGuard = $null
 if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
   $operationLock = Enter-DreamSkinOperationLock
 }
@@ -187,15 +188,17 @@ try {
     $configMissingAtStart = -not (Test-Path -LiteralPath $config)
   }
   $suppressFirstRunRelaunch = $RestoreBaseTheme -and $configMissingAtStart
+  if ($RestoreBaseTheme -and -not $restoreAlreadyCommitted -and $configMissingAtStart) {
+    $missingConfigGuard = [DreamSkinConfigNative]::HoldMissingPath($config)
+    $missingConfigGuard.AssertUnchanged()
+  }
 
   $restoreError = $null
   $configChanged = $false
   $currentConfigSnapshot = $null
   $transactionCommitted = $false
   try {
-    if ($RestoreBaseTheme -and -not $restoreAlreadyCommitted -and $configMissingAtStart) {
-      Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $configBeforeRestoreSnapshot
-    }
+    if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     if ($shouldCloseCodex) {
       Stop-DreamSkinCodex -Codex $codex -AllowForce:$ForceRestart
       if ($portOwnedByCodex -and -not (Wait-DreamSkinPortAvailable -Port $Port -TimeoutSeconds 5)) {
@@ -224,17 +227,23 @@ try {
     }
 
     if ($restoreRequested -and -not $restoreAlreadyCommitted) {
-      if ($RestoreBaseTheme -and $configMissingAtStart) {
-        Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $configBeforeRestoreSnapshot
-      }
+      if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
       Publish-DreamSkinConfigBackupArchive -BackupPath $backup -ArchivePath $archivePath
+      if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     }
+    if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     Remove-DreamSkinRecoveryArtifact -Path $StatePath
+    if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')
+    if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     Remove-DreamSkinRecoveryArtifact -Path $backupMarkerPath
+    if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     if ($restoreRequested -and -not $restoreAlreadyCommitted) {
+      if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
       Remove-DreamSkinRecoveryArtifact -Path $backup
+      if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     }
+    if ($null -ne $missingConfigGuard) { $missingConfigGuard.Complete() }
     $transactionCommitted = $true
     if ($restoreRequested) { Write-Host "Archived the completed pre-install backup at $archivePath" }
     if ($Uninstall) { Remove-DreamSkinManagedLegacyShortcuts }
@@ -272,5 +281,6 @@ try {
 
   Write-Host 'Dream Skin restore actions completed; any saved CDP session was closed.'
 } finally {
+  if ($null -ne $missingConfigGuard) { $missingConfigGuard.Dispose() }
   if ($null -ne $operationLock) { Exit-DreamSkinOperationLock -Mutex $operationLock }
 }

@@ -78,9 +78,9 @@ function Test-DreamSkinManagedLegacyShortcutArguments {
     [Parameter(Mandatory = $true)][ValidateSet('start', 'restore', 'tray')][string]$Kind
   )
   $prefix = switch ($Kind) {
-    'start' { "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`"" }
-    'restore' { "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`"" }
-    'tray' { "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`"" }
+    'start' { '-NoProfile -ExecutionPolicy Bypass -File "(?<script>[^"]+)"' }
+    'restore' { '-NoProfile -ExecutionPolicy Bypass -File "(?<script>[^"]+)"' }
+    'tray' { '-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "(?<script>[^"]+)"' }
   }
   $suffix = switch ($Kind) {
     'start' { ' -PromptRestart' }
@@ -88,8 +88,10 @@ function Test-DreamSkinManagedLegacyShortcutArguments {
     'tray' { '' }
   }
   $match = [regex]::Match($Arguments,
-    '^' + [regex]::Escape($prefix) + '(?: -Port (?<port>[0-9]{4,5}))?' + [regex]::Escape($suffix) + '$')
+    '^' + $prefix + '(?: -Port (?<port>[0-9]{4,5}))?' + [regex]::Escape($suffix) + '$')
   if (-not $match.Success) { return $false }
+  if (-not (Test-DreamSkinManagedLegacyScriptPath -ScriptPath $match.Groups['script'].Value `
+    -CurrentScriptPath $ScriptPath -Kind $Kind)) { return $false }
   if ($match.Groups['port'].Success) {
     $port = 0
     if (-not [int]::TryParse($match.Groups['port'].Value, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
@@ -100,17 +102,19 @@ function Test-DreamSkinManagedLegacyShortcutArguments {
 }
 
 function Remove-DreamSkinManagedLegacyShortcuts {
-  $desktop = [Environment]::GetFolderPath('Desktop')
-  $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+  param(
+    [string]$DesktopPath = [Environment]::GetFolderPath('Desktop'),
+    [string]$StartMenuPath = (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+  )
   $startScript = Join-Path $PSScriptRoot 'start-dream-skin.ps1'
   $restoreScript = Join-Path $PSScriptRoot 'restore-dream-skin.ps1'
   $trayScript = Join-Path $PSScriptRoot 'tray-dream-skin.ps1'
   $entries = @(
-    @{ Path = (Join-Path $desktop 'Codex Dream Skin.lnk'); Script = $startScript; Kind = 'start' },
-    @{ Path = (Join-Path $startMenu 'Codex Dream Skin.lnk'); Script = $startScript; Kind = 'start' },
-    @{ Path = (Join-Path $desktop 'Codex Dream Skin - Restore.lnk'); Script = $restoreScript; Kind = 'restore' },
-    @{ Path = (Join-Path $desktop 'Codex Dream Skin - Tray.lnk'); Script = $trayScript; Kind = 'tray' },
-    @{ Path = (Join-Path $startMenu 'Codex Dream Skin - Tray.lnk'); Script = $trayScript; Kind = 'tray' }
+    @{ Path = (Join-Path $DesktopPath 'Codex Dream Skin.lnk'); Script = $startScript; Kind = 'start' },
+    @{ Path = (Join-Path $StartMenuPath 'Codex Dream Skin.lnk'); Script = $startScript; Kind = 'start' },
+    @{ Path = (Join-Path $DesktopPath 'Codex Dream Skin - Restore.lnk'); Script = $restoreScript; Kind = 'restore' },
+    @{ Path = (Join-Path $DesktopPath 'Codex Dream Skin - Tray.lnk'); Script = $trayScript; Kind = 'tray' },
+    @{ Path = (Join-Path $StartMenuPath 'Codex Dream Skin - Tray.lnk'); Script = $trayScript; Kind = 'tray' }
   )
   $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
   $shell = New-Object -ComObject WScript.Shell
@@ -126,6 +130,42 @@ function Remove-DreamSkinManagedLegacyShortcuts {
         Remove-Item -LiteralPath $entry.Path -Force -ErrorAction Stop
       }
     } catch {}
+  }
+}
+
+function Test-DreamSkinManagedLegacyScriptPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$ScriptPath,
+    [Parameter(Mandatory = $true)][string]$CurrentScriptPath,
+    [Parameter(Mandatory = $true)][ValidateSet('start', 'restore', 'tray')][string]$Kind
+  )
+  $scriptName = switch ($Kind) {
+    'start' { 'start-dream-skin.ps1' }
+    'restore' { 'restore-dream-skin.ps1' }
+    'tray' { 'tray-dream-skin.ps1' }
+  }
+  try {
+    $fullPath = [IO.Path]::GetFullPath($ScriptPath).TrimEnd('\')
+    $currentPath = [IO.Path]::GetFullPath($CurrentScriptPath).TrimEnd('\')
+    if ($fullPath.Equals($currentPath, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+
+    $versionsRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA `
+      'Programs\CodexDreamSkinStudio\versions')).TrimEnd('\')
+    $versionsPrefix = $versionsRoot + '\'
+    if ($fullPath.StartsWith($versionsPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      $relative = $fullPath.Substring($versionsPrefix.Length)
+      $parts = @($relative -split '\\')
+      return $parts.Count -eq 4 -and $parts[0] -notin @('.', '..') -and
+        $parts[1].Equals('engine', [StringComparison]::OrdinalIgnoreCase) -and
+        $parts[2].Equals('scripts', [StringComparison]::OrdinalIgnoreCase) -and
+        $parts[3].Equals($scriptName, [StringComparison]::OrdinalIgnoreCase)
+    }
+
+    $historicalSuffix = "\windows\scripts\$scriptName"
+    return $fullPath.EndsWith($historicalSuffix, [StringComparison]::OrdinalIgnoreCase) -and
+      $fullPath.Length -gt $historicalSuffix.Length
+  } catch {
+    return $false
   }
 }
 

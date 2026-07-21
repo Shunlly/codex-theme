@@ -55,6 +55,10 @@ for (const signaturePart of [
 assert.match(helper, /Test-Path[\s\S]*Remove-Item/, "legacy shortcut cleanup is not idempotent when a shortcut is absent");
 assert.match(helper, /if\s*\([\s\S]*?TargetPath[\s\S]*?Arguments[\s\S]*?\)[\s\S]*?Remove-Item/,
   "legacy shortcut cleanup can remove an unrelated shortcut by filename alone");
+contains(helper, "Test-DreamSkinManagedLegacyScriptPath",
+  "legacy shortcut cleanup does not recognize guarded historical product paths");
+contains(helper, "CodexDreamSkinStudio\\versions",
+  "legacy shortcut cleanup omits versioned sibling engines");
 const skipUninstallStart = adapter.indexOf("if ($canSkipCompletedUninstall)");
 const skipUninstallEnd = adapter.indexOf("if (($Operation -eq 'restore'", skipUninstallStart);
 const skipUninstall = adapter.slice(skipUninstallStart, skipUninstallEnd);
@@ -209,6 +213,7 @@ const config = read("windows/scripts/config-utf8.ps1");
 const installScript = read("windows/scripts/install-dream-skin.ps1");
 const windowsTests = read("windows/tests/run-tests.ps1");
 const studioProtocolTests = read("windows/tests/studio-protocol.tests.ps1");
+const matchingHostTests = windowsTests + studioProtocolTests;
 const studioProgramTests = read("windows/studio-tests/Program.cs");
 for (const regression of [
   "malformed-regular-backup", "malformed-regular-marker", "direct-restore-orphan-marker",
@@ -222,6 +227,10 @@ for (const fault of [
 ]) contains(studioProtocolTests, `-Scenario '${fault}' -Arguments`,
   `Windows recovery fault is injected but never exercised: ${fault}`);
 contains(windowsTests, "managed-missing-recovery", "direct install missing-recovery regression is absent");
+contains(windowsTests, "completion-proof-config-commit-failure",
+  "config commit failure does not exercise completion-proof rollback");
+contains(windowsTests, "completion-proof-uncertain-config-commit",
+  "uncertain config commit does not preserve recovery instead of restoring stale proof");
 contains(studioProgramTests, 'mode == "delivery-failure"', "real pipe delivery-failure regression is absent");
 for (const regression of [
   "disconnect-active-engine", "active-engine-cancelled", "Production engine invocation ignored its deadline",
@@ -239,7 +248,90 @@ for (const contract of [
   "function Assert-DreamSkinStableFileSnapshotUnchanged",
   "FILE_FLAG_OPEN_REPARSE_POINT",
   "GetFileInformationByHandle",
+  "BeginAtomicWrite",
+  "FileRenameInfoEx",
+  "RollbackConfirmed",
+  "VerifyTemporaryContent",
+  "HoldMissingPath",
+  "public static string NormalizePath",
 ]) contains(config, contract, `stable config identity contract missing: ${contract}`);
+assert.equal((config.match(/Path\.GetFullPath\(/g) || []).length, 1,
+  "production config paths still bypass the native long-path normalizer");
+assert.match(config, /return absolute \?\? NormalizeAbsolutePath\(Path\.GetFullPath\(path\)\)/,
+  "only genuinely relative paths may use legacy GetFullPath");
+const atomicStart = config.indexOf("public sealed class AtomicWriteTransaction");
+const missingGuardStart = config.indexOf("public sealed class MissingPathGuard", atomicStart);
+const atomic = config.slice(atomicStart, missingGuardStart);
+assert.doesNotMatch(atomic, /Path\.GetFullPath\(requestedPath\)/,
+  "atomic long-path construction still uses legacy GetFullPath before native open");
+const comparableStart = config.indexOf("private static string ComparablePath");
+const nativePathStart = config.indexOf("public static string NormalizePath", comparableStart);
+const pathHelpers = config.slice(comparableStart, config.indexOf("private static void ValidateComponentLength", nativePathStart));
+assert.doesNotMatch(pathHelpers, /Substring\(8\)[\s\S]*Path\.GetFullPath|Substring\(4\)[\s\S]*Path\.GetFullPath/,
+  "comparable path strips the extended prefix before legacy normalization");
+contains(pathHelpers, "NormalizeAbsolutePath", "native path helpers do not share extended absolute normalization");
+const candidateCreate = atomic.indexOf("CreateFileW(NormalizePath(candidatePath)");
+const candidatePlacement = atomic.indexOf("RenameRelative(temporary, parent, temporaryName, 0)");
+const candidateWrite = atomic.indexOf("WriteAll(temporary, bytes");
+const candidateVerify = atomic.indexOf("VerifyTemporaryContent()");
+assert.ok(candidateCreate >= 0 && candidatePlacement > candidateCreate && candidateWrite > candidatePlacement &&
+  candidateVerify > candidateWrite,
+  "atomic candidate is not placed in the held parent before exclusive write and read-back verification");
+const candidateOpen = atomic.slice(candidateCreate, candidatePlacement);
+assert.ok(!candidateOpen.includes("FILE_SHARE_WRITE"), "atomic candidate permits external write mutation");
+assert.ok(!candidateOpen.includes("FILE_SHARE_DELETE"),
+  "atomic candidate can be renamed or deleted before the final commit decision");
+for (const contract of [
+  "FILE_TRAVERSE", "FILE_RENAME_FLAG_REPLACE_IF_EXISTS", "FILE_RENAME_FLAG_POSIX_SEMANTICS",
+  "FILE_DISPOSITION_FLAG_DELETE", "FILE_DISPOSITION_FLAG_POSIX_SEMANTICS", "NormalizePath",
+  "ValidateComponentLength",
+]) contains(config, contract, `atomic native contract missing: ${contract}`);
+assert.ok(!atomic.includes("rollbackName"),
+  "existing-target commit still creates a two-rename canonical-name gap");
+assert.match(atomic,
+  /RenameRelative\(temporary,\s*parent,\s*fileName,\s*FILE_RENAME_FLAG_REPLACE_IF_EXISTS\s*\|\s*FILE_RENAME_FLAG_POSIX_SEMANTICS\)/,
+  "existing target is not published with one POSIX replacement operation");
+contains(atomic, "RenameRelative(temporary, parent, fileName, 0)",
+  "initially absent target no longer uses a no-replace publication");
+const targetOpen = atomic.slice(atomic.indexOf("target = TryOpenStableFile"), candidateCreate);
+assert.ok(targetOpen.includes("FILE_SHARE_READ") && !targetOpen.includes("FILE_SHARE_DELETE"),
+  "held existing target does not pin its namespace through publication");
+const parentOpenStart = atomic.indexOf("parent = OpenStable");
+const parentOpen = atomic.slice(parentOpenStart, atomic.indexOf(";", parentOpenStart) + 1);
+assert.ok(parentOpen.includes("FILE_TRAVERSE | FILE_READ_ATTRIBUTES") &&
+  parentOpen.includes("FILE_SHARE_READ | FILE_SHARE_WRITE") && !parentOpen.includes("FILE_SHARE_DELETE"),
+  "held rename root lacks traverse access or permits namespace substitution");
+const constructorStart = atomic.indexOf("internal AtomicWriteTransaction");
+const constructorTry = atomic.indexOf("try", constructorStart);
+const parentAcquire = atomic.indexOf("parent = OpenStable", constructorStart);
+const constructorCatch = atomic.indexOf("catch", parentAcquire);
+assert.ok(constructorTry >= 0 && constructorTry < parentAcquire && constructorCatch > candidateCreate &&
+  atomic.slice(constructorCatch, atomic.indexOf("private void AssertParentUnchanged")).includes("Dispose()"),
+  "atomic constructor does not release every acquired handle on early failure");
+contains(atomic, "temporaryAtTarget", "Dispose cannot distinguish a committed candidate from an internal temp");
+const missingGuard = config.slice(missingGuardStart, config.indexOf("public static AtomicWriteTransaction", missingGuardStart));
+for (const contract of ["anchorPath", "firstMissingPath", "FindNearestExistingAncestor"]) {
+  contains(missingGuard, contract, `missing-path guard does not hold the nearest existing ancestor: ${contract}`);
+}
+assert.ok(!missingGuard.includes("private readonly string path;"), "missing-path guard retains dead path state");
+contains(missingGuard, "public void Complete()", "missing-path guard has no compensatable completion boundary");
+const guardConstructor = missingGuard.indexOf("internal MissingPathGuard");
+const guardAcquire = missingGuard.indexOf("anchor = FindNearestExistingAncestor", guardConstructor);
+assert.ok(missingGuard.indexOf("try", guardConstructor) < guardAcquire &&
+  missingGuard.indexOf("catch", guardAcquire) > guardAcquire,
+  "missing-path guard constructor can leak its held ancestor on failure");
+contains(config, "public static void DeleteExpectedFile", "completion proof has no identity-bound delete helper");
+const proofRemovalStart = config.indexOf("function Remove-DreamSkinConfigCompletionEvidence");
+const proofRemovalEnd = config.indexOf("function Get-DreamSkinConfigCompletionEvidenceSnapshots", proofRemovalStart);
+const proofRemoval = config.slice(proofRemovalStart, proofRemovalEnd);
+contains(proofRemoval, "[DreamSkinConfigNative]::DeleteExpectedFile",
+  "completion proof is still invalidated by pathname after validation");
+assert.ok(!proofRemoval.includes("Remove-Item"), "completion proof invalidation still deletes a pathname");
+const proofRestoreStart = config.indexOf("function Restore-DreamSkinConfigCompletionEvidenceSnapshots");
+const proofRestoreEnd = config.indexOf("function Install-DreamSkinBaseTheme", proofRestoreStart);
+const proofRestoreBody = config.slice(proofRestoreStart, proofRestoreEnd);
+contains(proofRestoreBody, "$current.Identity -ceq $snapshot.Identity",
+  "completion proof compensation accepts a same-byte unexpected creator");
 assert.ok((config.match(/Get-DreamSkinStableFileSnapshot -Path \$ConfigPath/g) || []).length >= 3,
   "install, selective restore, and exact restore do not snapshot config identity before reading");
 assert.ok((config.match(/-ExpectedSnapshot \$configSnapshot/g) || []).length >= 3,
@@ -249,14 +341,86 @@ contains(installScript, "$configSnapshot = Get-DreamSkinStableFileSnapshot -Path
 for (const regression of [
   "config-file-symlink-install", "config-file-symlink-selective", "config-file-symlink-exact",
   "config-directory-junction-install", "config-directory-junction-selective", "config-directory-junction-exact",
-  "same-byte-identity-install", "same-byte-identity-selective", "same-byte-identity-exact",
-  "same-byte-identity-rollback",
-]) contains(windowsTests, regression, `matching-host config trust regression missing: ${regression}`);
-const configCommit = config.indexOf("Write-DreamSkinUtf8FileAtomically -Path $ConfigPath");
-const configCommitted = config.indexOf("$configCommitted = $true", configCommit);
-const markerPublish = config.indexOf("Write-DreamSkinAppearanceMarker", configCommit);
+  "commit-identity-install", "commit-identity-selective", "commit-identity-exact",
+  "commit-identity-rollback", "commit-parent-junction-install", "commit-parent-junction-selective",
+  "commit-parent-junction-exact", "commit-parent-junction-rollback", "atomic-late-creator",
+  "atomic-temp-mutation", "missing-parent-guard", "commit-parent-junction-native-boundary",
+  "atomic-existing-posix-replace", "atomic-final-proof-handle-pin", "atomic-posix-rollback",
+  "atomic-kill-before-commit", "atomic-kill-after-commit", "atomic-constructor-create-failure-retry",
+  "missing-guard-constructor-appearance-retry", "proof-replaced-before-handle-delete",
+  "proof-same-bytes-creator-compensation", "missing-config-complete-boundary", "native-long-path",
+]) contains(matchingHostTests, regression, `matching-host config trust regression missing: ${regression}`);
+contains(windowsTests, "BeginAtomicWrite($nativeLongDirectTarget",
+  "matching-host long-path fixture does not preserve its extended path into the atomic constructor");
+contains(windowsTests, "BeginAtomicWrite($nativeUncTarget",
+  "matching-host UNC fixture does not preserve its extended path into the atomic constructor");
+contains(windowsTests, "Write-DreamSkinBytesAtomically -Path $longTarget",
+  "matching-host long-path fixture does not exercise the public PowerShell write wrapper");
+const longFixtureStart = windowsTests.indexOf("$longPathRoot =");
+const longFixtureEnd = windowsTests.indexOf("$overlongComponent =", longFixtureStart);
+const longFixture = windowsTests.slice(longFixtureStart, longFixtureEnd);
+const nativeLongAssignment = longFixture.indexOf("$nativeLongTarget =");
+const nativeLongUse = longFixture.indexOf("[IO.File]::ReadAllBytes($nativeLongTarget)");
+assert.ok(nativeLongAssignment >= 0 && nativeLongUse > nativeLongAssignment,
+  "matching-host long-path fixture uses its extended target before assignment");
+const identityFixtureStart = windowsTests.indexOf("foreach ($identityCase in @(");
+const identityFixtureEnd = windowsTests.indexOf("$lateCreatorRoot", identityFixtureStart);
+const identityFixture = windowsTests.slice(identityFixtureStart, identityFixtureEnd);
+contains(identityFixture, "Attempted = $false; Denied = $false; Replaced = $false; Replacement = $null",
+  "identity switch fixture does not record a denied replacement attempt and preserved external source");
+contains(identityFixture, "or $identityRejected",
+  "identity switch fixture still expects caller rejection after a denied replacement");
+const identityCandidateCheck = identityFixture.indexOf("$temporaryExists =");
+const identityReplace = identityFixture.indexOf("[IO.File]::Replace($replacement, $raceTarget, $null)");
+assert.ok(identityCandidateCheck >= 0 && identityReplace > identityCandidateCheck,
+  "identity switch fixture can inject before BeginAtomicWrite has prepared its candidate");
+const parentFixtureStart = windowsTests.indexOf("$nativeParentRoot");
+const parentFixtureEnd = windowsTests.indexOf("if (-not (Test-DreamSkinWebSocketUrl", parentFixtureStart);
+const parentFixture = windowsTests.slice(parentFixtureStart, parentFixtureEnd);
+contains(parentFixture, "Attempted = $false; Denied = $false",
+  "parent substitution fixture does not record a denied post-BeginAtomicWrite move attempt");
+contains(parentFixture, "$candidateExists = $null -ne (Get-ChildItem",
+  "parent substitution fixture can inject before BeginAtomicWrite has prepared its candidate");
+const parentCandidateCheck = parentFixture.indexOf("$candidateExists = $null -ne (Get-ChildItem");
+const parentMove = parentFixture.indexOf("Move-Item -LiteralPath $configDirectory -Destination $heldDirectory", parentCandidateCheck);
+assert.ok(parentCandidateCheck >= 0 && parentMove > parentCandidateCheck,
+  "parent substitution fixture does not delay its move attempt until the final commit boundary");
+const rollbackFixtureStart = windowsTests.indexOf("$rollbackRoot");
+const rollbackFixtureEnd = windowsTests.indexOf("$constructorRoot", rollbackFixtureStart);
+const rollbackFixture = windowsTests.slice(rollbackFixtureStart, rollbackFixtureEnd);
+contains(rollbackFixture, "atomic-posix-rollback final publication marker",
+  "rollback fixture does not use a local final-publication marker");
+assert.ok(!rollbackFixture.includes("$rollbackSource.Replace($rollbackNeedle"),
+  "rollback fixture replaces every AssertCommitted occurrence instead of the final publication proof");
+const installBaseStart = config.indexOf("function Install-DreamSkinBaseTheme");
+const installBaseEnd = config.indexOf("function Restore-DreamSkinBaseTheme", installBaseStart);
+const installBase = config.slice(installBaseStart, installBaseEnd);
+const proofSnapshot = installBase.indexOf("Get-DreamSkinConfigCompletionEvidenceSnapshots");
+const configPrepare = installBase.indexOf("[DreamSkinConfigNative]::BeginAtomicWrite");
+const backupMutation = installBase.indexOf("Write-DreamSkinBytesAtomically -Path $BackupPath");
+const proofInvalidation = installBase.indexOf("Remove-DreamSkinConfigCompletionEvidence");
+const configCommit = installBase.indexOf("Write-DreamSkinUtf8FileAtomically -Path $ConfigPath");
+const installCatch = installBase.indexOf("} catch {");
+const configRollbackCheck = installBase.indexOf(
+  "$configWrite.RollbackConfirmed", installCatch);
+const proofRestore = installBase.indexOf("Restore-DreamSkinConfigCompletionEvidenceSnapshots", installCatch);
+assert.ok(proofSnapshot >= 0 && proofSnapshot < configPrepare && configPrepare < backupMutation &&
+  proofInvalidation > backupMutation && proofInvalidation < configCommit,
+  "completion proof is not snapshotted before mutations and invalidated before config commit");
+assert.ok(installCatch > configCommit && proofRestore > installCatch,
+  "config commit failure cannot restore the invalidated completion proof");
+assert.ok(configRollbackCheck > installCatch && configRollbackCheck < proofRestore,
+  "uncertain config commit can restore stale completion proof and discard its recovery backup");
+const configCommitted = installBase.indexOf("$configCommitted = $true", configCommit);
+const markerPublish = installBase.indexOf("Write-DreamSkinAppearanceMarker", configCommit);
 assert.ok(configCommit >= 0 && configCommitted > configCommit && markerPublish > configCommitted,
   "config commit is not recorded before marker publication");
+
+for (const contract of [
+  "CreateShortcut($managedShortcutPath)", "ManagedShortcutPath = $managedShortcutPath",
+  "UnrelatedShortcutPath = $unrelatedShortcutPath",
+  "-DesktopPath (Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'desktop')",
+]) contains(studioProtocolTests, contract, `real uninstall shortcut fixture is missing: ${contract}`);
 
 contains(restoreScript, "$configBeforeRestoreSnapshot = Get-DreamSkinStableFileSnapshot -Path $config",
   "restore preflight reads config before establishing its no-reparse identity");
@@ -276,6 +440,8 @@ for (const contract of [
   "$suppressFirstRunRelaunch = $RestoreBaseTheme -and $configMissingAtStart",
   "-not $configMissingAtStart",
   "-not $suppressFirstRunRelaunch",
+  "$missingConfigGuard.AssertUnchanged()",
+  "$missingConfigGuard.Complete()",
 ]) contains(restoreScript, contract, `missing-config restore contract missing: ${contract}`);
 const stateCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path $StatePath");
 const pauseCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')");
@@ -284,10 +450,12 @@ const markerCleanupToken = "Remove-DreamSkinRecoveryArtifact -Path $backupMarker
 const markerCommit = restoreScript.indexOf(markerCleanupToken, pauseCommit);
 const backupCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path $backup",
   markerCommit + markerCleanupToken.length);
+const missingGuardComplete = restoreScript.indexOf("$missingConfigGuard.Complete()", backupCommit);
 const committed = restoreScript.indexOf("$transactionCommitted = $true", backupCommit);
 const relaunch = restoreScript.indexOf("Start-Process -FilePath $relaunchCodex.Executable", committed);
 assert.ok(archiveCommit >= 0 && stateCommit > archiveCommit && pauseCommit > stateCommit &&
-  markerCommit > pauseCommit && backupCommit > markerCommit && committed > backupCommit && relaunch > committed,
+  markerCommit > pauseCommit && backupCommit > markerCommit && missingGuardComplete > backupCommit &&
+  committed > missingGuardComplete && relaunch > committed,
 "restore does not publish proof, stage cleanup, remove live recovery artifacts, commit, then relaunch");
 
 contains(adapter, "$Operation = 'status'", "missing or unknown operation is not normalized to Protocol v1 status");
@@ -310,8 +478,8 @@ contains(studioWindows, "$codexProcessRunning = $null -ne $runningCodex",
   "first-run status discards the observed running Codex process");
 contains(studioWindows, "$requiresRestart = $codexProcessRunning -and $session -eq 'official'",
   "first-run status does not preserve close authorization");
-contains(adapter, "$status.State.requiresRestart -and -not $RestartAuthorized",
-  "Restore/Uninstall authorization is still coupled to the codex display state");
+contains(adapter, "$status.State.codex -eq 'running' -or $status.State.requiresRestart",
+  "Restore/Uninstall authorization does not combine observed running state with restart projection");
 for (const regression of [
   "running-missing-config", "missing-config-restore-stopped-first", "missing-config-restore-stopped-retry",
   "missing-config-restore-running-unauthorized", "missing-config-restore-running-authorized",

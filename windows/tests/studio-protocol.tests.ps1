@@ -307,7 +307,7 @@ foreach ($required in @(
   "New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official'",
   'Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot',
   '$recovery.Completed -or $recovery.NeverApplied',
-  '$status.State.codex -ne ''running'''
+  '$status.State.codex -eq ''running'' -or $status.State.requiresRestart'
 )) {
   if (-not $adapterSource.Contains($required)) { throw "Studio adapter contract is missing: $required" }
 }
@@ -382,17 +382,21 @@ $restoreBackupCleanup = if ($restoreMarkerCleanup -ge 0) {
 $restoreCommit = if ($restoreBackupCleanup -ge 0) {
   $restoreSourceContract.IndexOf('$transactionCommitted = $true', $restoreBackupCleanup, [StringComparison]::Ordinal)
 } else { -1 }
+$restoreGuardComplete = if ($restoreBackupCleanup -ge 0) {
+  $restoreSourceContract.IndexOf('$missingConfigGuard.Complete()', $restoreBackupCleanup, [StringComparison]::Ordinal)
+} else { -1 }
 $restoreRelaunch = if ($restoreCommit -ge 0) {
   $restoreSourceContract.IndexOf('Start-Process -FilePath $relaunchCodex.Executable', $restoreCommit, [StringComparison]::Ordinal)
 } else { -1 }
-$shortcutCleanup = $restoreSourceContract.IndexOf("(Join-Path `$desktop 'Codex Dream Skin.lnk')", [StringComparison]::Ordinal)
+$shortcutCleanup = $restoreSourceContract.IndexOf('Remove-DreamSkinManagedLegacyShortcuts', [StringComparison]::Ordinal)
 if (-not $restoreSourceContract.Contains("Join-Path `$StateRoot 'config.restored.toml'") -or
   -not $restoreSourceContract.Contains('$transactionCommitted = $false') -or
   -not $restoreSourceContract.Contains('Get-DreamSkinRecoveryArtifactSnapshot') -or
   -not $restoreSourceContract.Contains('Restore-DreamSkinRecoveryArtifactSnapshot') -or
   $restorePublish -lt 0 -or $restoreStateCleanup -le $restorePublish -or
   $restorePauseCleanup -le $restoreStateCleanup -or $restoreMarkerCleanup -le $restorePauseCleanup -or
-  $restoreBackupCleanup -le $restoreMarkerCleanup -or $restoreCommit -le $restoreBackupCleanup -or
+  $restoreBackupCleanup -le $restoreMarkerCleanup -or $restoreGuardComplete -le $restoreBackupCleanup -or
+  $restoreCommit -le $restoreGuardComplete -or
   $restoreRelaunch -le $restoreCommit -or $shortcutCleanup -le $restorePublish -or
   -not $restoreSourceContract.Contains('if (-not $transactionCommitted -and $configChanged') -or
   -not $restoreSourceContract.Contains('Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreSnapshot.Bytes') -or
@@ -683,14 +687,58 @@ foreach ($scriptName in @(
 )) {
   Copy-Item -LiteralPath (Join-Path $Root "scripts\$scriptName") -Destination $realScripts
 }
+$realRestoreFixturePath = Join-Path $realScripts 'restore-dream-skin.ps1'
+$realRestoreFixture = [IO.File]::ReadAllText($realRestoreFixturePath)
+$completeBoundaryToken = '    if ($null -ne $missingConfigGuard) { $missingConfigGuard.Complete() }'
+if (-not $realRestoreFixture.Contains($completeBoundaryToken)) {
+  throw 'missing-config-complete-boundary could not locate MissingPathGuard.Complete().'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($completeBoundaryToken, @'
+    Invoke-DreamSkinCompleteBoundaryFault -Phase 'before'
+    if ($null -ne $missingConfigGuard) { $missingConfigGuard.Complete() }
+    Invoke-DreamSkinCompleteBoundaryFault -Phase 'after'
+'@.TrimEnd())
+[IO.File]::WriteAllText($realRestoreFixturePath, $realRestoreFixture, $utf8NoBom)
 [IO.File]::WriteAllText((Join-Path $realScripts 'injector.mjs'), '// real lifecycle injector fixture', $utf8NoBom)
 
 $realCommonStub = @'
 . $env:DREAM_SKIN_REAL_COMMON
+$script:realShortcutCleanup = ${function:Remove-DreamSkinManagedLegacyShortcuts}
+
+function Remove-DreamSkinManagedLegacyShortcuts {
+  & $script:realShortcutCleanup `
+    -DesktopPath (Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'desktop') `
+    -StartMenuPath (Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'app data\Microsoft\Windows\Start Menu\Programs')
+}
 
 function Add-RealLifecycleTrace {
   param([string]$Value)
   [IO.File]::AppendAllText($env:DREAM_SKIN_REAL_TRACE, $Value + "`r`n", [Text.UTF8Encoding]::new($false))
+}
+function Invoke-DreamSkinCompleteBoundaryFault {
+  param([ValidateSet('before', 'after')][string]$Phase)
+  $scenario = $env:DREAM_SKIN_TEST_SCENARIO
+  if ($scenario -notlike 'missing-config-complete-boundary-*') { return }
+  $config = Join-Path $env:USERPROFILE '.codex\config.toml'
+  $configDirectory = Split-Path -Parent $config
+  if ($Phase -ceq 'before') {
+    switch ($scenario) {
+      'missing-config-complete-boundary-config' {
+        [IO.File]::WriteAllText($config, 'complete-boundary config creator', [Text.UTF8Encoding]::new($false))
+      }
+      'missing-config-complete-boundary-parent' {
+        [IO.Directory]::CreateDirectory($configDirectory) | Out-Null
+      }
+      'missing-config-complete-boundary-junction' {
+        $external = Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'complete-boundary-external'
+        [IO.Directory]::CreateDirectory($external) | Out-Null
+        New-Item -ItemType Junction -Path $configDirectory -Target $external | Out-Null
+      }
+    }
+  } elseif ($scenario -ceq 'missing-config-complete-boundary-post-complete') {
+    [IO.File]::WriteAllText($config, 'complete-boundary post-complete creator', [Text.UTF8Encoding]::new($false))
+  }
+  Add-RealLifecycleTrace "complete-boundary:$Phase"
 }
 function Enter-DreamSkinOperationLock { Add-RealLifecycleTrace 'lock-enter'; return [pscustomobject]@{ Held = $true } }
 function Exit-DreamSkinOperationLock { param([object]$Mutex) Add-RealLifecycleTrace 'lock-exit' }
@@ -897,9 +945,11 @@ function New-RealLifecycleCase {
   $stateRoot = Join-Path $localAppData 'CodexDreamSkin'
   $userProfile = Join-Path $caseRoot 'user profile'
   $appData = Join-Path $caseRoot 'app data'
+  $desktop = Join-Path $caseRoot 'desktop'
+  $startMenu = Join-Path $appData 'Microsoft\Windows\Start Menu\Programs'
   New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
   New-Item -ItemType Directory -Path (Join-Path $userProfile '.codex') -Force | Out-Null
-  New-Item -ItemType Directory -Path $appData -Force | Out-Null
+  New-Item -ItemType Directory -Path $appData, $desktop, $startMenu -Force | Out-Null
   [IO.File]::WriteAllText((Join-Path $userProfile '.codex\config.toml'), 'original', $utf8NoBom)
   [IO.File]::WriteAllText((Join-Path $stateRoot 'config.before-dream-skin.toml'), 'backup', $utf8NoBom)
   [IO.File]::WriteAllText((Join-Path $stateRoot 'config.before-dream-skin.toml.appearance.json'),
@@ -907,9 +957,27 @@ function New-RealLifecycleCase {
   [IO.File]::WriteAllText((Join-Path $stateRoot 'state.json'), 'preserve-state', $utf8NoBom)
   $codexExecutable = Join-Path $caseRoot 'Codex.exe'
   [IO.File]::WriteAllText($codexExecutable, 'fixture executable', $utf8NoBom)
+  $managedShortcutPath = $null
+  $unrelatedShortcutPath = $null
+  if ($Name -like 'uninstall-*') {
+    $managedShortcutPath = Join-Path $desktop 'Codex Dream Skin.lnk'
+    $unrelatedShortcutPath = Join-Path $desktop 'Codex Dream Skin - Restore.lnk'
+    $managedScript = Join-Path $localAppData `
+      'Programs\CodexDreamSkinStudio\versions\fixture\engine\scripts\start-dream-skin.ps1'
+    $shortcutShell = New-Object -ComObject WScript.Shell
+    $shortcut = $shortcutShell.CreateShortcut($managedShortcutPath)
+    $shortcut.TargetPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$managedScript`" -PromptRestart"
+    $shortcut.Save()
+    $unrelatedShortcut = $shortcutShell.CreateShortcut($unrelatedShortcutPath)
+    $unrelatedShortcut.TargetPath = $shortcut.TargetPath
+    $unrelatedShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$caseRoot\unrelated.ps1`" -RestoreBaseTheme -PromptRestart"
+    $unrelatedShortcut.Save()
+  }
   return [pscustomobject]@{
     Root = $caseRoot; LocalAppData = $localAppData; StateRoot = $stateRoot; UserProfile = $userProfile
     AppData = $appData; TracePath = (Join-Path $caseRoot 'trace.txt'); CodexExecutable = $codexExecutable
+    ManagedShortcutPath = $managedShortcutPath; UnrelatedShortcutPath = $unrelatedShortcutPath
   }
 }
 
@@ -2068,6 +2136,54 @@ try {
   Assert-RealMissingConfigCompletion -Case $missingConfigRestoreAuthorized -Result $realResult -ExpectedClose `
     -Message 'missing-config-restore-running-authorized failed, created config, or relaunched Codex.'
 
+  foreach ($completeBoundaryKind in @('config', 'parent', 'junction')) {
+    $completeBoundaryCase = New-RealLifecycleCase `
+      -Name "missing-config-complete-boundary-$completeBoundaryKind"
+    $completeBoundaryConfigDirectory = Join-Path $completeBoundaryCase.UserProfile '.codex'
+    $completeBoundaryConfig = Join-Path $completeBoundaryConfigDirectory 'config.toml'
+    Remove-Item -LiteralPath $completeBoundaryConfig -Force
+    if ($completeBoundaryKind -in @('parent', 'junction')) {
+      Remove-Item -LiteralPath $completeBoundaryConfigDirectory -Recurse -Force
+    }
+    $completeBoundaryState = @(Get-StateSnapshot -Root $completeBoundaryCase.StateRoot)
+    $realResult = Invoke-RealLifecycle -Case $completeBoundaryCase `
+      -ScriptName 'restore-dream-skin.ps1' `
+      -Scenario "missing-config-complete-boundary-$completeBoundaryKind" `
+      -Arguments @('-RestoreBaseTheme', '-NoRelaunch')
+    if ($realResult.ExitCode -eq 0 -or
+      $realResult.Trace -notcontains 'complete-boundary:before') {
+      throw "missing-config-complete-boundary-$completeBoundaryKind crossed the Complete boundary."
+    }
+    Assert-Equal (Get-StateSnapshot -Root $completeBoundaryCase.StateRoot) $completeBoundaryState `
+      "missing-config-complete-boundary-$completeBoundaryKind did not compensate lifecycle artifacts."
+    if ($completeBoundaryKind -ceq 'config') {
+      if ([IO.File]::ReadAllText($completeBoundaryConfig) -cne 'complete-boundary config creator') {
+        throw 'missing-config-complete-boundary-config did not preserve the unexpected creator.'
+      }
+    } else {
+      $completeBoundaryItem = Get-Item -LiteralPath $completeBoundaryConfigDirectory -Force
+      $isReparse = ($completeBoundaryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+      if (($completeBoundaryKind -ceq 'junction') -ne $isReparse) {
+        throw "missing-config-complete-boundary-$completeBoundaryKind changed the appeared component."
+      }
+    }
+  }
+
+  $postCompleteCase = New-RealLifecycleCase -Name 'missing-config-complete-boundary-post-complete'
+  $postCompleteConfig = Join-Path $postCompleteCase.UserProfile '.codex\config.toml'
+  Remove-Item -LiteralPath $postCompleteConfig -Force
+  $realResult = Invoke-RealLifecycle -Case $postCompleteCase -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'missing-config-complete-boundary-post-complete' `
+    -Arguments @('-RestoreBaseTheme', '-NoRelaunch')
+  $postCompleteBackup = Join-Path $postCompleteCase.StateRoot 'config.before-dream-skin.toml'
+  $postCompleteArchive = Join-Path $postCompleteCase.StateRoot 'config.restored.toml'
+  if ($realResult.ExitCode -ne 0 -or
+    [IO.File]::ReadAllText($postCompleteConfig) -cne 'complete-boundary post-complete creator' -or
+    (Test-Path -LiteralPath $postCompleteBackup) -or
+    -not (Test-Path -LiteralPath $postCompleteArchive -PathType Leaf)) {
+    throw 'missing-config-complete-boundary post-Complete creator was reinterpreted as transaction failure.'
+  }
+
   $missingConfigUninstallStopped = New-RealLifecycleCase -Name 'missing-config-uninstall-stopped-first'
   Remove-Item -LiteralPath (Join-Path $missingConfigUninstallStopped.UserProfile '.codex\config.toml') -Force
   $realResult = Invoke-RealLifecycle -Case $missingConfigUninstallStopped `
@@ -2351,15 +2467,14 @@ try {
   $realUninstall = New-RealLifecycleCase -Name 'uninstall-order'
   $realResult = Invoke-RealLifecycle -Case $realUninstall -ScriptName 'restore-dream-skin.ps1' `
     -Scenario 'real-uninstall' -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
-  if ($realResult.ExitCode -ne 0 -or $realResult.Trace -contains 'start-process') {
+  if ($realResult.ExitCode -ne 0 -or $realResult.Trace -contains 'start-process' -or
+    (Test-Path -LiteralPath $realUninstall.ManagedShortcutPath) -or
+    -not (Test-Path -LiteralPath $realUninstall.UnrelatedShortcutPath)) {
     throw 'Production uninstall relaunched Codex or failed its restore.'
   }
   $restoreIndex = [Array]::IndexOf($realResult.Trace, 'restore-config')
   $archiveIndex = [Array]::IndexOf($realResult.Trace, 'archive-backup')
-  $shortcutIndex = -1
-  for ($index = 0; $index -lt $realResult.Trace.Count; $index++) {
-    if ($realResult.Trace[$index] -like 'remove:*Codex Dream Skin.lnk') { $shortcutIndex = $index; break }
-  }
+  $shortcutIndex = [Array]::IndexOf($realResult.Trace, "remove:$($realUninstall.ManagedShortcutPath)")
   if ($restoreIndex -lt 0 -or $archiveIndex -le $restoreIndex -or $shortcutIndex -le $archiveIndex) {
     throw 'Production uninstall removed shortcuts before restore and backup completion.'
   }
@@ -2368,11 +2483,13 @@ try {
   $realResult = Invoke-RealLifecycle -Case $realUninstallForce -ScriptName 'restore-dream-skin.ps1' `
     -Scenario 'real-uninstall-force' `
     -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch', '-CloseRunning', '-ForceRestart')
-  if ($realResult.ExitCode -ne 0 -or $realResult.Trace -contains 'start-process') {
+  if ($realResult.ExitCode -ne 0 -or $realResult.Trace -contains 'start-process' -or
+    (Test-Path -LiteralPath $realUninstallForce.ManagedShortcutPath) -or
+    -not (Test-Path -LiteralPath $realUninstallForce.UnrelatedShortcutPath)) {
     throw 'Production uninstall rejected authorized force or relaunched Codex.'
   }
   Assert-TraceOrder -Trace $realResult.Trace `
-    -Expected @('stop:True', 'restore-config', 'archive-backup', "remove:$([Environment]::GetFolderPath('Desktop'))\Codex Dream Skin.lnk") `
+    -Expected @('stop:True', 'restore-config', 'archive-backup', "remove:$($realUninstallForce.ManagedShortcutPath)") `
     -Message 'Production uninstall did not stop Codex before restore and shortcut cleanup.'
 
   Assert-Equal (Get-StateSnapshot -Root $realRoot) $realEngineSnapshot `

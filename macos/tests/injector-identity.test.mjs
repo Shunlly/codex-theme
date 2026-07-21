@@ -267,6 +267,47 @@ try {
   browserId = "Browser-A";
   requests.length = 0;
   mutationCommands.length = 0;
+  targets = [];
+  const timedOutGate = path.join(temporary, ".watcher-activation.A1b2C3");
+  result = await run([
+    "--watch", "--port", String(port), "--browser-id", "Browser-A", "--theme-dir", themeDir,
+    "--activation-gate", timedOutGate, "--timeout-ms", "250",
+  ], 1500);
+  assert.notEqual(result.code, 0, "watcher accepted a missing activation gate");
+  assert.deepEqual(requests, [], "watcher connected to CDP before activation timed out");
+  assert.deepEqual(mutationCommands, [], "watcher mutated CDP before activation timed out");
+
+  const activationGate = path.join(temporary, ".watcher-activation.D4e5F6");
+  const gatedWatcher = launch([
+    "--watch", "--port", String(port), "--browser-id", "Browser-A", "--theme-dir", themeDir,
+    "--activation-gate", activationGate, "--timeout-ms", "2000",
+  ]);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.deepEqual(requests, [], "watcher connected to CDP before its activation gate");
+    assert.deepEqual(mutationCommands, [], "watcher mutated CDP before its activation gate");
+    await fs.writeFile(
+      activationGate,
+      `${JSON.stringify({ pid: gatedWatcher.child.pid })}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    await waitFor(
+      () => requests.includes("/json/list"),
+      "activated watcher did not connect to CDP",
+    );
+    const acknowledgement = JSON.parse(await fs.readFile(`${activationGate}.activated`, "utf8"));
+    assert.equal(acknowledgement.pid, gatedWatcher.child.pid);
+    gatedWatcher.child.kill("SIGTERM");
+    result = await waitForCompletion(gatedWatcher, "activated watcher did not stop after SIGTERM");
+    assert.equal(result.code, 0, result.stderr);
+  } finally {
+    await cleanupChild(gatedWatcher);
+    await fs.rm(activationGate, { force: true });
+    await fs.rm(`${activationGate}.activated`, { force: true });
+  }
+
+  requests.length = 0;
+  mutationCommands.length = 0;
   targets = [{
     type: "page",
     id: "Startup-Page",

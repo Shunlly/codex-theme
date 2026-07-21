@@ -80,7 +80,7 @@ STUB
 printf 'launchctl %s\n' "$*" >> "__MARKER__"
 case "${1:-}" in
   print)
-    [ -e "__SUBMITTED__" ] || exit 1
+    [ -e "__SUBMITTED__" ] || exit 113
     printf '  pid = 4242\n'
     ;;
   submit) : > "__SUBMITTED__" ;;
@@ -103,7 +103,7 @@ run_watcher_fixture() (
   NODE=/usr/bin/false
   process_started_at() { printf 'fixture-start\n'; }
   launched_injector_process_matches() { [ "$1" = "4242" ]; }
-  launch_injector_daemon 9341 Browser-A
+  launch_injector_daemon 9341 Browser-A "$STATE_ROOT/.watcher-activation.Ab12Cd"
   printf '%s\n' "$LAUNCHED_INJECTOR_PID"
 )
 
@@ -116,6 +116,7 @@ set -e
 [ "$WATCHER_EXIT" -ne 0 ] || { printf 'Studio watcher failure fell back to launchctl submit.\n' >&2; exit 1; }
 /usr/bin/grep -q '^nohup ' "$WATCHER_MARKER"
 /usr/bin/grep -q -- '--port 9341 --browser-id Browser-A --theme-dir ' "$WATCHER_MARKER"
+/usr/bin/grep -q -- '--activation-gate ' "$WATCHER_MARKER"
 ! /usr/bin/grep -q '^launchctl submit ' "$WATCHER_MARKER"
 
 : > "$WATCHER_MARKER"
@@ -123,6 +124,7 @@ WATCHER_PID="$(HOME="$WATCHER_HOME" run_watcher_fixture)"
 [ "$WATCHER_PID" = "4242" ] || { printf 'Legacy watcher fallback did not return its launchctl PID.\n' >&2; exit 1; }
 /usr/bin/grep -q '^launchctl submit ' "$WATCHER_MARKER"
 /usr/bin/grep -q -- '--port 9341 --browser-id Browser-A --theme-dir ' "$WATCHER_MARKER"
+/usr/bin/grep -q -- '--activation-gate ' "$WATCHER_MARKER"
 
 # One per-user lifecycle owner must serialize direct callers, allow only its
 # verified descendants to reuse the lock, and project contention read-only.
@@ -677,6 +679,23 @@ run_adapter status
 ' "$ADAPTER_JSON"
 /usr/bin/printf '{"port":%s,"session":"paused","injectorPid":0}\n' "$PORT" > "$STATE_ROOT/state.json"
 
+/usr/bin/printf '{malformed\n' > "$STATE_ROOT/rollback.json"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 1 ] || { printf 'Malformed rollback evidence did not fail status.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.availableActions.length !== 0 || value.error?.code !== "STATE_UNSAFE" ||
+      value.error.recoveryActions.includes("restore")) process.exit(1);
+' "$ADAPTER_JSON" || { printf 'Malformed rollback evidence advertised an unusable lifecycle action.\n' >&2; exit 1; }
+/bin/rm -f "$STATE_ROOT/studio-operation.log"
+run_adapter restore
+[ "$ADAPTER_EXIT" -eq 1 ] || { printf 'Adapter Restore accepted malformed rollback evidence.\n' >&2; exit 1; }
+[ ! -e "$STATE_ROOT/studio-operation.log" ] || {
+  printf 'Adapter dispatched Restore despite malformed rollback evidence.\n' >&2
+  exit 1
+}
+/bin/rm -f "$STATE_ROOT/rollback.json"
+
 /usr/bin/printf '%s\n' '{"name":"测试主题"}' > "$STATE_ROOT/theme/theme.json"
 run_adapter status
 "$NODE" -e 'if (JSON.parse(process.argv[1]).state.themeName !== "测试主题") process.exit(1)' "$ADAPTER_JSON"
@@ -741,14 +760,14 @@ run_adapter status
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
   if (value.state.install !== "not-installed") process.exit(1);
-  if (value.state.availableActions.join(",") !== "install,uninstall") process.exit(1);
+  if (value.state.availableActions.join(",") !== "install,restore,uninstall") process.exit(1);
 ' "$ADAPTER_JSON"
 /bin/rm -f "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh"
 run_adapter status
 [ "$ADAPTER_EXIT" -eq 0 ] || { printf 'restored partial-engine status failed.\n' >&2; exit 1; }
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
-  if (value.state.availableActions.join(",") !== "install,uninstall") process.exit(1);
+  if (value.state.availableActions.join(",") !== "install,restore,uninstall") process.exit(1);
 ' "$ADAPTER_JSON"
 
 /bin/rm -f "$STATE_ROOT/theme-backup.restored.json"
@@ -1108,7 +1127,7 @@ require_macos_runtime() { :; }
 try_discover_codex_app() { :; }
 try_require_macos_runtime() { :; }
 try_validate_codex_app_identity() { CODEX_APP_VALIDATED=true; }
-try_require_macos_node_runtime() { NODE=/usr/bin/true; NODE_RUNTIME_VALIDATED=true; }
+try_require_macos_node_runtime() { NODE="$SCRIPT_DIR/node-stub"; NODE_RUNTIME_VALIDATED=true; }
 ensure_state_root() { printf 'ensure\n' >> "__MARKER__"; }
 state_field() { printf '9341\n'; }
 codex_is_running() { return 0; }
@@ -1131,8 +1150,23 @@ STUB
 /usr/bin/sed > "$RESTORE_REAL/scripts/node-stub" <<'STUB'
 #!/bin/bash
 set -euo pipefail
-[ "${2:-}" = "restore" ] || exit 0
-[ -f "${4:-}" ] || { printf 'No selective pre-install theme backup is available.\n' >&2; exit 1; }
+case "${2:-}" in
+  restore)
+    [ -f "${4:-}" ] || { printf 'No selective pre-install theme backup is available.\n' >&2; exit 1; }
+    ;;
+  archive)
+    [ -f "${3:-}" ] || exit 1
+    [ ! -e "${4:-}" ] || [ -f "$4" ] || exit 1
+    /bin/cp "$3" "$4.tmp"
+    /bin/mv "$4.tmp" "$4"
+    /bin/rm -f "$3"
+    ;;
+  retire)
+    [ -f "${3:-}" ] && [ -f "${4:-}" ] || exit 1
+    /usr/bin/cmp -s "$3" "$4" || exit 1
+    /bin/rm -f "$3"
+    ;;
+esac
 STUB
 /bin/chmod 755 "$RESTORE_REAL/scripts/node-stub"
 : > "$RESTORE_REAL_MARKER"
@@ -1188,13 +1222,18 @@ set +e
 RESTORE_ARCHIVE_FAULT_EXIT="$?"
 set -e
 [ "$RESTORE_ARCHIVE_FAULT_EXIT" -ne 0 ] || { printf 'backup archive fault unexpectedly committed restore.\n' >&2; exit 1; }
-[ ! -e "$RESTORE_REAL_HOME/state/state.json" ]
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/state.json")" = 'state sentinel' ]
 [ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.json")" = 'archive-fault backup' ]
 /bin/rmdir "$RESTORE_REAL_HOME/state/theme-backup.restored.json"
 /usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
   "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
   >/dev/null
 [ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'archive-fault backup' ]
+if /usr/bin/find "$RESTORE_REAL_HOME/state" -maxdepth 1 -name '.theme-backup.stage.*' -print -quit \
+  | /usr/bin/grep -q .; then
+  printf 'successful archive retry retained a staged theme backup.\n' >&2
+  exit 1
+fi
 RESTORED_ARCHIVE_HASH="$(/usr/bin/shasum -a 256 "$RESTORE_REAL_HOME/state/theme-backup.restored.json")"
 /usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
   "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --restart-authorized \
@@ -1276,6 +1315,7 @@ fi
 actions='["install"]'
 [ ! -d "$installed" ] || actions='["install","uninstall"]'
 [ ! -f "$backup" ] || actions='["restore","uninstall"]'
+[ ! -f "$archive" ] || actions='["install","restore","uninstall"]'
 codex="${RECOVERY_CODEX_STATE:-not-installed}"
 code=CODEX_NOT_INSTALLED
 message='Codex is not installed.'

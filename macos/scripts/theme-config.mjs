@@ -2,8 +2,9 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
-const [mode, configPath, backupPath] = process.argv.slice(2);
+const [mode, configPath, backupPath, archiveIdentity] = process.argv.slice(2);
 // Backup these keys so Restore can put them back. Do NOT force dark —
 // Dream Skin CSS auto-adapts to light/dark via data-dream-shell.
 const settings = new Map([
@@ -15,10 +16,6 @@ const targetKeys = [
   "appearanceLightCodeThemeId",
   "appearanceDarkCodeThemeId",
 ];
-
-if (!["install", "restore"].includes(mode) || !configPath || !backupPath) {
-  throw new Error("Usage: theme-config.mjs <install|restore> <config-path> <backup-path>");
-}
 
 function desktopSection(content) {
   const headers = [...content.matchAll(/^(?:\uFEFF)?[\t ]*\[[\t ]*desktop[\t ]*\][\t ]*(?:#[^\r\n]*)?(?:\r?\n|$)/gm)];
@@ -253,13 +250,20 @@ function replaceSetting(body, key, line, preferredNewline) {
   return `${body}${separator}${line}${newline}`;
 }
 
-async function atomicWrite(file, value, modeBits, expectedBytes = null, expectedStat = null) {
+async function atomicWrite(
+  file,
+  value,
+  modeBits,
+  expectedBytes = null,
+  expectedStat = null,
+  chmodAfterRename = true,
+) {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await fs.writeFile(temporary, value, { mode: modeBits, flag: "wx" });
     if (expectedBytes) await assertConfigUnchanged(expectedBytes, expectedStat);
     await fs.rename(temporary, file);
-    await fs.chmod(file, modeBits);
+    if (chmodAfterRename) await fs.chmod(file, modeBits);
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => {});
   }
@@ -276,15 +280,34 @@ function decodeStrictUtf8(bytes, label) {
   return content;
 }
 
-async function readStableRegularFile(file, invalidMessage) {
+async function readHandle(handle) {
+  const chunks = [];
+  const buffer = Buffer.alloc(16_384);
+  let position = 0;
+  while (true) {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    if (!bytesRead) return Buffer.concat(chunks);
+    chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+    position += bytesRead;
+  }
+}
+
+async function openStableRegularFile(file, invalidMessage, expectedIdentity = null) {
   const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const opened = await handle.stat({ bigint: true });
     const linked = await fs.lstat(file, { bigint: true });
-    if (!opened.isFile() || !linked.isFile() || opened.dev !== linked.dev || opened.ino !== linked.ino) {
+    const openedIdentity = `${opened.dev}:${opened.ino}`;
+    if (
+      !opened.isFile()
+      || !linked.isFile()
+      || opened.dev !== linked.dev
+      || opened.ino !== linked.ino
+      || (expectedIdentity && openedIdentity !== expectedIdentity)
+    ) {
       throw new Error(invalidMessage);
     }
-    const bytes = await handle.readFile();
+    const bytes = await readHandle(handle);
     const after = await handle.stat({ bigint: true });
     const linkedAfter = await fs.lstat(file, { bigint: true });
     if (
@@ -298,9 +321,152 @@ async function readStableRegularFile(file, invalidMessage) {
     ) {
       throw new Error("Theme backup identity changed while it was being read; nothing was changed.");
     }
-    return bytes;
-  } finally {
+    return { bytes, handle, stat: after };
+  } catch (error) {
     await handle.close();
+    throw error;
+  }
+}
+
+async function readStableRegularFile(file, invalidMessage, expectedIdentity = null) {
+  const opened = await openStableRegularFile(file, invalidMessage, expectedIdentity);
+  try {
+    return opened.bytes;
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+async function assertHeldFile(opened, file, expectedBytes, linkedPath) {
+  const linked = await fs.lstat(linkedPath, { bigint: true });
+  const held = await file.stat({ bigint: true });
+  const heldBytes = await readHandle(file);
+  if (
+    !linked.isFile()
+    || linked.dev !== held.dev
+    || linked.ino !== held.ino
+    || opened.dev !== held.dev
+    || opened.ino !== held.ino
+    || opened.size !== held.size
+    || opened.mtimeNs !== held.mtimeNs
+    || held.nlink !== 1n
+    || !heldBytes.equals(expectedBytes)
+  ) {
+    throw new Error("Staged theme backup identity changed before committed cleanup.");
+  }
+}
+
+async function consumeHeldBackup(
+  opened,
+  backupPath,
+  beforeQuarantine = async () => {},
+  afterQuarantine = async () => {},
+  beforeConsumption = async () => {},
+) {
+  const { bytes, handle, stat } = opened;
+  await assertHeldFile(stat, handle, bytes, backupPath);
+  await beforeQuarantine();
+
+  const quarantineDirectory = await fs.mkdtemp(`${backupPath}.cleanup.`);
+  const quarantinePath = path.join(quarantineDirectory, "staged");
+  await fs.rename(backupPath, quarantinePath);
+  try {
+    await afterQuarantine();
+    await assertHeldFile(stat, handle, bytes, quarantinePath);
+    try {
+      await fs.lstat(backupPath);
+      throw new Error("An unexpected theme backup appeared during committed cleanup.");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    await beforeConsumption();
+    await fs.unlink(quarantinePath);
+    const unlinked = await handle.stat({ bigint: true });
+    if (unlinked.nlink !== 0n) {
+      throw new Error("The committed theme backup was not removed by exact identity.");
+    }
+    await fs.rmdir(quarantineDirectory);
+  } catch (error) {
+    try {
+      await fs.link(quarantinePath, backupPath);
+    } catch (restoreError) {
+      if (restoreError.code !== "EEXIST") throw new AggregateError([error, restoreError]);
+    }
+    throw error;
+  }
+}
+
+export async function archiveBackup(
+  stagedPath,
+  destinationPath,
+  expectedIdentity,
+  beforeCleanup = async () => {},
+  beforeQuarantine = async () => {},
+) {
+  const staged = await openStableRegularFile(
+    stagedPath,
+    "Staged theme backup identity changed before archive commit.",
+    expectedIdentity,
+  );
+  try {
+    const { bytes } = staged;
+    try {
+      const destination = await fs.lstat(destinationPath);
+      if (!destination.isFile() || destination.isSymbolicLink()) {
+        throw new Error("The restored-backup archive path is unsafe; recovery data was preserved.");
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    await atomicWrite(destinationPath, bytes, 0o600, null, null, false);
+    const archived = await readStableRegularFile(
+      destinationPath,
+      "The restored theme backup archive could not be verified.",
+    );
+    if (!archived.equals(bytes)) {
+      throw new Error("The restored theme backup archive could not be verified.");
+    }
+    await beforeCleanup();
+    await consumeHeldBackup(staged, stagedPath, beforeQuarantine);
+  } finally {
+    await staged.handle.close();
+  }
+}
+
+export async function retireBackup(
+  livePath,
+  archivePath,
+  expectedIdentity,
+  beforeQuarantine = async () => {},
+  afterQuarantine = async () => {},
+) {
+  const live = await openStableRegularFile(
+    livePath,
+    "Live theme backup identity changed before retirement.",
+    expectedIdentity,
+  );
+  try {
+    const archived = await openStableRegularFile(
+      archivePath,
+      "The restored theme backup archive could not be verified.",
+    );
+    try {
+      if (!archived.bytes.equals(live.bytes)) {
+        throw new Error("The restored theme backup archive does not match the live recovery backup.");
+      }
+      await assertHeldFile(archived.stat, archived.handle, archived.bytes, archivePath);
+      await consumeHeldBackup(
+        live,
+        livePath,
+        beforeQuarantine,
+        afterQuarantine,
+        () => assertHeldFile(archived.stat, archived.handle, archived.bytes, archivePath),
+      );
+    } finally {
+      await archived.handle.close();
+    }
+  } finally {
+    await live.handle.close();
   }
 }
 
@@ -453,6 +619,7 @@ async function main() {
     const backupBytes = await readStableRegularFile(
       backupPath,
       "Theme backup must be a regular file, not a symbolic link.",
+      process.env.DREAM_SKIN_BACKUP_IDENTITY || null,
     );
     backup = JSON.parse(decodeStrictUtf8(backupBytes, "Theme backup"));
   } catch (error) {
@@ -481,9 +648,26 @@ async function main() {
   console.log("Restored the saved base-theme keys.");
 }
 
-const releaseLock = await acquireConfigLock();
-try {
-  await main();
-} finally {
-  await releaseLock();
+async function runCli() {
+  if (!["install", "restore", "archive", "retire"].includes(mode) || !configPath || !backupPath
+    || (["archive", "retire"].includes(mode) && !archiveIdentity)) {
+    throw new Error("Usage: theme-config.mjs <install|restore> <config-path> <backup-path> | <archive|retire> <live-path> <archive-path> <expected-identity>");
+  }
+  if (mode === "archive") {
+    await archiveBackup(configPath, backupPath, archiveIdentity);
+  } else if (mode === "retire") {
+    await retireBackup(configPath, backupPath, archiveIdentity);
+  } else {
+    const releaseLock = await acquireConfigLock();
+    try {
+      await main();
+    } finally {
+      await releaseLock();
+    }
+  }
+}
+
+const cliPath = process.argv[1] ? await fs.realpath(process.argv[1]).catch(() => null) : null;
+if (cliPath && cliPath === await fs.realpath(fileURLToPath(import.meta.url))) {
+  await runCli();
 }

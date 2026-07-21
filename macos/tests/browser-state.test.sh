@@ -8,6 +8,7 @@ TMP="$(/usr/bin/mktemp -d /tmp/codex-dream-skin-browser-state.XXXXXX)"
 SERVER_PID=""
 WATCHER_PID=""
 FOREIGN_JOB_PID=""
+PARENT_PID=""
 cleanup() {
   [ -z "${TRANSACTION_FAKE_LAUNCHCTL:-}" ] \
     || "$TRANSACTION_FAKE_LAUNCHCTL" remove test-job >/dev/null 2>&1 || true
@@ -17,6 +18,8 @@ cleanup() {
   [ -z "$WATCHER_PID" ] || wait "$WATCHER_PID" 2>/dev/null || true
   [ -z "$FOREIGN_JOB_PID" ] || /bin/kill -TERM "$FOREIGN_JOB_PID" 2>/dev/null || true
   [ -z "$FOREIGN_JOB_PID" ] || wait "$FOREIGN_JOB_PID" 2>/dev/null || true
+  [ -z "$PARENT_PID" ] || /bin/kill -KILL "$PARENT_PID" 2>/dev/null || true
+  [ -z "$PARENT_PID" ] || wait "$PARENT_PID" 2>/dev/null || true
   /bin/rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -258,6 +261,21 @@ process_started_at() {
   [ "${DREAM_SKIN_STATE_FAULT:-}" != "start-time" ] || return 1
   /bin/ps -p "$1" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}'
 }
+eval "$(declare -f write_renderer_rollback_evidence | /usr/bin/sed '1s/write_renderer_rollback_evidence/production_write_renderer_rollback_evidence/')"
+eval "$(declare -f write_state | /usr/bin/sed '1s/write_state/production_write_state/')"
+pause_parent_at_activation_phase() {
+  [ "${DREAM_SKIN_PARENT_KILL_PHASE:-}" = "$1" ] || return 0
+  : > "$DREAM_SKIN_PARENT_PHASE_READY"
+  while [ ! -e "$DREAM_SKIN_PARENT_PHASE_RELEASE" ]; do /bin/sleep 0.02; done
+}
+write_renderer_rollback_evidence() {
+  pause_parent_at_activation_phase before-intent
+  production_write_renderer_rollback_evidence "$@"
+}
+write_state() {
+  pause_parent_at_activation_phase after-activation
+  production_write_state "$@"
+}
 case "${DREAM_SKIN_STATE_FAULT:-}" in
   temp-write) STATE_PATH="$STATE_ROOT/missing/state.json" ;;
 esac
@@ -269,7 +287,11 @@ set -euo pipefail
 job_pid_path="__JOB_PID__"
 case "${1:-}" in
   remove)
-    exit 1
+    case "${DREAM_SKIN_LAUNCHCTL_FAULT:-}" in
+      remove-fail) exit 1 ;;
+      remove-retained) exit 0 ;;
+    esac
+    /bin/rm -f "$job_pid_path"
     ;;
   submit)
     shift
@@ -290,6 +312,7 @@ case "${1:-}" in
   kickstart)
     ;;
   print)
+    [ "${DREAM_SKIN_LAUNCHCTL_FAULT:-}" != "print-error" ] || exit 2
     [ -s "$job_pid_path" ] || exit 113
     pid="$(/bin/cat "$job_pid_path")"
     /bin/kill -0 "$pid" 2>/dev/null || exit 113
@@ -330,8 +353,28 @@ if (process.argv.includes("--watch")) {
     pidFile = "__FALLBACK_PID__";
   }
   fs.writeFileSync(pidFile, String(process.pid));
-  if (cdpMarker) fs.appendFileSync(cdpMarker, "watch\n");
-  if (skinMarker) fs.writeFileSync(skinMarker, "installed\n");
+  const mutate = () => {
+    if (cdpMarker) fs.appendFileSync(cdpMarker, "watch\n");
+    if (skinMarker) fs.writeFileSync(skinMarker, "installed\n");
+  };
+  const gateIndex = process.argv.indexOf("--activation-gate");
+  if (gateIndex < 0) {
+    mutate();
+  } else {
+    const gate = process.argv[gateIndex + 1];
+    const timer = setInterval(() => {
+      try {
+        const value = JSON.parse(fs.readFileSync(gate, "utf8"));
+        if (value.pid !== process.pid) throw new Error("activation PID mismatch");
+        fs.writeFileSync(`${gate}.activated`,
+          `${JSON.stringify({ pid: process.pid })}\n`, { flag: "wx", mode: 0o600 });
+        clearInterval(timer);
+        mutate();
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }, 20);
+  }
   setInterval(() => {}, 30000);
 }
 STUB
@@ -354,6 +397,102 @@ assert_watcher_stopped() {
     printf 'Failed watcher transaction left PID %s alive.\n' "$pid" >&2
     exit 1
   fi
+}
+
+wait_for_fixture_path() {
+  local path="$1"
+  local label="$2"
+  local deadline=$((SECONDS + 5))
+  while [ ! -e "$path" ] && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.02; done
+  [ -e "$path" ] || { printf '%s did not reach its bounded fixture boundary.\n' "$label" >&2; return 1; }
+}
+
+run_parent_kill_activation_case() {
+  local phase="$1"
+  local pid_file="$TRANSACTION_ROOT/parent-kill-$phase.pid"
+  local ready="$TRANSACTION_ROOT/parent-kill-$phase.ready"
+  local release="$TRANSACTION_ROOT/parent-kill-$phase.release"
+  local cdp_marker="$TRANSACTION_ROOT/parent-kill-$phase.cdp.log"
+  local skin_marker="$TRANSACTION_ROOT/parent-kill-$phase.skin"
+  local output="$TRANSACTION_ROOT/parent-kill-$phase.out"
+  local error="$TRANSACTION_ROOT/parent-kill-$phase.err"
+  /bin/rm -rf "$TRANSACTION_HOME"
+  /bin/mkdir -p "$TRANSACTION_STATE/theme" "$TRANSACTION_HOME/.codex"
+  /bin/rm -f "$pid_file" "$ready" "$release" "$cdp_marker" "$skin_marker" \
+    "$TRANSACTION_FAKE_JOB_PID"
+
+  /usr/bin/env HOME="$TRANSACTION_HOME" NODE="$NODE" NODE_RUNTIME_VALIDATED=true \
+    DREAM_SKIN_PARENT_KILL_PHASE="$phase" DREAM_SKIN_PARENT_PHASE_READY="$ready" \
+    DREAM_SKIN_PARENT_PHASE_RELEASE="$release" DREAM_SKIN_WATCHER_PID_FILE="$pid_file" \
+    DREAM_SKIN_CDP_MARKER="$cdp_marker" DREAM_SKIN_SKIN_MARKER="$skin_marker" \
+    "$TRANSACTION_ENGINE/scripts/start-dream-skin-macos.sh" >"$output" 2>"$error" &
+  PARENT_PID="$!"
+  local watcher_pid
+  watcher_pid="$(wait_for_watcher_pid "$pid_file")"
+  WATCHER_PID="$watcher_pid"
+  wait_for_fixture_path "$ready" "$phase parent" || {
+    /bin/ps -p "$watcher_pid" -o command= >&2 || true
+    /usr/bin/find "$TRANSACTION_STATE" -maxdepth 1 -print >&2 || true
+    /bin/cat "$TRANSACTION_STATE/injector-error.log" >&2 2>/dev/null || true
+    /bin/cat "$error" >&2
+    return 1
+  }
+  /bin/kill -KILL "$PARENT_PID"
+  wait "$PARENT_PID" 2>/dev/null || true
+  PARENT_PID=""
+
+  if [ "$phase" = "before-intent" ]; then
+    /bin/sleep 0.2
+    [ ! -e "$skin_marker" ] \
+      || { printf 'Pre-intent watcher mutated the renderer before activation.\n' >&2; return 1; }
+    [ ! -e "$TRANSACTION_STATE/rollback.json" ] && [ ! -e "$TRANSACTION_STATE/state.json" ] \
+      || { printf 'Pre-intent kill unexpectedly published lifecycle authority.\n' >&2; return 1; }
+    /bin/kill -TERM "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    WATCHER_PID=""
+    return 0
+  fi
+
+  wait_for_fixture_path "$skin_marker" "$phase watcher"
+  [ -f "$TRANSACTION_STATE/rollback.json" ] && [ ! -e "$TRANSACTION_STATE/state.json" ] \
+    || { printf 'Activated pre-state watcher lacks rollback authority.\n' >&2; return 1; }
+  "$NODE" -e 'setInterval(() => {}, 30000)' &
+  FOREIGN_JOB_PID="$!"
+  local foreign_started_at
+  foreign_started_at="$(LC_ALL=C TZ=UTC /bin/ps -p "$FOREIGN_JOB_PID" -o lstart= | /usr/bin/awk '{$1=$1; print}')"
+  /bin/cp "$TRANSACTION_STATE/rollback.json" "$TRANSACTION_STATE/rollback.original.json"
+  "$NODE" -e '
+    const fs = require("node:fs");
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    value.injectorPid = Number(process.argv[2]);
+    value.injectorStartedAt = process.argv[3];
+    fs.writeFileSync(process.argv[1], `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  ' "$TRANSACTION_STATE/rollback.json" "$FOREIGN_JOB_PID" "$foreign_started_at"
+  if /usr/bin/env HOME="$TRANSACTION_HOME" NODE="$NODE" NODE_RUNTIME_VALIDATED=true \
+    DREAM_SKIN_TEST_NODE="$NODE" DREAM_SKIN_BROWSER_ID=Browser-A \
+    DREAM_SKIN_CDP_MARKER="$cdp_marker" DREAM_SKIN_SKIN_MARKER="$skin_marker" \
+    "$TRANSACTION_ENGINE/scripts/restore-dream-skin-macos.sh" >/dev/null 2>&1; then
+    printf 'Restore accepted a foreign rollback watcher identity.\n' >&2
+    return 1
+  fi
+  /bin/kill -0 "$FOREIGN_JOB_PID" 2>/dev/null \
+    && /bin/kill -0 "$watcher_pid" 2>/dev/null && [ -e "$skin_marker" ] \
+    || { printf 'Foreign rollback evidence touched a live process or renderer.\n' >&2; return 1; }
+  /bin/mv "$TRANSACTION_STATE/rollback.original.json" "$TRANSACTION_STATE/rollback.json"
+  /bin/chmod 600 "$TRANSACTION_STATE/rollback.json"
+  /usr/bin/env HOME="$TRANSACTION_HOME" NODE="$NODE" NODE_RUNTIME_VALIDATED=true \
+    DREAM_SKIN_TEST_NODE="$NODE" DREAM_SKIN_BROWSER_ID=Browser-A \
+    DREAM_SKIN_CDP_MARKER="$cdp_marker" DREAM_SKIN_SKIN_MARKER="$skin_marker" \
+    "$TRANSACTION_ENGINE/scripts/restore-dream-skin-macos.sh" >/dev/null
+  assert_watcher_stopped "$watcher_pid"
+  WATCHER_PID=""
+  [ ! -e "$skin_marker" ] && [ ! -e "$TRANSACTION_STATE/rollback.json" ] \
+    || { printf 'Restore did not remove the activated pre-state renderer transaction.\n' >&2; return 1; }
+  /bin/kill -0 "$FOREIGN_JOB_PID" 2>/dev/null \
+    || { printf 'Restore signaled the unrelated foreign watcher fixture.\n' >&2; return 1; }
+  /bin/kill -TERM "$FOREIGN_JOB_PID" 2>/dev/null || true
+  wait "$FOREIGN_JOB_PID" 2>/dev/null || true
+  FOREIGN_JOB_PID=""
 }
 
 run_watcher_transaction() {
@@ -416,8 +555,10 @@ run_watcher_transaction() {
       }
     "$NODE" -e '
       const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-      if (value.port !== Number(process.argv[2]) || value.browserId !== "Browser-A") process.exit(1);
-    ' "$TRANSACTION_STATE/rollback.json" "$expected_port"
+      const required = ["injectorStartedAt", "nodePath", "injectorPath", "themeDir", "launcher", "jobLabel"];
+      if (value.port !== Number(process.argv[2]) || value.browserId !== "Browser-A" ||
+          value.injectorPid !== Number(process.argv[3]) || required.some((key) => !value[key])) process.exit(1);
+    ' "$TRANSACTION_STATE/rollback.json" "$expected_port" "$failed_pid"
     [ -e "$skin_marker" ] || {
       printf '%s removal failure falsely claimed renderer cleanup.\n' "$path" >&2
       exit 1
@@ -494,6 +635,69 @@ run_watcher_transaction() {
   [ "$($NODE -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).session)' "$TRANSACTION_STATE/state.json")" = "paused" ]
 }
 
+run_launchctl_stop_guard_case() {
+  local fault="$1"
+  local actual_theme="$2"
+  local pid_file="$TRANSACTION_FAKE_JOB_PID"
+  local expected_theme="$TRANSACTION_STATE/theme"
+  local output="$TRANSACTION_ROOT/launchctl-$fault.out"
+  /bin/rm -rf "$TRANSACTION_HOME"
+  /bin/mkdir -p "$expected_theme" "$TRANSACTION_HOME/.codex"
+  /bin/rm -f "$pid_file"
+  DREAM_SKIN_WATCHER_PID_FILE="$TRANSACTION_ROOT/guard-$fault.pid" \
+    "$NODE" "$TRANSACTION_ENGINE/scripts/fake-injector.mjs" --watch --port 19341 \
+    --browser-id Browser-A --theme-dir "$actual_theme" &
+  local pid="$!"
+  /usr/bin/printf '%s\n' "$pid" > "$pid_file"
+  local started_at
+  started_at="$(LC_ALL=C TZ=UTC /bin/ps -p "$pid" -o lstart= | /usr/bin/awk '{$1=$1; print}')"
+  set +e
+  /usr/bin/env HOME="$TRANSACTION_HOME" NODE="$NODE" NODE_RUNTIME_VALIDATED=true \
+    DREAM_SKIN_LAUNCHCTL_FAULT="$fault" /bin/bash -c '
+      . "$1/scripts/common-macos.sh"
+      stop_injector_process "$2" "$3" "$NODE" "$INJECTOR" 19341 Browser-A
+    ' _ "$TRANSACTION_ENGINE" "$pid" "$started_at" >"$output" 2>&1
+  local status="$?"
+  set -e
+  if [ "$status" -eq 0 ] || ! /bin/kill -0 "$pid" 2>/dev/null || [ ! -s "$pid_file" ]; then
+    printf 'launchctl %s did not fail closed with the watcher intact.\n' "$fault" >&2
+    /bin/kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    exit 1
+  fi
+  /bin/kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  /bin/rm -f "$pid_file" "$TRANSACTION_ROOT/guard-$fault.pid"
+}
+
+run_hot_foreign_job_guard() {
+  /bin/rm -rf "$TRANSACTION_HOME"
+  /bin/mkdir -p "$TRANSACTION_STATE/theme" "$TRANSACTION_HOME/.codex"
+  local skin_marker="$TRANSACTION_ROOT/hot-foreign.skin"
+  local cdp_marker="$TRANSACTION_ROOT/hot-foreign.cdp.log"
+  /bin/rm -f "$skin_marker" "$cdp_marker" "$TRANSACTION_FAKE_JOB_PID"
+  "$NODE" -e 'setInterval(() => {}, 30000)' &
+  local foreign_pid="$!"
+  /usr/bin/printf '%s\n' "$foreign_pid" > "$TRANSACTION_FAKE_JOB_PID"
+  set +e
+  /usr/bin/env HOME="$TRANSACTION_HOME" NODE="$NODE" NODE_RUNTIME_VALIDATED=true \
+    DREAM_SKIN_CDP_MARKER="$cdp_marker" DREAM_SKIN_SKIN_MARKER="$skin_marker" \
+    /bin/bash -c '. "$1/scripts/common-macos.sh"; hot_reapply_theme 19341 1000' \
+    _ "$TRANSACTION_ENGINE" >/dev/null 2>&1
+  local status="$?"
+  set -e
+  /bin/kill -TERM "$foreign_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+  /bin/rm -f "$TRANSACTION_FAKE_JOB_PID"
+  [ "$status" -ne 0 ] || { printf 'Hot reapply accepted a foreign launchctl label.\n' >&2; exit 1; }
+  if [ -e "$skin_marker" ] && [ ! -f "$TRANSACTION_STATE/rollback.json" ]; then
+    printf 'Hot reapply left an untracked renderer mutation after a foreign launchctl label blocked startup.\n' >&2
+    exit 1
+  fi
+}
+
+run_parent_kill_activation_case before-intent
+run_parent_kill_activation_case after-activation
 run_watcher_transaction full temp-write false direct true
 run_watcher_transaction full start-time true
 run_watcher_transaction full temp-write
@@ -502,6 +706,11 @@ run_watcher_transaction hot start-time
 run_watcher_transaction hot temp-write
 run_watcher_transaction hot rename
 run_watcher_transaction hot temp-write false launchctl
+run_hot_foreign_job_guard
+run_launchctl_stop_guard_case print-error "$TRANSACTION_STATE/theme"
+run_launchctl_stop_guard_case remove-fail "$TRANSACTION_STATE/theme"
+run_launchctl_stop_guard_case remove-retained "$TRANSACTION_STATE/theme"
+run_launchctl_stop_guard_case theme-dir-mismatch "$TRANSACTION_STATE/other-theme"
 
 "$NODE" - "$ROOT" <<'NODE'
 const fs = require("node:fs");

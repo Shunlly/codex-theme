@@ -608,6 +608,245 @@ final class SelectiveConfigRestoreTests: TestCase {
         XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: fixture.directory.path).contains { $0.hasSuffix(".tmp") })
     }
 
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testArchiveCommitConsumesExactStagedBackup() throws {
+        let directory = try makeTemporaryDirectory()
+        let staged = directory.appendingPathComponent("theme-backup.stage.json")
+        let destination = directory.appendingPathComponent("theme-backup.restored.json")
+        let original = Data("original recovery bytes\n".utf8)
+        try original.write(to: staged)
+
+        try SelectiveConfigRestore.archiveBackup(
+            stagedURL: staged,
+            destinationURL: destination,
+            expectedIdentity: try archiveIdentity(staged)
+        )
+
+        XCTAssertFalse(fileManager.fileExists(atPath: staged.path))
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: directory.path).contains { $0.hasSuffix(".tmp") })
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testArchiveRejectsStagedPathReplacementAfterHoldingOriginalIdentity() throws {
+        let directory = try makeTemporaryDirectory()
+        let staged = directory.appendingPathComponent("theme-backup.stage.json")
+        let displaced = directory.appendingPathComponent("theme-backup.displaced.json")
+        let destination = directory.appendingPathComponent("theme-backup.restored.json")
+        let original = Data("original recovery bytes\n".utf8)
+        let replacement = Data("replacement bytes\n".utf8)
+        try original.write(to: staged)
+        let expectedIdentity = try archiveIdentity(staged)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.archiveBackup(
+            stagedURL: staged,
+            destinationURL: destination,
+            expectedIdentity: expectedIdentity,
+            beforeCommit: {
+                try self.fileManager.moveItem(at: staged, to: displaced)
+                try replacement.write(to: staged)
+            }
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: displaced), original)
+        XCTAssertEqual(try Data(contentsOf: staged), replacement)
+        XCTAssertFalse(fileManager.fileExists(atPath: destination.path))
+        XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: directory.path).contains { $0.hasSuffix(".tmp") })
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testArchiveRejectsStagedPathReplacementAfterArchiveCommitBeforeCleanup() throws {
+        let directory = try makeTemporaryDirectory()
+        let staged = directory.appendingPathComponent("theme-backup.stage.json")
+        let displaced = directory.appendingPathComponent("theme-backup.displaced.json")
+        let destination = directory.appendingPathComponent("theme-backup.restored.json")
+        let original = Data("original recovery bytes\n".utf8)
+        let replacement = Data("replacement bytes\n".utf8)
+        try original.write(to: staged)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.archiveBackup(
+            stagedURL: staged,
+            destinationURL: destination,
+            expectedIdentity: try archiveIdentity(staged),
+            beforeCleanup: {
+                try self.fileManager.moveItem(at: staged, to: displaced)
+                try replacement.write(to: staged)
+            }
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        XCTAssertEqual(try Data(contentsOf: displaced), original)
+        XCTAssertEqual(try Data(contentsOf: staged), replacement)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testArchiveQuarantinePreservesReplacementAfterFinalPathCheck() throws {
+        let directory = try makeTemporaryDirectory()
+        let staged = directory.appendingPathComponent("theme-backup.stage.json")
+        let displaced = directory.appendingPathComponent("theme-backup.displaced.json")
+        let destination = directory.appendingPathComponent("theme-backup.restored.json")
+        let original = Data("original recovery bytes\n".utf8)
+        let replacement = Data("replacement bytes\n".utf8)
+        try original.write(to: staged)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.archiveBackup(
+            stagedURL: staged,
+            destinationURL: destination,
+            expectedIdentity: try archiveIdentity(staged),
+            beforeQuarantine: {
+                try self.fileManager.moveItem(at: staged, to: displaced)
+                try replacement.write(to: staged)
+            }
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        XCTAssertEqual(try Data(contentsOf: displaced), original)
+        XCTAssertEqual(try Data(contentsOf: staged), replacement)
+        XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: directory.path).contains {
+            $0.contains(".cleanup.")
+        })
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testArchiveRejectsDestinationDirectoryRaceWithoutMovingBackupInsideIt() throws {
+        let directory = try makeTemporaryDirectory()
+        let staged = directory.appendingPathComponent("theme-backup.stage.json")
+        let destination = directory.appendingPathComponent("theme-backup.restored.json", isDirectory: true)
+        let original = Data("original recovery bytes\n".utf8)
+        try original.write(to: staged)
+        let expectedIdentity = try archiveIdentity(staged)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.archiveBackup(
+            stagedURL: staged,
+            destinationURL: destination,
+            expectedIdentity: expectedIdentity,
+            beforeCommit: {
+                try self.fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+            }
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: staged), original)
+        XCTAssertTrue(fileManager.fileExists(atPath: destination.path))
+        XCTAssertTrue(try fileManager.contentsOfDirectory(atPath: destination.path).isEmpty)
+        XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: directory.path).contains { $0.hasSuffix(".tmp") })
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRetirementConsumesExactLiveBackupAfterVerifyingArchive() throws {
+        let directory = try makeTemporaryDirectory()
+        let live = directory.appendingPathComponent("theme-backup.json")
+        let archive = directory.appendingPathComponent("theme-backup.restored.json")
+        let original = Data("original recovery bytes\n".utf8)
+        try original.write(to: live)
+        try original.write(to: archive)
+
+        try SelectiveConfigRestore.retireBackup(
+            liveURL: live,
+            archiveURL: archive,
+            expectedIdentity: try archiveIdentity(live)
+        )
+
+        XCTAssertFalse(fileManager.fileExists(atPath: live.path))
+        XCTAssertEqual(try Data(contentsOf: archive), original)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRetirementPreservesReplacementAfterFinalLiveProof() throws {
+        let directory = try makeTemporaryDirectory()
+        let live = directory.appendingPathComponent("theme-backup.json")
+        let displaced = directory.appendingPathComponent("theme-backup.displaced.json")
+        let archive = directory.appendingPathComponent("theme-backup.restored.json")
+        let original = Data("original recovery bytes\n".utf8)
+        let replacement = Data("replacement bytes\n".utf8)
+        try original.write(to: live)
+        try original.write(to: archive)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.retireBackup(
+            liveURL: live,
+            archiveURL: archive,
+            expectedIdentity: try archiveIdentity(live),
+            beforeQuarantine: {
+                try self.fileManager.moveItem(at: live, to: displaced)
+                try replacement.write(to: live)
+            }
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: archive), original)
+        XCTAssertEqual(try Data(contentsOf: displaced), original)
+        XCTAssertEqual(try Data(contentsOf: live), replacement)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRetirementRetainsQuarantineOnNoReplaceRecoveryConflict() throws {
+        let directory = try makeTemporaryDirectory()
+        let live = directory.appendingPathComponent("theme-backup.json")
+        let archive = directory.appendingPathComponent("theme-backup.restored.json")
+        let original = Data("original recovery bytes\n".utf8)
+        let conflict = Data("unexpected live bytes\n".utf8)
+        try original.write(to: live)
+        try original.write(to: archive)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.retireBackup(
+            liveURL: live,
+            archiveURL: archive,
+            expectedIdentity: try archiveIdentity(live),
+            afterQuarantine: {
+                try conflict.write(to: live)
+            }
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: archive), original)
+        XCTAssertEqual(try Data(contentsOf: live), conflict)
+        let quarantine = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent.contains(".cleanup.") }
+        XCTAssertTrue(quarantine != nil)
+        if let quarantine { XCTAssertEqual(try Data(contentsOf: quarantine), original) }
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    func testRetirementRestoresLiveWhenArchiveChangesBeforeConsumption() throws {
+        let directory = try makeTemporaryDirectory()
+        let live = directory.appendingPathComponent("theme-backup.json")
+        let archive = directory.appendingPathComponent("theme-backup.restored.json")
+        let displacedArchive = directory.appendingPathComponent("theme-backup.restored.displaced.json")
+        let original = Data("original recovery bytes\n".utf8)
+        let replacement = Data("replacement archive bytes\n".utf8)
+        try original.write(to: live)
+        try original.write(to: archive)
+
+        XCTAssertThrowsError(try SelectiveConfigRestore.retireBackup(
+            liveURL: live,
+            archiveURL: archive,
+            expectedIdentity: try archiveIdentity(live),
+            afterQuarantine: {
+                try self.fileManager.moveItem(at: archive, to: displacedArchive)
+                try replacement.write(to: archive)
+            }
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: live), original)
+        XCTAssertEqual(try Data(contentsOf: displacedArchive), original)
+        XCTAssertEqual(try Data(contentsOf: archive), replacement)
+    }
+
     private var defaultValues: [String: Any] {
         [
             "appearanceTheme": NSNull(),
@@ -701,6 +940,11 @@ final class SelectiveConfigRestoreTests: TestCase {
     private func fileIdentity(_ url: URL) throws -> String {
         let attributes = try fileManager.attributesOfItem(atPath: url.path)
         return "\(attributes[.systemNumber]!)\(attributes[.systemFileNumber]!)"
+    }
+
+    private func archiveIdentity(_ url: URL) throws -> String {
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        return "\(attributes[.systemNumber]!):\(attributes[.systemFileNumber]!)"
     }
 
     private func posixPermissions(_ url: URL) throws -> Int {

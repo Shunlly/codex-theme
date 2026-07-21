@@ -35,7 +35,8 @@ public enum SelectiveConfigRestore {
         do {
             backupBytes = try readStableRegularFile(
                 at: backupURL,
-                invalidMessage: "Theme backup must be a regular file, not a symbolic link."
+                invalidMessage: "Theme backup must be a regular file, not a symbolic link.",
+                expectedIdentity: ProcessInfo.processInfo.environment["DREAM_SKIN_BACKUP_IDENTITY"]
             )
         } catch where isNoSuchFile(error) {
             throw RestoreError("No selective pre-install theme backup is available.")
@@ -103,6 +104,123 @@ public enum SelectiveConfigRestore {
             expectedBytes: originalBytes,
             expectedStat: originalStat
         )
+    }
+
+    public static func archiveBackup(
+        stagedURL: URL,
+        destinationURL: URL,
+        expectedIdentity: String,
+        beforeCommit: () throws -> Void = {},
+        beforeCleanup: () throws -> Void = {},
+        beforeQuarantine: () throws -> Void = {}
+    ) throws {
+        let stagedFile = try openStableRegularFile(
+            at: stagedURL,
+            invalidMessage: "Staged theme backup identity changed before archive commit.",
+            expectedIdentity: expectedIdentity
+        )
+        defer { Darwin.close(stagedFile.descriptor) }
+        let bytes = stagedFile.data
+        try beforeCommit()
+
+        let staged = try regularFileStat(
+            at: stagedURL,
+            invalidMessage: "Staged theme backup identity changed before archive commit."
+        )
+        guard "\(staged.st_dev):\(staged.st_ino)" == expectedIdentity else {
+            throw RestoreError("Staged theme backup identity changed before archive commit.")
+        }
+
+        var destination = stat()
+        if Darwin.lstat(destinationURL.path, &destination) == 0 {
+            guard destination.st_mode & S_IFMT == S_IFREG else {
+                throw RestoreError("The restored-backup archive path is unsafe; recovery data was preserved.")
+            }
+        } else if errno != ENOENT {
+            throw posixError("Could not inspect \(destinationURL.path)")
+        }
+
+        try atomicWrite(bytes, to: destinationURL, mode: 0o600)
+        let archived = try readStableRegularFile(
+            at: destinationURL,
+            invalidMessage: "The restored theme backup archive could not be verified."
+        )
+        guard archived == bytes else {
+            throw RestoreError("The restored theme backup archive could not be verified.")
+        }
+        try beforeCleanup()
+        try consumeHeldBackup(
+            stagedFile,
+            at: stagedURL,
+            beforeQuarantine: beforeQuarantine
+        )
+    }
+
+    public static func retireBackup(
+        liveURL: URL,
+        archiveURL: URL,
+        expectedIdentity: String,
+        beforeQuarantine: () throws -> Void = {},
+        afterQuarantine: () throws -> Void = {}
+    ) throws {
+        let liveFile = try openStableRegularFile(
+            at: liveURL,
+            invalidMessage: "Live theme backup identity changed before retirement.",
+            expectedIdentity: expectedIdentity
+        )
+        defer { Darwin.close(liveFile.descriptor) }
+        let archivedFile = try openStableRegularFile(
+            at: archiveURL,
+            invalidMessage: "The restored theme backup archive could not be verified."
+        )
+        defer { Darwin.close(archivedFile.descriptor) }
+        guard archivedFile.data == liveFile.data else {
+            throw RestoreError("The restored theme backup archive does not match the live recovery backup.")
+        }
+        try assertHeldFile(archivedFile, remainsAt: archiveURL, expectedBytes: archivedFile.data)
+        try consumeHeldBackup(
+            liveFile,
+            at: liveURL,
+            beforeQuarantine: beforeQuarantine,
+            afterQuarantine: afterQuarantine,
+            beforeConsumption: {
+                try assertHeldFile(archivedFile, remainsAt: archiveURL, expectedBytes: archivedFile.data)
+            }
+        )
+    }
+
+    private static func consumeHeldBackup(
+        _ file: OpenRegularFile,
+        at liveURL: URL,
+        beforeQuarantine: () throws -> Void = {},
+        afterQuarantine: () throws -> Void = {},
+        beforeConsumption: () throws -> Void = {}
+    ) throws {
+        try assertHeldFile(file, remainsAt: liveURL, expectedBytes: file.data)
+        try beforeQuarantine()
+        let quarantineURL = URL(fileURLWithPath: "\(liveURL.path).cleanup.\(UUID().uuidString)")
+        guard Darwin.renamex_np(liveURL.path, quarantineURL.path, UInt32(RENAME_EXCL)) == 0 else {
+            throw posixError("Could not quarantine committed theme backup")
+        }
+        do {
+            try afterQuarantine()
+            try assertHeldFile(file, remainsAt: quarantineURL, expectedBytes: file.data)
+            var replacement = stat()
+            guard Darwin.lstat(liveURL.path, &replacement) != 0, errno == ENOENT else {
+                throw RestoreError("An unexpected theme backup appeared during committed cleanup.")
+            }
+            try beforeConsumption()
+            guard Darwin.unlink(quarantineURL.path) == 0 else {
+                throw posixError("Could not remove quarantined theme backup")
+            }
+            var unlinked = stat()
+            guard Darwin.fstat(file.descriptor, &unlinked) == 0, unlinked.st_nlink == 0 else {
+                throw RestoreError("The committed theme backup was not removed by exact identity.")
+            }
+        } catch {
+            _ = Darwin.renamex_np(quarantineURL.path, liveURL.path, UInt32(RENAME_EXCL))
+            throw error
+        }
     }
 
     private static func decodeStrictUTF8(_ data: Data, label: String) throws -> String {
@@ -404,44 +522,105 @@ public enum SelectiveConfigRestore {
         return value
     }
 
-    private static func readStableRegularFile(at url: URL, invalidMessage: String) throws -> Data {
-        let before = try regularFileStat(at: url, invalidMessage: invalidMessage)
-        let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
-        guard descriptor >= 0 else { throw posixError("Could not open \(url.path) safely") }
-        defer { Darwin.close(descriptor) }
+    private struct OpenRegularFile {
+        let descriptor: Int32
+        let opened: stat
+        let data: Data
+    }
 
-        var opened = stat()
-        guard Darwin.fstat(descriptor, &opened) == 0,
-              opened.st_mode & S_IFMT == S_IFREG,
-              opened.st_dev == before.st_dev,
-              opened.st_ino == before.st_ino else {
-            throw RestoreError(invalidMessage)
+    private static func assertHeldFile(
+        _ file: OpenRegularFile,
+        remainsAt url: URL,
+        expectedBytes: Data
+    ) throws {
+        var held = stat()
+        var linked = stat()
+        let bytes = try read(descriptor: file.descriptor, path: url.path)
+        guard Darwin.fstat(file.descriptor, &held) == 0,
+              Darwin.lstat(url.path, &linked) == 0,
+              linked.st_mode & S_IFMT == S_IFREG,
+              held.st_dev == linked.st_dev,
+              held.st_ino == linked.st_ino,
+              file.opened.st_dev == held.st_dev,
+              file.opened.st_ino == held.st_ino,
+              file.opened.st_size == held.st_size,
+              file.opened.st_mtimespec.tv_sec == held.st_mtimespec.tv_sec,
+              file.opened.st_mtimespec.tv_nsec == held.st_mtimespec.tv_nsec,
+              held.st_nlink == 1,
+              bytes == expectedBytes else {
+            throw RestoreError("Staged theme backup identity changed before committed cleanup.")
         }
+    }
+
+    private static func read(descriptor: Int32, path: String) throws -> Data {
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 16_384)
         while true {
-            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            let count = Darwin.pread(descriptor, &buffer, buffer.count, off_t(data.count))
             if count < 0 && errno == EINTR { continue }
-            guard count >= 0 else { throw posixError("Could not read \(url.path)") }
-            if count == 0 { break }
+            guard count >= 0 else { throw posixError("Could not read \(path)") }
+            if count == 0 { return data }
             data.append(buffer, count: count)
         }
+    }
 
-        var after = stat()
-        var linkedAfter = stat()
-        guard Darwin.fstat(descriptor, &after) == 0,
-              Darwin.lstat(url.path, &linkedAfter) == 0,
-              linkedAfter.st_mode & S_IFMT == S_IFREG,
-              opened.st_dev == after.st_dev,
-              opened.st_ino == after.st_ino,
-              opened.st_size == after.st_size,
-              opened.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-              opened.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-              opened.st_dev == linkedAfter.st_dev,
-              opened.st_ino == linkedAfter.st_ino else {
-            throw RestoreError("Theme backup identity changed while it was being read; nothing was changed.")
+    private static func openStableRegularFile(
+        at url: URL,
+        invalidMessage: String,
+        expectedIdentity: String? = nil
+    ) throws -> OpenRegularFile {
+        let before = try regularFileStat(at: url, invalidMessage: invalidMessage)
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw posixError("Could not open \(url.path) safely") }
+        do {
+            var opened = stat()
+            guard Darwin.fstat(descriptor, &opened) == 0,
+                  opened.st_mode & S_IFMT == S_IFREG,
+                  opened.st_dev == before.st_dev,
+                  opened.st_ino == before.st_ino else {
+                throw RestoreError(invalidMessage)
+            }
+            if let expectedIdentity {
+                let openedIdentity = "\(opened.st_dev):\(opened.st_ino)"
+                guard openedIdentity == expectedIdentity else {
+                    throw RestoreError("Theme backup identity changed before it was read; nothing was changed.")
+                }
+            }
+            let data = try read(descriptor: descriptor, path: url.path)
+
+            var after = stat()
+            var linkedAfter = stat()
+            guard Darwin.fstat(descriptor, &after) == 0,
+                  Darwin.lstat(url.path, &linkedAfter) == 0,
+                  linkedAfter.st_mode & S_IFMT == S_IFREG,
+                  opened.st_dev == after.st_dev,
+                  opened.st_ino == after.st_ino,
+                  opened.st_size == after.st_size,
+                  opened.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+                  opened.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+                  opened.st_dev == linkedAfter.st_dev,
+                  opened.st_ino == linkedAfter.st_ino else {
+                throw RestoreError("Theme backup identity changed while it was being read; nothing was changed.")
+            }
+            return OpenRegularFile(descriptor: descriptor, opened: after, data: data)
+        } catch {
+            Darwin.close(descriptor)
+            throw error
         }
-        return data
+    }
+
+    private static func readStableRegularFile(
+        at url: URL,
+        invalidMessage: String,
+        expectedIdentity: String? = nil
+    ) throws -> Data {
+        let file = try openStableRegularFile(
+            at: url,
+            invalidMessage: invalidMessage,
+            expectedIdentity: expectedIdentity
+        )
+        defer { Darwin.close(file.descriptor) }
+        return file.data
     }
 
     private static func assertConfigUnchanged(
@@ -467,8 +646,8 @@ public enum SelectiveConfigRestore {
         _ data: Data,
         to url: URL,
         mode: mode_t,
-        expectedBytes: Data,
-        expectedStat: stat
+        expectedBytes: Data? = nil,
+        expectedStat: stat? = nil
     ) throws {
         let temporary = URL(fileURLWithPath: "\(url.path).\(getpid()).\(UUID().uuidString).tmp")
         var descriptor: Int32 = -1
@@ -499,7 +678,9 @@ public enum SelectiveConfigRestore {
         }
         descriptor = -1
 
-        try assertConfigUnchanged(at: url, expectedBytes: expectedBytes, expectedStat: expectedStat)
+        if let expectedBytes, let expectedStat {
+            try assertConfigUnchanged(at: url, expectedBytes: expectedBytes, expectedStat: expectedStat)
+        }
         guard Darwin.rename(temporary.path, url.path) == 0 else {
             throw posixError("Could not atomically replace Codex config")
         }

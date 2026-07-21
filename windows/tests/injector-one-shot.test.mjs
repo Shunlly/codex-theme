@@ -14,10 +14,13 @@ let browserId = "Browser-A";
 let targets = [];
 let closeAnchorOnList = false;
 let closeAnchorDuringPageOpen = false;
+let closeAnchorAfterProbe = false;
+let anchorClosedAfterProbe = false;
 const requests = [];
 const browserSockets = new Set();
 const pageSockets = new Set();
 const rendererCommands = [];
+const postAnchorCommands = [];
 const activeChildren = new Set();
 
 function websocketFrame(payload) {
@@ -55,6 +58,7 @@ function attachCdpSocket(socket, head) {
       if (opcode === 0x8) { socket.destroy(); return; }
       const message = JSON.parse(body.toString("utf8"));
       rendererCommands.push(message.method);
+      if (anchorClosedAfterProbe) postAnchorCommands.push(message.method);
       let result = {};
       if (message.method === "Page.addScriptToEvaluateOnNewDocument") {
         result = { identifier: "replacement-script" };
@@ -72,7 +76,17 @@ function attachCdpSocket(socket, head) {
         }
         result = { result: { value } };
       }
-      socket.write(websocketFrame(JSON.stringify({ id: message.id, result })));
+      const response = websocketFrame(JSON.stringify({ id: message.id, result }));
+      const isProbe = message.method === "Runtime.evaluate" &&
+        String(message.params?.expression ?? "").includes("const markers");
+      if (closeAnchorAfterProbe && isProbe) {
+        closeAnchorAfterProbe = false;
+        anchorClosedAfterProbe = true;
+        for (const browserSocket of browserSockets) browserSocket.destroy();
+        setTimeout(() => socket.write(response), 75);
+      } else {
+        socket.write(response);
+      }
     }
   };
   socket.on("data", consume);
@@ -203,11 +217,13 @@ try {
   ];
   for (const [label, modeArgs] of oneShotCases) {
     rendererCommands.length = 0;
-    closeAnchorOnList = true;
+    postAnchorCommands.length = 0;
+    anchorClosedAfterProbe = false;
+    closeAnchorAfterProbe = true;
     result = await run([
       ...modeArgs, "--port", String(port), "--browser-id", "Browser-A", "--timeout-ms", "750",
     ]);
-    assert.deepEqual(rendererCommands, [], `${label} sent renderer commands after the original Browser anchor closed`);
+    assert.deepEqual(postAnchorCommands, [], `${label} sent its command sequence after the original Browser anchor closed`);
     assert.notEqual(result.code, 0, `${label} accepted a replacement browser`);
   }
 

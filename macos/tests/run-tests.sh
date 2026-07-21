@@ -428,21 +428,23 @@ EXPECTED_TEAM_ID="TEAM'ID"
 # injector when its command identity does not match the recorded watcher.
 STOP_HOME="$TMP/stop-home"
 STOP_STATE_ROOT="$STOP_HOME/Library/Application Support/CodexDreamSkinStudio"
-/bin/mkdir -p "$STOP_STATE_ROOT"
+/bin/mkdir -p "$STOP_STATE_ROOT/theme"
 "$NODE" -e 'process.on("SIGTERM", () => process.exit(0)); setTimeout(() => {}, 30000);' &
 DUMMY_PID="$!"
 "$NODE" -e '
   const fs = require("node:fs");
-  const [file, pid, node, injector] = process.argv.slice(1);
+  const [file, pid, node, injector, themeDir] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
+    injectorProtocol: 3,
     port: 9341,
     injectorPid: Number(pid),
     injectorStartedAt: "not-the-real-start-time",
     nodePath: node,
     injectorPath: injector,
     browserId: "Browser-A",
+    themeDir,
   })}\n`);
-' "$STOP_STATE_ROOT/state.json" "$DUMMY_PID" "$NODE" "$ROOT/scripts/injector.mjs"
+' "$STOP_STATE_ROOT/state.json" "$DUMMY_PID" "$NODE" "$ROOT/scripts/injector.mjs" "$STOP_STATE_ROOT/theme"
 /usr/bin/env HOME="$STOP_HOME" NODE="$NODE" /bin/bash -c '
   . "$1/scripts/common-macos.sh"
   INJECTOR_JOB_LABEL="$3"
@@ -468,16 +470,18 @@ DUMMY_PID="$!"
 # ending the fixture so the dead-PID cleanup path remains testable.
 "$NODE" -e '
   const fs = require("node:fs");
-  const [file, pid, node, injector] = process.argv.slice(1);
+  const [file, pid, node, injector, themeDir] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
+    injectorProtocol: 3,
     port: 9341,
     injectorPid: Number(pid),
     injectorStartedAt: "not-the-real-start-time",
     nodePath: node,
     injectorPath: injector,
     browserId: "Browser-A",
+    themeDir,
   })}\n`);
-' "$STOP_STATE_ROOT/state.json" "$DUMMY_PID" "$NODE" "$ROOT/scripts/injector.mjs"
+' "$STOP_STATE_ROOT/state.json" "$DUMMY_PID" "$NODE" "$ROOT/scripts/injector.mjs" "$STOP_STATE_ROOT/theme"
 /bin/kill -TERM "$DUMMY_PID" 2>/dev/null || true
 wait "$DUMMY_PID" 2>/dev/null || true
 DUMMY_PID=""
@@ -494,7 +498,7 @@ DUMMY_PID=""
 # kill -0 succeeds.  A watcher state needs matching command/path/start data.
 STATUS_HOME="$TMP/status-home"
 STATUS_STATE_ROOT="$STATUS_HOME/Library/Application Support/CodexDreamSkinStudio"
-/bin/mkdir -p "$STATUS_STATE_ROOT"
+/bin/mkdir -p "$STATUS_STATE_ROOT/theme"
 "$NODE" -e 'process.on("SIGTERM", () => process.exit(0)); setTimeout(() => {}, 30000);' &
 STATUS_PID="$!"
 "$NODE" -e '
@@ -502,6 +506,7 @@ STATUS_PID="$!"
   const [file, pid] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
     schemaVersion: 5,
+    injectorProtocol: 3,
     session: "active",
     port: 9341,
     injectorPid: Number(pid),
@@ -509,8 +514,9 @@ STATUS_PID="$!"
     injectorPath: "/tmp/not-the-dream-skin-injector.mjs",
     nodePath: "/tmp/not-the-codex-node",
     browserId: "Browser-A",
+    themeDir: process.argv[3],
   })}\n`);
-' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID"
+' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$STATUS_STATE_ROOT/theme"
 STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
@@ -525,15 +531,16 @@ STATUS_PID=""
 # token boundary distinguishes this case.
 STATUS_FAKE_INJECTOR="$TMP/status-fake-injector.mjs"
 /usr/bin/printf 'setTimeout(() => {}, 30000);\n' > "$STATUS_FAKE_INJECTOR"
-"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 93410 --browser-id Browser-A --theme-dir "$TMP" &
+"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 93410 --browser-id Browser-A --theme-dir "$STATUS_STATE_ROOT/theme" &
 STATUS_PID="$!"
 /bin/sleep 0.08
 STATUS_START="$(/bin/ps -p "$STATUS_PID" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
 "$NODE" -e '
   const fs = require("node:fs");
-  const [file, pid, node, injector, startedAt] = process.argv.slice(1);
+  const [file, pid, node, injector, startedAt, themeDir] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
     schemaVersion: 5,
+    injectorProtocol: 3,
     session: "active",
     port: 9341,
     injectorPid: Number(pid),
@@ -541,8 +548,9 @@ STATUS_START="$(/bin/ps -p "$STATUS_PID" -o lstart= 2>/dev/null | /usr/bin/awk '
     injectorPath: injector,
     nodePath: node,
     browserId: "Browser-A",
+    themeDir,
   })}\n`);
-' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$NODE" "$STATUS_FAKE_INJECTOR" "$STATUS_START"
+' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$NODE" "$STATUS_FAKE_INJECTOR" "$STATUS_START" "$STATUS_STATE_ROOT/theme"
 STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
@@ -552,10 +560,58 @@ STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin
 wait "$STATUS_PID" 2>/dev/null || true
 STATUS_PID=""
 
+# Protocol 4 binds status to the activation-gate argv token. A same-process
+# state replacement naming another safe gate must become stale without signal.
+STATUS_ACTIVATION_GATE="$STATUS_STATE_ROOT/.watcher-activation.G4t3D1"
+"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 9341 --browser-id Browser-A \
+  --theme-dir "$STATUS_STATE_ROOT/theme" --activation-gate "$STATUS_ACTIVATION_GATE" &
+STATUS_PID="$!"
+/bin/sleep 0.08
+STATUS_START="$(LC_ALL=C TZ=UTC /bin/ps -p "$STATUS_PID" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')"
+"$NODE" -e '
+  const fs = require("node:fs");
+  const [file, pid, node, injector, startedAt, themeDir, activationGate] = process.argv.slice(1);
+  fs.writeFileSync(file, `${JSON.stringify({
+    schemaVersion: 5,
+    injectorProtocol: 4,
+    session: "active",
+    port: 9341,
+    injectorPid: Number(pid),
+    injectorStartedAt: startedAt,
+    injectorPath: injector,
+    nodePath: node,
+    browserId: "Browser-A",
+    themeDir,
+    activationGate,
+  })}\n`);
+' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$NODE" "$STATUS_FAKE_INJECTOR" \
+  "$STATUS_START" "$STATUS_STATE_ROOT/theme" "$STATUS_ACTIVATION_GATE"
+STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.session !== "active" || value.injectorAlive !== true) process.exit(1);
+' "$STATUS_JSON"
+"$NODE" -e '
+  const fs = require("node:fs");
+  const file = process.argv[1];
+  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  value.activationGate = process.argv[2];
+  fs.writeFileSync(file, `${JSON.stringify(value)}\n`);
+' "$STATUS_STATE_ROOT/state.json" "$STATUS_STATE_ROOT/.watcher-activation.R3pl4C"
+STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.session !== "stale" || value.injectorAlive !== false) process.exit(1);
+' "$STATUS_JSON"
+/bin/kill -0 "$STATUS_PID"
+/bin/kill -TERM "$STATUS_PID" 2>/dev/null || true
+wait "$STATUS_PID" 2>/dev/null || true
+STATUS_PID=""
+
 # The common stop path must reject a real watcher running on 19341 when the
 # saved state claims 1934, even though nodePath/injectorPath/start-time all
 # match. This exercises the signal gate directly (status has its own matcher).
-"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 19341 --browser-id Browser-A --theme-dir "$ROOT/presets/preset-midnight-aurora" \
+"$NODE" "$STATUS_FAKE_INJECTOR" --watch --port 19341 --browser-id Browser-A --theme-dir "$STOP_STATE_ROOT/theme" \
   >"$TMP/near-prefix-injector.out" 2>&1 &
 WATCH_PID="$!"
 /bin/sleep 0.2
@@ -563,9 +619,10 @@ WATCH_START="$(/bin/ps -p "$WATCH_PID" -o lstart= 2>/dev/null | /usr/bin/awk '{$
 [ -n "$WATCH_START" ] || { printf 'Could not record near-prefix watcher start time.\n' >&2; exit 1; }
 "$NODE" -e '
   const fs = require("node:fs");
-  const [file, pid, node, injector, startedAt] = process.argv.slice(1);
+  const [file, pid, node, injector, startedAt, themeDir] = process.argv.slice(1);
   fs.writeFileSync(file, `${JSON.stringify({
     schemaVersion: 5,
+    injectorProtocol: 3,
     session: "active",
     port: 1934,
     injectorPid: Number(pid),
@@ -573,8 +630,9 @@ WATCH_START="$(/bin/ps -p "$WATCH_PID" -o lstart= 2>/dev/null | /usr/bin/awk '{$
     injectorPath: injector,
     nodePath: node,
     browserId: "Browser-A",
+    themeDir,
   })}\n`);
-' "$STOP_STATE_ROOT/state.json" "$WATCH_PID" "$NODE" "$STATUS_FAKE_INJECTOR" "$WATCH_START"
+' "$STOP_STATE_ROOT/state.json" "$WATCH_PID" "$NODE" "$STATUS_FAKE_INJECTOR" "$WATCH_START" "$STOP_STATE_ROOT/theme"
 if /usr/bin/env HOME="$STOP_HOME" NODE="$NODE" /bin/bash -c '
   . "$1/scripts/common-macos.sh"
   INJECTOR_JOB_LABEL="$2"

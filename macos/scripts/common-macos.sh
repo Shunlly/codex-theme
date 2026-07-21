@@ -480,25 +480,169 @@ restored_theme_backup_is_valid() {
   theme_backup_is_valid "$RESTORED_THEME_BACKUP_PATH"
 }
 
+watcher_activation_gate_path_is_safe() {
+  local gate="$1"
+  local name=""
+  [ -n "$gate" ] && [ "${gate%/*}" = "$STATE_ROOT" ] || return 1
+  name="${gate##*/}"
+  case "$name" in
+    .watcher-activation.??????) ;;
+    *) return 1 ;;
+  esac
+  case "${name#.watcher-activation.}" in *[!A-Za-z0-9]*) return 1 ;; esac
+}
+
+prepare_watcher_activation_gate() {
+  local gate=""
+  ensure_state_root || return 1
+  gate="$(/usr/bin/mktemp "$STATE_ROOT/.watcher-activation.XXXXXX")" || return 1
+  /bin/chmod 600 "$gate" || return 1
+  watcher_activation_gate_path_is_safe "$gate" || return 1
+  /bin/rm -f "$gate" || return 1
+  [ ! -e "$gate" ] && [ ! -L "$gate" ] || return 1
+  [ ! -e "$gate.activated" ] && [ ! -L "$gate.activated" ] || return 1
+  WATCHER_ACTIVATION_GATE="$gate"
+}
+
+publish_watcher_activation() {
+  local gate="$1"
+  local pid="$2"
+  watcher_activation_gate_path_is_safe "$gate" || return 1
+  case "$pid" in ''|*[!0-9]*|0|1|??????????*) return 1 ;; esac
+  "$NODE" -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const [gate, pid] = process.argv.slice(1);
+    const temporary = `${gate}.${process.pid}.tmp`;
+    if (fs.existsSync(gate) || fs.existsSync(`${gate}.activated`)) process.exit(1);
+    let descriptor;
+    let directory;
+    try {
+      descriptor = fs.openSync(temporary, "wx", 0o600);
+      fs.writeFileSync(descriptor, `${JSON.stringify({ pid: Number(pid) })}\n`);
+      fs.fsyncSync(descriptor);
+      fs.closeSync(descriptor);
+      descriptor = undefined;
+      fs.renameSync(temporary, gate);
+      directory = fs.openSync(path.dirname(gate), "r");
+      fs.fsyncSync(directory);
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+      if (directory !== undefined) fs.closeSync(directory);
+      fs.rmSync(temporary, { force: true });
+    }
+  ' "$gate" "$pid"
+}
+
+watcher_activation_ack_is_valid() {
+  local gate="$1"
+  local pid="$2"
+  local ack="$gate.activated"
+  watcher_activation_gate_path_is_safe "$gate" || return 1
+  [ -f "$ack" ] && [ ! -L "$ack" ] \
+    && [ "$(/usr/bin/stat -f '%u' "$ack" 2>/dev/null)" = "$(/usr/bin/id -u)" ] \
+    && [ "$((8#$(/usr/bin/stat -f '%Lp' "$ack" 2>/dev/null) & 8#077))" -eq 0 ] \
+    && [ "$(/usr/bin/plutil -extract pid raw -o - "$ack" 2>/dev/null)" = "$pid" ]
+}
+
+cleanup_watcher_activation_gate() {
+  local gate="${1:-}"
+  local pid="${2:-}"
+  local path=""
+  [ -n "$gate" ] || return 0
+  watcher_activation_gate_path_is_safe "$gate" || return 1
+  for path in "$gate" "$gate.activated"; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      && [ "$(/usr/bin/stat -f '%u' "$path" 2>/dev/null)" = "$(/usr/bin/id -u)" ] \
+      && [ "$((8#$(/usr/bin/stat -f '%Lp' "$path" 2>/dev/null) & 8#077))" -eq 0 ] \
+      && [ "$(/usr/bin/plutil -extract pid raw -o - "$path" 2>/dev/null)" = "$pid" ] \
+      || return 1
+    /bin/rm -f "$path" || return 1
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  done
+}
+
 renderer_rollback_evidence_is_valid() {
+  local schema=""
   local port=""
   local browser_id=""
+  local injector_pid=""
+  local injector_started_at=""
+  local node_path=""
+  local injector_path=""
+  local launcher=""
+  local activation_gate=""
   [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
     && [ -f "$ROLLBACK_STATE_PATH" ] && [ ! -L "$ROLLBACK_STATE_PATH" ] \
     || return 1
-  [ "$(/usr/bin/plutil -extract schemaVersion raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" = "1" ] \
-    && [ "$(/usr/bin/plutil -extract themeDir raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" = "$THEME_DIR" ] \
+  schema="$(/usr/bin/plutil -extract schemaVersion raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
+    || return 1
+  case "$schema" in 2|3) ;; *) return 1 ;; esac
+  [ "$(/usr/bin/plutil -extract themeDir raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" = "$THEME_DIR" ] \
+    && [ "$(/usr/bin/plutil -extract jobLabel raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" = "$INJECTOR_JOB_LABEL" ] \
     || return 1
   port="$(/usr/bin/plutil -extract port raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" || return 1
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
   [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || return 1
   browser_id="$(/usr/bin/plutil -extract browserId raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
     || return 1
-  browser_id_is_valid "$browser_id"
+  browser_id_is_valid "$browser_id" || return 1
+  injector_pid="$(/usr/bin/plutil -extract injectorPid raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
+    || return 1
+  case "$injector_pid" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+  injector_started_at="$(/usr/bin/plutil -extract injectorStartedAt raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
+    || return 1
+  node_path="$(/usr/bin/plutil -extract nodePath raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
+    || return 1
+  injector_path="$(/usr/bin/plutil -extract injectorPath raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
+    || return 1
+  launcher="$(/usr/bin/plutil -extract launcher raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
+    || return 1
+  case "$node_path:$injector_path" in /*:/*) ;; *) return 1 ;; esac
+  if [ "$injector_pid" = "0" ]; then
+    [ "$schema" = "2" ] && [ -z "$injector_started_at" ] && [ "$launcher" = "renderer" ]
+  else
+    [ "$injector_pid" != "1" ] && [ -n "$injector_started_at" ] \
+      && { [ "$launcher" = "direct" ] || [ "$launcher" = "launchctl" ]; } \
+      || return 1
+    [ "$schema" = "2" ] && return 0
+    activation_gate="$(/usr/bin/plutil -extract activationGate raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
+      || return 1
+    watcher_activation_gate_path_is_safe "$activation_gate"
+  fi
 }
 
 renderer_rollback_field() {
   /usr/bin/plutil -extract "$1" raw -o - "$ROLLBACK_STATE_PATH"
+}
+
+stop_renderer_rollback_watcher() {
+  local schema=""
+  local pid=""
+  local started_at=""
+  local node=""
+  local injector=""
+  local port=""
+  local browser_id=""
+  local theme_dir=""
+  local activation_gate=""
+  renderer_rollback_evidence_is_valid || return 1
+  schema="$(renderer_rollback_field schemaVersion)" || return 1
+  pid="$(renderer_rollback_field injectorPid)" || return 1
+  [ "$pid" != "0" ] || return 0
+  started_at="$(renderer_rollback_field injectorStartedAt)" || return 1
+  node="$(renderer_rollback_field nodePath)" || return 1
+  injector="$(renderer_rollback_field injectorPath)" || return 1
+  port="$(renderer_rollback_field port)" || return 1
+  browser_id="$(renderer_rollback_field browserId)" || return 1
+  theme_dir="$(renderer_rollback_field themeDir)" || return 1
+  if [ "$schema" = "3" ]; then
+    activation_gate="$(renderer_rollback_field activationGate)" || return 1
+  fi
+  stop_injector_process \
+    "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+    "$activation_gate"
 }
 
 codex_main_pids() {
@@ -761,18 +905,15 @@ recorded_injector_process_matches() {
   local expected_injector="${4:-}"
   local expected_port="${5:-}"
   local expected_browser_id="${6:-}"
-  local command_line=""
-  local command_lower=""
-  local node_lower=""
-  local injector_lower=""
-  local actual_start=""
-
+  local expected_theme_dir="${7:-$THEME_DIR}"
+  local expected_activation_gate="${8:-}"
   # A recorded PID is only safe to signal when the complete launch identity
   # was persisted.  Do not fall back to the current process paths: a stale or
   # hand-edited state file must fail closed instead of authorizing a reused PID.
   [ -n "$expected_start" ] || return 1
   launched_injector_process_matches \
     "$pid" "$expected_node" "$expected_injector" "$expected_port" "$expected_browser_id" \
+    "$expected_theme_dir" "$expected_activation_gate" \
     || return 1
   process_start_identity_matches "$pid" "$expected_start" || return 1
   return 0
@@ -784,16 +925,21 @@ launched_injector_process_matches() {
   local expected_injector="${3:-}"
   local expected_port="${4:-}"
   local expected_browser_id="${5:-}"
+  local expected_theme_dir="${6:-$THEME_DIR}"
+  local expected_activation_gate="${7:-}"
   local command_line=""
   local command_lower=""
   local node_lower=""
   local injector_lower=""
 
-  [ -n "$expected_node" ] && [ -n "$expected_injector" ] || return 1
+  [ -n "$expected_node" ] && [ -n "$expected_injector" ] \
+    && [ "$expected_theme_dir" = "$THEME_DIR" ] || return 1
   case "$expected_port" in
     ''|*[!0-9]*) return 1 ;;
   esac
   browser_id_is_valid "$expected_browser_id" || return 1
+  [ -z "$expected_activation_gate" ] \
+    || watcher_activation_gate_path_is_safe "$expected_activation_gate" || return 1
   process_belongs_to_current_user "$pid" || return 1
   /bin/kill -0 "$pid" 2>/dev/null || return 1
   command_line="$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)"
@@ -809,7 +955,12 @@ launched_injector_process_matches() {
     *) return 1 ;;
   esac
   case "$command_line" in
-    *" --browser-id $expected_browser_id --theme-dir "*) ;;
+    *" --browser-id $expected_browser_id --theme-dir $expected_theme_dir --activation-gate $expected_activation_gate")
+      [ -n "$expected_activation_gate" ] || return 1
+      ;;
+    *" --browser-id $expected_browser_id --theme-dir $expected_theme_dir")
+      [ -z "$expected_activation_gate" ] || return 1
+      ;;
     *) return 1 ;;
   esac
   return 0
@@ -1039,6 +1190,7 @@ write_state() {
   local injector_started_at="$3"
   local codex_pid="$4"
   local browser_id="$5"
+  local activation_gate="${6:-}"
   local node_ver="${NODE_VERSION:-unknown}"
   local bundle="${CODEX_BUNDLE:-}"
   local exe="${CODEX_EXE:-}"
@@ -1046,12 +1198,12 @@ write_state() {
   local team="${CODEX_TEAM_ID:-}"
   "$NODE" -e '
     const fs = require("node:fs");
-    const [file, version, port, pid, startedAt, injector, node, nodeVersion, bundle, exe, appVersion, teamId, root, themeDir, codexPid, browserId, arch] = process.argv.slice(1);
+    const [file, version, port, pid, startedAt, injector, node, nodeVersion, bundle, exe, appVersion, teamId, root, themeDir, codexPid, browserId, activationGate, arch] = process.argv.slice(1);
     const state = {
       schemaVersion: 5,
       platform: `darwin-${arch}`,
       skinVersion: version,
-      injectorProtocol: 3,
+      injectorProtocol: activationGate ? 4 : 3,
       port: Number(port),
       injectorPid: Number(pid),
       injectorStartedAt: startedAt,
@@ -1066,6 +1218,7 @@ write_state() {
       browserId,
       projectRoot: root,
       themeDir,
+      ...(activationGate ? { activationGate } : {}),
       createdAt: new Date().toISOString()
     };
     const temporary = `${file}.${process.pid}.tmp`;
@@ -1075,7 +1228,7 @@ write_state() {
     } finally {
       fs.rmSync(temporary, { force: true });
     }
-  ' "$STATE_PATH" "$SKIN_VERSION" "$port" "$injector_pid" "$injector_started_at" "$INJECTOR" "$NODE" "$node_ver" "$bundle" "$exe" "$app_ver" "$team" "$PROJECT_ROOT" "$THEME_DIR" "$codex_pid" "$browser_id" "$(/usr/bin/uname -m)"
+  ' "$STATE_PATH" "$SKIN_VERSION" "$port" "$injector_pid" "$injector_started_at" "$INJECTOR" "$NODE" "$node_ver" "$bundle" "$exe" "$app_ver" "$team" "$PROJECT_ROOT" "$THEME_DIR" "$codex_pid" "$browser_id" "$activation_gate" "$(/usr/bin/uname -m)"
 }
 
 owned_injector_process_matches() {
@@ -1085,19 +1238,36 @@ owned_injector_process_matches() {
   local injector="$4"
   local port="$5"
   local browser_id="$6"
+  local theme_dir="${7:-$THEME_DIR}"
+  local activation_gate="${8:-}"
   if [ -n "$started_at" ]; then
-    recorded_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"
+    recorded_injector_process_matches \
+      "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+      "$activation_gate"
   else
-    launched_injector_process_matches "$pid" "$node" "$injector" "$port" "$browser_id"
+    launched_injector_process_matches \
+      "$pid" "$node" "$injector" "$port" "$browser_id" "$theme_dir" "$activation_gate"
   fi
 }
 
 injector_launchctl_job_pid() {
   local output=""
   local pid=""
-  output="$(/bin/launchctl print "gui/$(/usr/bin/id -u)/$INJECTOR_JOB_LABEL" 2>/dev/null \
-    || printf '__ABSENT__')"
-  [ "$output" != "__ABSENT__" ] || { printf '__ABSENT__\n'; return 0; }
+  local status=0
+  local result=""
+  result="$(
+    status=0
+    /bin/launchctl print "gui/$(/usr/bin/id -u)/$INJECTOR_JOB_LABEL" 2>/dev/null \
+      || status="$?"
+    printf '\n__DREAM_SKIN_LAUNCHCTL_STATUS__=%s' "$status"
+  )"
+  status="${result##*__DREAM_SKIN_LAUNCHCTL_STATUS__=}"
+  output="${result%$'\n'__DREAM_SKIN_LAUNCHCTL_STATUS__=*}"
+  if [ "$status" -eq 113 ]; then
+    printf '__ABSENT__\n'
+    return 0
+  fi
+  [ "$status" -eq 0 ] || { printf '__UNSAFE__\n'; return 0; }
   pid="$(printf '%s\n' "$output" \
     | /usr/bin/awk '/^[[:space:]]*pid = [0-9]+/{print $3; exit}')"
   case "$pid" in ''|*[!0-9]*|0|1|??????????*) printf '__UNSAFE__\n'; return 0 ;; esac
@@ -1126,6 +1296,8 @@ remove_owned_injector_launchctl_job() {
   local injector="$4"
   local port="$5"
   local browser_id="$6"
+  local theme_dir="${7:-$THEME_DIR}"
+  local activation_gate="${8:-}"
   local pid=""
   pid="$(injector_launchctl_job_pid)"
   [ "$pid" = "__ABSENT__" ] && return 0
@@ -1134,48 +1306,121 @@ remove_owned_injector_launchctl_job() {
     return 1
   }
   [ "$pid" = "$expected_pid" ] \
-    && owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" \
+    && owned_injector_process_matches \
+      "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+      "$activation_gate" \
     || {
       printf 'Dream Skin launchctl job does not match the authorized watcher; refusing to remove it.\n' >&2
       return 1
     }
   [ "$(injector_launchctl_job_pid)" = "$expected_pid" ] \
-    && owned_injector_process_matches "$expected_pid" "$started_at" "$node" "$injector" "$port" "$browser_id" \
+    && owned_injector_process_matches \
+      "$expected_pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+      "$activation_gate" \
     || {
       printf 'Dream Skin launchctl job changed before removal; refusing to remove it.\n' >&2
       return 1
     }
-  /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
+  /bin/launchctl remove "$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || {
+    printf 'Dream Skin launchctl job could not be removed safely.\n' >&2
+    return 1
+  }
+  [ "$(injector_launchctl_job_pid)" = "__ABSENT__" ] || {
+    printf 'Dream Skin launchctl job still exists after removal.\n' >&2
+    return 1
+  }
 }
 
 write_renderer_rollback_evidence() {
   local port="$1"
   local browser_id="$2"
+  local injector_pid="${3:-0}"
+  local injector_started_at="${4:-}"
+  local node_path="${5:-${NODE:-}}"
+  local injector_path="${6:-$INJECTOR}"
+  local theme_dir="${7:-$THEME_DIR}"
+  local launcher="${8:-renderer}"
+  local activation_gate="${9:-}"
+  local schema="2"
+  case "$injector_pid" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+  [ "$theme_dir" = "$THEME_DIR" ] || return 1
+  if [ "$injector_pid" = "0" ]; then
+    [ -z "$injector_started_at" ] && [ "$launcher" = "renderer" ] \
+      && [ -z "$activation_gate" ] || return 1
+  else
+    [ "$injector_pid" != "1" ] && [ -n "$injector_started_at" ] \
+      && { [ "$launcher" = "direct" ] || [ "$launcher" = "launchctl" ]; } || return 1
+    watcher_activation_gate_path_is_safe "$activation_gate" || return 1
+    schema="3"
+  fi
   if [ -e "$ROLLBACK_STATE_PATH" ] || [ -L "$ROLLBACK_STATE_PATH" ]; then
     [ -f "$ROLLBACK_STATE_PATH" ] && [ ! -L "$ROLLBACK_STATE_PATH" ] || return 1
   fi
   "$NODE" -e '
     const fs = require("node:fs");
-    const [file, port, browserId, themeDir] = process.argv.slice(1);
+    const path = require("node:path");
+    const [file, schema, port, browserId, injectorPid, injectorStartedAt, nodePath,
+      injectorPath, themeDir, launcher, jobLabel, activationGate] = process.argv.slice(1);
     const temporary = `${file}.${process.pid}.tmp`;
+    let descriptor;
+    let directory;
     try {
-      fs.writeFileSync(temporary, `${JSON.stringify({
-        schemaVersion: 1,
+      descriptor = fs.openSync(temporary, "wx", 0o600);
+      fs.writeFileSync(descriptor, `${JSON.stringify({
+        schemaVersion: Number(schema),
         port: Number(port),
         browserId,
+        injectorPid: Number(injectorPid),
+        injectorStartedAt,
+        nodePath,
+        injectorPath,
         themeDir,
+        launcher,
+        jobLabel,
+        ...(activationGate ? { activationGate } : {}),
         createdAt: new Date().toISOString(),
-      }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      }, null, 2)}\n`);
+      fs.fsyncSync(descriptor);
+      fs.closeSync(descriptor);
+      descriptor = undefined;
       fs.renameSync(temporary, file);
+      directory = fs.openSync(path.dirname(file), "r");
+      fs.fsyncSync(directory);
     } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+      if (directory !== undefined) fs.closeSync(directory);
       fs.rmSync(temporary, { force: true });
     }
-  ' "$ROLLBACK_STATE_PATH" "$port" "$browser_id" "$THEME_DIR"
+  ' "$ROLLBACK_STATE_PATH" "$schema" "$port" "$browser_id" "$injector_pid" \
+    "$injector_started_at" "$node_path" "$injector_path" "$theme_dir" \
+    "$launcher" "$INJECTOR_JOB_LABEL" "$activation_gate" \
+    || return 1
+  renderer_rollback_evidence_is_valid \
+    && [ "$(renderer_rollback_field port)" = "$port" ] \
+    && [ "$(renderer_rollback_field browserId)" = "$browser_id" ] \
+    && [ "$(renderer_rollback_field injectorPid)" = "$injector_pid" ] \
+    && [ "$(renderer_rollback_field injectorStartedAt)" = "$injector_started_at" ] \
+    && [ "$(renderer_rollback_field nodePath)" = "$node_path" ] \
+    && [ "$(renderer_rollback_field injectorPath)" = "$injector_path" ] \
+    && [ "$(renderer_rollback_field themeDir)" = "$theme_dir" ] \
+    && [ "$(renderer_rollback_field launcher)" = "$launcher" ] \
+    && { [ "$schema" = "2" ] \
+      || [ "$(renderer_rollback_field activationGate)" = "$activation_gate" ]; }
 }
 
 clear_renderer_rollback_evidence() {
+  local schema=""
+  local pid=""
+  local activation_gate=""
   [ -e "$ROLLBACK_STATE_PATH" ] || [ -L "$ROLLBACK_STATE_PATH" ] || return 0
   [ -f "$ROLLBACK_STATE_PATH" ] && [ ! -L "$ROLLBACK_STATE_PATH" ] || return 1
+  renderer_rollback_evidence_is_valid || return 1
+  schema="$(renderer_rollback_field schemaVersion)" || return 1
+  if [ "$schema" = "3" ]; then
+    pid="$(renderer_rollback_field injectorPid)" || return 1
+    activation_gate="$(renderer_rollback_field activationGate)" || return 1
+    cleanup_watcher_activation_gate "$activation_gate" "$pid" || return 1
+  fi
   /bin/rm -f "$ROLLBACK_STATE_PATH"
   [ ! -e "$ROLLBACK_STATE_PATH" ] && [ ! -L "$ROLLBACK_STATE_PATH" ]
 }
@@ -1185,19 +1430,28 @@ rollback_unpublished_watcher() {
   local started_at="$2"
   local port="$3"
   local browser_id="$4"
+  local launcher="${5:-${LAUNCHED_INJECTOR_LAUNCHER:-direct}}"
+  local activation_gate="${6:-${LAUNCHED_INJECTOR_ACTIVATION_GATE:-}}"
   local active_browser_id=""
-  stop_injector_process "$pid" "$started_at" "$NODE" "$INJECTOR" "$port" "$browser_id" \
+  stop_injector_process \
+    "$pid" "$started_at" "$NODE" "$INJECTOR" "$port" "$browser_id" "$THEME_DIR" \
+    "$activation_gate" \
     || {
-      write_renderer_rollback_evidence "$port" "$browser_id" || true
+      write_renderer_rollback_evidence \
+        "$port" "$browser_id" "$pid" "$started_at" "$NODE" "$INJECTOR" \
+        "$THEME_DIR" "$launcher" "$activation_gate" || true
       return 1
     }
   active_browser_id="$(verified_cdp_browser_id "$port")" \
     && [ "$active_browser_id" = "$browser_id" ] \
     && "$NODE" "$INJECTOR" --remove --port "$port" --browser-id "$browser_id" \
       --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null 2>&1 \
+    && cleanup_watcher_activation_gate "$activation_gate" "$pid" \
     && clear_renderer_rollback_evidence \
     && return 0
-  write_renderer_rollback_evidence "$port" "$browser_id" || true
+  write_renderer_rollback_evidence \
+    "$port" "$browser_id" "$pid" "$started_at" "$NODE" "$INJECTOR" \
+    "$THEME_DIR" "$launcher" "$activation_gate" || true
   return 1
 }
 
@@ -1208,15 +1462,23 @@ stop_injector_process() {
   local injector="$4"
   local port="$5"
   local browser_id="$6"
+  local theme_dir="${7:-$THEME_DIR}"
+  local activation_gate="${8:-}"
   /bin/kill -0 "$pid" 2>/dev/null || {
-    remove_owned_injector_launchctl_job "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" \
+    remove_owned_injector_launchctl_job \
+      "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+      "$activation_gate" \
       || return 1
     wait "$pid" 2>/dev/null || true
     return 0
   }
-  if ! owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"; then
+  if ! owned_injector_process_matches \
+    "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+    "$activation_gate"; then
     if ! /bin/kill -0 "$pid" 2>/dev/null || [ -z "$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)" ]; then
-      remove_owned_injector_launchctl_job "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" \
+      remove_owned_injector_launchctl_job \
+        "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+        "$activation_gate" \
         || return 1
       wait "$pid" 2>/dev/null || true
       return 0
@@ -1224,21 +1486,29 @@ stop_injector_process() {
     printf 'Dream Skin injector PID %s is live but its identity does not match; refusing to signal it.\n' "$pid" >&2
     return 1
   fi
-  remove_owned_injector_launchctl_job "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" \
+  remove_owned_injector_launchctl_job \
+    "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+    "$activation_gate" \
     || return 1
   /bin/kill -TERM "$pid" 2>/dev/null || true
   local deadline=$((SECONDS + 6))
   while /bin/kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.2; done
-  if owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"; then
+  if owned_injector_process_matches \
+    "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+    "$activation_gate"; then
     /bin/kill -KILL "$pid" 2>/dev/null || true
   fi
   deadline=$((SECONDS + 2))
-  while owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" \
+  while owned_injector_process_matches \
+    "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+    "$activation_gate" \
     && [ "$SECONDS" -lt "$deadline" ]; do
     /bin/sleep 0.1
   done
   wait "$pid" 2>/dev/null || true
-  if owned_injector_process_matches "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id"; then
+  if owned_injector_process_matches \
+    "$pid" "$started_at" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+    "$activation_gate"; then
     printf 'Could not stop the Dream Skin injector (PID %s).\n' "$pid" >&2
     return 1
   fi
@@ -1252,9 +1522,25 @@ stop_recorded_injector() {
   local saved_node
   local saved_injector
   local saved_browser_id
+  local saved_theme_dir
+  local injector_protocol=""
+  local activation_gate=""
   if ! pid="$(state_field injectorPid 2>/dev/null)" || [ -z "${pid:-}" ]; then
     printf 'Dream Skin state is damaged or missing its injector PID; state was preserved.\n' >&2
     return 1
+  fi
+  saved_theme_dir="$(state_field themeDir 2>/dev/null || true)"
+  [ "$saved_theme_dir" = "$THEME_DIR" ] || {
+    printf 'Recorded Dream Skin theme directory is missing or invalid; state was preserved.\n' >&2
+    return 1
+  }
+  injector_protocol="$(state_field injectorProtocol 2>/dev/null || true)"
+  if [ "$injector_protocol" = "4" ]; then
+    activation_gate="$(state_field activationGate 2>/dev/null || true)"
+    watcher_activation_gate_path_is_safe "$activation_gate" || {
+      printf 'Recorded Dream Skin activation gate is missing or invalid; state was preserved.\n' >&2
+      return 1
+    }
   fi
   # Already paused / no daemon
   if [ "$pid" = "0" ]; then
@@ -1293,11 +1579,14 @@ stop_recorded_injector() {
     return 1
   }
   if [ -z "$saved_start" ] || [ -z "$saved_node" ] || [ -z "$saved_injector" ] \
+    || [ "$saved_theme_dir" != "$THEME_DIR" ] \
     || ! browser_id_is_valid "$saved_browser_id"; then
     printf 'Recorded Dream Skin injector identity is incomplete; state was preserved.\n' >&2
     return 1
   fi
-  stop_injector_process "$pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" "$saved_browser_id"
+  stop_injector_process \
+    "$pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" \
+    "$saved_browser_id" "$saved_theme_dir" "$activation_gate"
 }
 
 state_has_complete_injector_identity() {
@@ -1308,9 +1597,19 @@ state_has_complete_injector_identity() {
   local saved_node=""
   local saved_injector=""
   local saved_browser_id=""
+  local saved_theme_dir=""
+  local injector_protocol=""
+  local activation_gate=""
   pid="$(state_field injectorPid 2>/dev/null)" || return 1
   case "$pid" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+  saved_theme_dir="$(state_field themeDir 2>/dev/null)" || return 1
+  [ "$saved_theme_dir" = "$THEME_DIR" ] || return 1
   [ "$pid" != "0" ] || return 0
+  injector_protocol="$(state_field injectorProtocol 2>/dev/null || true)"
+  if [ "$injector_protocol" = "4" ]; then
+    activation_gate="$(state_field activationGate 2>/dev/null)" || return 1
+    watcher_activation_gate_path_is_safe "$activation_gate" || return 1
+  fi
   saved_port="$(state_field port 2>/dev/null)" || return 1
   saved_start="$(state_field injectorStartedAt 2>/dev/null)" || return 1
   saved_node="$(state_field nodePath 2>/dev/null)" || return 1
@@ -1319,6 +1618,8 @@ state_has_complete_injector_identity() {
   case "$saved_port" in ''|*[!0-9]*) return 1 ;; esac
   [ "$saved_port" -ge 1024 ] && [ "$saved_port" -le 65535 ] \
     && [ -n "$saved_start" ] && [ -n "$saved_node" ] && [ -n "$saved_injector" ] \
+    && [ "$saved_theme_dir" = "$THEME_DIR" ] \
+    && { [ "$injector_protocol" != "4" ] || [ -n "$activation_gate" ]; } \
     && browser_id_is_valid "$saved_browser_id"
 }
 
@@ -1333,12 +1634,36 @@ live_injector_candidate_pids() {
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     [ "$pid" != "$$" ] || continue
     case "$command_line" in
-      *"/injector.mjs --watch --port "*" --theme-dir $THEME_DIR"*|\
-      *"/injector.mjs --watch --port "*" --browser-id "*" --theme-dir $THEME_DIR"*)
+      *"/injector.mjs --watch --port "*" --theme-dir $THEME_DIR"|\
+      *"/injector.mjs --watch --port "*" --browser-id "*" --theme-dir $THEME_DIR"|\
+      *"/injector.mjs --watch --port "*" --browser-id "*" --theme-dir $THEME_DIR --activation-gate $STATE_ROOT/.watcher-activation."??????)
         /bin/kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
         ;;
     esac
   done < <(/bin/ps -axo uid=,pid=,command=)
+}
+
+launched_injector_candidate_pid() {
+  local node="$1"
+  local injector="$2"
+  local port="$3"
+  local browser_id="$4"
+  local theme_dir="$5"
+  local activation_gate="${6:-}"
+  local current_uid=""
+  local uid=""
+  local pid=""
+  current_uid="$(/usr/bin/id -u)"
+  while read -r uid pid; do
+    [ "$uid" = "$current_uid" ] || continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    launched_injector_process_matches \
+      "$pid" "$node" "$injector" "$port" "$browser_id" "$theme_dir" \
+      "$activation_gate" || continue
+    printf '%s\n' "$pid"
+    return 0
+  done < <(/bin/ps -axo uid=,pid=)
+  return 1
 }
 
 recover_damaged_injector_state_without_live_candidate() {
@@ -1360,40 +1685,50 @@ record_launched_injector() {
   local pid="$1"
   local port="$2"
   local browser_id="$3"
+  local launcher="${4:-direct}"
+  local activation_gate="${5:-}"
   local started_at=""
   started_at="$(process_started_at "$pid" 2>/dev/null || true)"
   if [ -z "$started_at" ]; then
-    rollback_unpublished_watcher "$pid" "" "$port" "$browser_id" \
+    rollback_unpublished_watcher "$pid" "" "$port" "$browser_id" "$launcher" \
+      "$activation_gate" \
       || printf 'Could not roll back the unrecorded Dream Skin injector (PID %s).\n' "$pid" >&2
     printf 'Could not record the injector process start time.\n' >&2
     return 1
   fi
   LAUNCHED_INJECTOR_PID="$pid"
   LAUNCHED_INJECTOR_STARTED_AT="$started_at"
+  LAUNCHED_INJECTOR_LAUNCHER="$launcher"
+  LAUNCHED_INJECTOR_ACTIVATION_GATE="$activation_gate"
 }
 
 launch_injector_daemon() {
   local port="$1"
   local browser_id="$2"
+  local activation_gate="$3"
   local pid=""
   local deadline=$((SECONDS + 10))
   LAUNCHED_INJECTOR_PID=""
   LAUNCHED_INJECTOR_STARTED_AT=""
+  LAUNCHED_INJECTOR_LAUNCHER=""
+  LAUNCHED_INJECTOR_ACTIVATION_GATE=""
   browser_id_is_valid "$browser_id" || {
     printf 'The CDP Browser ID is missing or invalid.\n' >&2
     return 1
   }
+  watcher_activation_gate_path_is_safe "$activation_gate" || return 1
   : > "$INJECTOR_LOG"
   : > "$INJECTOR_ERROR_LOG"
   injector_launchctl_job_is_absent || return 1
 
   # Prefer a direct background process — launchctl submit is unreliable on newer macOS.
   /usr/bin/nohup "$NODE" "$INJECTOR" --watch --port "$port" --browser-id "$browser_id" --theme-dir "$THEME_DIR" \
+    --activation-gate "$activation_gate" \
     >>"$INJECTOR_LOG" 2>>"$INJECTOR_ERROR_LOG" &
   pid="$!"
   /bin/sleep 0.08
   if [ -n "$pid" ] && /bin/kill -0 "$pid" 2>/dev/null; then
-    record_launched_injector "$pid" "$port" "$browser_id"
+    record_launched_injector "$pid" "$port" "$browser_id" direct "$activation_gate"
     return
   fi
   [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
@@ -1404,21 +1739,23 @@ launch_injector_daemon() {
 
   # Fallback: launchctl submit
   /bin/launchctl submit -l "$INJECTOR_JOB_LABEL" -o "$INJECTOR_LOG" -e "$INJECTOR_ERROR_LOG" -- \
-    "$NODE" "$INJECTOR" --watch --port "$port" --browser-id "$browser_id" --theme-dir "$THEME_DIR" >/dev/null 2>&1 || true
+    "$NODE" "$INJECTOR" --watch --port "$port" --browser-id "$browser_id" --theme-dir "$THEME_DIR" \
+    --activation-gate "$activation_gate" >/dev/null 2>&1 || true
   /bin/launchctl kickstart -k "gui/$(/usr/bin/id -u)/$INJECTOR_JOB_LABEL" >/dev/null 2>&1 || true
   while [ "$SECONDS" -lt "$deadline" ]; do
-    pid="$(/bin/launchctl print "gui/$(/usr/bin/id -u)/$INJECTOR_JOB_LABEL" 2>/dev/null \
-      | /usr/bin/awk '/^[[:space:]]*pid = [0-9]+/{print $3; exit}')"
-    if [ -n "$pid" ] && /bin/kill -0 "$pid" 2>/dev/null; then
-      record_launched_injector "$pid" "$port" "$browser_id"
+    pid="$(injector_launchctl_job_pid)"
+    if [ "$pid" != "__ABSENT__" ] && [ "$pid" != "__UNSAFE__" ] \
+      && launched_injector_process_matches \
+        "$pid" "$NODE" "$INJECTOR" "$port" "$browser_id" "$THEME_DIR" \
+        "$activation_gate"; then
+      record_launched_injector "$pid" "$port" "$browser_id" launchctl "$activation_gate"
       return
     fi
-    # Also detect the nohup node process by command line
-    pid="$(/bin/ps -axo pid=,command= | /usr/bin/awk -v inj="$INJECTOR" -v port="$port" -v browser="$browser_id" '
-      index($0, inj) && index($0, "--watch") && index($0, "--port " port " --browser-id " browser " --theme-dir ") { print $1; exit }
-    ')"
-    if [ -n "$pid" ] && /bin/kill -0 "$pid" 2>/dev/null; then
-      record_launched_injector "$pid" "$port" "$browser_id"
+    pid="$(launched_injector_candidate_pid \
+      "$NODE" "$INJECTOR" "$port" "$browser_id" "$THEME_DIR" "$activation_gate" \
+      2>/dev/null || true)"
+    if [ -n "$pid" ]; then
+      record_launched_injector "$pid" "$port" "$browser_id" launchctl "$activation_gate"
       return
     fi
     /bin/sleep 0.2
@@ -1433,24 +1770,76 @@ start_watcher() {
   local codex_pid="${3:-0}"
   local pid=""
   local started_at=""
-  launch_injector_daemon "$port" "$browser_id" || return 1
+  local activation_gate=""
+  local activation_deadline=0
+  prepare_watcher_activation_gate || return 1
+  activation_gate="$WATCHER_ACTIVATION_GATE"
+  if ! launch_injector_daemon "$port" "$browser_id" "$activation_gate"; then
+    cleanup_watcher_activation_gate "$activation_gate" "${LAUNCHED_INJECTOR_PID:-0}" || true
+    return 1
+  fi
   pid="$LAUNCHED_INJECTOR_PID"
   started_at="$LAUNCHED_INJECTOR_STARTED_AT"
   /bin/sleep 0.15
   if ! /bin/kill -0 "$pid" 2>/dev/null; then
-    rollback_unpublished_watcher "$pid" "$started_at" "$port" "$browser_id" || true
+    rollback_unpublished_watcher \
+      "$pid" "$started_at" "$port" "$browser_id" "$LAUNCHED_INJECTOR_LAUNCHER" \
+      "$activation_gate" || true
     printf 'The injector exited during startup. See %s\n' "$INJECTOR_ERROR_LOG" >&2
     return 1
   fi
-  if ! write_state "$port" "$pid" "$started_at" "$codex_pid" "$browser_id"; then
-    rollback_unpublished_watcher "$pid" "$started_at" "$port" "$browser_id" \
+  if ! recorded_injector_process_matches \
+    "$pid" "$started_at" "$NODE" "$INJECTOR" "$port" "$browser_id" "$THEME_DIR" \
+    "$activation_gate"; then
+    rollback_unpublished_watcher \
+      "$pid" "$started_at" "$port" "$browser_id" "$LAUNCHED_INJECTOR_LAUNCHER" \
+      "$activation_gate" \
       || printf 'Could not roll back the unpublished Dream Skin injector (PID %s).\n' "$pid" >&2
     return 1
   fi
+  if ! write_renderer_rollback_evidence \
+    "$port" "$browser_id" "$pid" "$started_at" "$NODE" "$INJECTOR" "$THEME_DIR" \
+    "$LAUNCHED_INJECTOR_LAUNCHER" "$activation_gate"; then
+    rollback_unpublished_watcher \
+      "$pid" "$started_at" "$port" "$browser_id" "$LAUNCHED_INJECTOR_LAUNCHER" \
+      "$activation_gate" || true
+    return 1
+  fi
+  if ! publish_watcher_activation "$activation_gate" "$pid"; then
+    rollback_unpublished_watcher \
+      "$pid" "$started_at" "$port" "$browser_id" "$LAUNCHED_INJECTOR_LAUNCHER" \
+      "$activation_gate" || true
+    return 1
+  fi
+  activation_deadline=$((SECONDS + 8))
+  while [ "$SECONDS" -lt "$activation_deadline" ]; do
+    recorded_injector_process_matches \
+      "$pid" "$started_at" "$NODE" "$INJECTOR" "$port" "$browser_id" "$THEME_DIR" \
+      "$activation_gate" || break
+    watcher_activation_ack_is_valid "$activation_gate" "$pid" && break
+    /bin/sleep 0.05
+  done
+  if ! watcher_activation_ack_is_valid "$activation_gate" "$pid" \
+    || ! cleanup_watcher_activation_gate "$activation_gate" "$pid"; then
+    rollback_unpublished_watcher \
+      "$pid" "$started_at" "$port" "$browser_id" "$LAUNCHED_INJECTOR_LAUNCHER" \
+      "$activation_gate" || true
+    return 1
+  fi
+  if ! write_state "$port" "$pid" "$started_at" "$codex_pid" "$browser_id" "$activation_gate"; then
+    rollback_unpublished_watcher \
+      "$pid" "$started_at" "$port" "$browser_id" "$LAUNCHED_INJECTOR_LAUNCHER" \
+      "$activation_gate" \
+      || printf 'Could not roll back the unpublished Dream Skin injector (PID %s).\n' "$pid" >&2
+    return 1
+  fi
+  clear_renderer_rollback_evidence || return 1
   STARTED_WATCHER_PID="$pid"
   STARTED_WATCHER_AT="$started_at"
   LAUNCHED_INJECTOR_PID=""
   LAUNCHED_INJECTOR_STARTED_AT=""
+  LAUNCHED_INJECTOR_LAUNCHER=""
+  LAUNCHED_INJECTOR_ACTIVATION_GATE=""
 }
 
 # Resolve Node quickly: prefer known Codex path, else full runtime check.
@@ -1504,6 +1893,12 @@ hot_reapply_theme() {
   local codex_pid=""
   local browser_id=""
   local saved_browser_id=""
+  local saved_port=""
+  local saved_start=""
+  local saved_node=""
+  local saved_injector=""
+  local saved_theme_dir=""
+  local saved_activation_gate=""
 
   [ ! -e "$ROLLBACK_STATE_PATH" ] && [ ! -L "$ROLLBACK_STATE_PATH" ] || return 1
 
@@ -1519,11 +1914,25 @@ hot_reapply_theme() {
   fi
 
   injector_protocol="$(state_field injectorProtocol 2>/dev/null || true)"
-  if [ "$injector_protocol" = "3" ]; then
-    inj_pid="$(/bin/ps -axo pid=,command= | /usr/bin/awk -v inj="$INJECTOR" -v port="$port" -v browser="$browser_id" '
-      index($0, inj) && index($0, "--watch") && index($0, "--port " port " --browser-id " browser " --theme-dir ") { print $1; exit }
-    ')"
+  if { [ "$injector_protocol" = "3" ] || [ "$injector_protocol" = "4" ]; } \
+    && state_has_complete_injector_identity; then
+    inj_pid="$(state_field injectorPid 2>/dev/null || true)"
+    saved_port="$(state_field port 2>/dev/null || true)"
+    saved_start="$(state_field injectorStartedAt 2>/dev/null || true)"
+    saved_node="$(state_field nodePath 2>/dev/null || true)"
+    saved_injector="$(state_field injectorPath 2>/dev/null || true)"
+    saved_theme_dir="$(state_field themeDir 2>/dev/null || true)"
+    if [ "$injector_protocol" = "4" ]; then
+      saved_activation_gate="$(state_field activationGate 2>/dev/null || true)"
+    fi
+    if [ "$inj_pid" = "0" ] || [ "$saved_port" != "$port" ] \
+      || ! recorded_injector_process_matches \
+        "$inj_pid" "$saved_start" "$saved_node" "$saved_injector" "$saved_port" \
+        "$browser_id" "$saved_theme_dir" "$saved_activation_gate"; then
+      inj_pid=""
+    fi
   fi
+  write_renderer_rollback_evidence "$port" "$browser_id" || return 1
   if ! "$NODE" "$INJECTOR" --once --port "$port" --browser-id "$browser_id" --theme-dir "$THEME_DIR" \
     --timeout-ms "$timeout_ms" >/dev/null 2>&1; then
     return 1
@@ -1531,11 +1940,13 @@ hot_reapply_theme() {
 
   # A current watcher reloads theme files itself. Start one only when absent.
   if [ -n "$inj_pid" ] && /bin/kill -0 "$inj_pid" 2>/dev/null; then
-    return 0
+    clear_renderer_rollback_evidence
+    return
   fi
   stop_recorded_injector 2>/dev/null || return 1
   codex_pid="$(codex_main_pids 2>/dev/null | /usr/bin/head -n 1)"
   start_watcher "$port" "$browser_id" "${codex_pid:-0}" || return 1
+  clear_renderer_rollback_evidence
 }
 
 # Always tear down any leftover launchd babysitter for the themed Codex process.

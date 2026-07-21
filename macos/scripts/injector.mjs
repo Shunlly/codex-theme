@@ -33,6 +33,7 @@ function parseArgs(argv) {
     reload: false,
     themeDir: null,
     browserId: null,
+    activationGate: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -46,6 +47,7 @@ function parseArgs(argv) {
     else if (arg === "--screenshot") options.screenshot = path.resolve(argv[++i]);
     else if (arg === "--theme-dir") options.themeDir = path.resolve(argv[++i]);
     else if (arg === "--browser-id") options.browserId = argv[++i];
+    else if (arg === "--activation-gate") options.activationGate = path.resolve(argv[++i]);
     else if (arg === "--reload") options.reload = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -60,6 +62,17 @@ function parseArgs(argv) {
   }
   if (["watch", "once", "verify", "remove"].includes(options.mode) && !options.browserId) {
     throw new Error(`--browser-id is required in ${options.mode} mode`);
+  }
+  if (options.activationGate) {
+    const stateRoot = options.themeDir && path.dirname(options.themeDir);
+    const gateName = path.basename(options.activationGate);
+    if (
+      options.mode !== "watch" || !stateRoot
+      || path.dirname(options.activationGate) !== stateRoot
+      || !/^\.watcher-activation\.[A-Za-z0-9]{6}$/.test(gateName)
+    ) {
+      throw new Error("--activation-gate must be a unique file directly under the theme state root");
+    }
   }
   return options;
 }
@@ -835,22 +848,80 @@ function watchPayloadSources(themeDir, onDirty) {
   return () => watchers.forEach((watcher) => watcher.close());
 }
 
+async function waitForWatchActivation(options, shouldStop) {
+  if (!options.activationGate) return true;
+  const stateRoot = path.dirname(options.activationGate);
+  const rootStat = await fs.lstat(stateRoot);
+  if (
+    !rootStat.isDirectory() || rootStat.isSymbolicLink()
+    || rootStat.uid !== process.getuid() || (rootStat.mode & 0o077) !== 0
+  ) {
+    throw new Error("Watcher activation state root is unsafe");
+  }
+  const acknowledged = `${options.activationGate}.activated`;
+  try {
+    await fs.lstat(acknowledged);
+    throw new Error("Watcher activation acknowledgement already exists");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const deadline = Date.now() + options.timeoutMs;
+  while (!shouldStop() && Date.now() < deadline) {
+    let handle;
+    try {
+      handle = await fs.open(
+        options.activationGate,
+        fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+      );
+      const opened = await handle.stat({ bigint: true });
+      const linked = await fs.lstat(options.activationGate, { bigint: true });
+      if (
+        !opened.isFile() || !linked.isFile()
+        || opened.dev !== linked.dev || opened.ino !== linked.ino
+        || Number(opened.uid) !== process.getuid() || (Number(opened.mode) & 0o077) !== 0
+      ) {
+        throw new Error("Watcher activation gate is unsafe");
+      }
+      const activation = JSON.parse(await handle.readFile("utf8"));
+      if (activation?.pid !== process.pid) throw new Error("Watcher activation PID does not match");
+      await fs.writeFile(
+        acknowledged,
+        `${JSON.stringify({ pid: process.pid })}\n`,
+        { flag: "wx", mode: 0o600 },
+      );
+      const acknowledgement = await fs.open(
+        acknowledged,
+        fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+      );
+      try { await acknowledgement.sync(); } finally { await acknowledgement.close(); }
+      return true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    } finally {
+      await handle?.close();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (shouldStop()) return false;
+  throw new Error("Watcher activation gate timed out before any CDP connection");
+}
+
 async function runWatch(options) {
+  let stopping = false;
+  const stop = () => { stopping = true; };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  if (!await waitForWatchActivation(options, () => stopping)) return;
   let current = await loadPayload(options.themeDir);
   const identityAnchor = await connectBrowserIdentityAnchor(options.port, options.browserId);
   const assertIdentityAnchorOpen = () => identityAnchor.assertOpen();
   const sessions = new Map();
   const rejected = new Set();
-  let stopping = false;
   let reloadTimer = null;
   let reloadChain = Promise.resolve();
   let discoveryDelayMs = 100;
   let lastListErrorAt = 0;
   let terminalError = null;
-  const stop = () => { stopping = true; };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-
   const recordAsyncFailure = (error, label) => {
     if (error instanceof CdpIdentityMismatchError || identityAnchor.closed) {
       terminalError ??= error instanceof CdpIdentityMismatchError

@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Atomic config publication and identity-bound completion-proof cleanup now preserve recovery evidence, including when the config was initially missing.
 - Apps & Features removal is idempotent after a never-applied or completed restore and can recover when Codex is missing, while unsafe state, reparse points, cancellation, and restore failures still block removal.
 - Normal window close and tray Exit are disabled while a Studio operation is active so the adapter process tree is not left running without its UI.
 - Config marker publication failures retain the exact recovery backup. Restore now publishes fixed `config.restored.toml` completion proof, removes lifecycle state and live recovery artifacts inside the same rollback-protected transaction, commits before relaunch, and never rolls back settings written after Codex reopens.
