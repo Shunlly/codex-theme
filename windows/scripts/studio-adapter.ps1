@@ -82,7 +82,8 @@ function Exit-DreamSkinStudioError {
 }
 
 function Get-DreamSkinLifecycleStatus {
-  return Get-DreamSkinStudioStatus -Deep
+  $deep = $Operation -notin @('restore', 'uninstall')
+  return Get-DreamSkinStudioStatus -Deep:$deep
 }
 
 function Test-DreamSkinResumeHotPath {
@@ -212,6 +213,7 @@ try {
 
   $status = Get-DreamSkinLifecycleStatus
   $recovery = Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot
+  $recoverDamagedState = $Operation -in @('restore', 'uninstall') -and [bool]$status.StateDamaged
   $restoreRecoveryAvailable = $recovery.LiveBackup -or $recovery.Completed
   $uninstallRecoveryAvailable = $restoreRecoveryAvailable -or $recovery.NeverApplied
   $recoveringStatusError = $null -ne $status.Error -and (
@@ -291,6 +293,7 @@ try {
       $childArguments = @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
     }
   }
+  if ($recoverDamagedState) { $childArguments += '-RecoverDamagedState' }
   if ($RestartAuthorized) {
     switch ($Operation) {
       'install' { $childArguments += '-CloseRunning' }

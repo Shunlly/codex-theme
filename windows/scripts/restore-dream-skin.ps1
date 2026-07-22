@@ -8,11 +8,13 @@ param(
   [switch]$CloseRunning,
   [switch]$ForceRestart,
   [switch]$NoRelaunch,
+  [switch]$RecoverDamagedState,
   [switch]$AdapterLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
 $PortExplicit = $PSBoundParameters.ContainsKey('Port')
+$EngineRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot 'common-windows.ps1')
 . (Join-Path $PSScriptRoot 'theme-windows.ps1')
 
@@ -66,6 +68,8 @@ function Restore-DreamSkinRecoveryArtifactSnapshot {
 
 $operationLock = $null
 $missingConfigGuard = $null
+$damagedStatePathGuard = $null
+$statePathGuard = $null
 if (-not (Test-DreamSkinAdapterOperationLockOwner -AdapterLockHeld:$AdapterLockHeld)) {
   $operationLock = Enter-DreamSkinOperationLock
 }
@@ -76,21 +80,68 @@ try {
   if ($ForceRestart -and -not $CloseRunning) {
     throw '-ForceRestart requires -CloseRunning.'
   }
+  if ($RecoverDamagedState -and -not ($RestoreBaseTheme -or $RecoverConfigBackup)) {
+    throw '-RecoverDamagedState requires a config restore operation.'
+  }
   Assert-DreamSkinPort -Port $Port
 
   $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   $themePaths = Get-DreamSkinThemePaths -StateRoot $StateRoot
   $StatePath = Join-Path $StateRoot 'state.json'
-  $state = Read-DreamSkinState -Path $StatePath
+  $state = $null
+  $stateArtifactSnapshot = Get-DreamSkinStableFileSnapshot -Path $StatePath -AllowMissing
+  if ($RecoverDamagedState) {
+    if (-not $stateArtifactSnapshot.Exists) {
+      throw '-RecoverDamagedState requires an existing malformed state file.'
+    }
+    $stateReadFailed = $false
+    try {
+      $state = Read-DreamSkinState -Path $StatePath -Bytes $stateArtifactSnapshot.Bytes
+    } catch {
+      $stateReadFailed = $true
+    }
+    if (-not $stateReadFailed -or $null -ne $state) {
+      throw '-RecoverDamagedState is valid only for unreadable or unsupported state.'
+    }
+  } else {
+    if ($stateArtifactSnapshot.Exists) {
+      $state = Read-DreamSkinState -Path $StatePath -Bytes $stateArtifactSnapshot.Bytes
+    }
+  }
+  if (-not $RecoverDamagedState -and -not $stateArtifactSnapshot.Exists) {
+    $statePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)
+    $statePathGuard.AssertUnchanged()
+  }
+  $managedCdpRecovery = $null -ne $state -and $state.schemaVersion -eq 4 -and
+    "$($state.recoveryKind)" -ceq 'managed-cdp'
+  if ($managedCdpRecovery -and $PortExplicit -and [int]$state.port -ne $Port) {
+    throw "The explicit port $Port does not match retained managed CDP recovery port $($state.port)."
+  }
   if (-not $PortExplicit -and $null -ne $state -and $state.port) {
     $Port = [int]$state.port
     Assert-DreamSkinPort -Port $Port
   }
 
-  $currentCodex = $null
-  try { $currentCodex = Get-DreamSkinCodexInstall } catch { Write-Warning $_.Exception.Message }
+  $registeredCodexInstalls = @(Get-DreamSkinRegisteredCodexInstalls)
+  $currentCodex = if ($registeredCodexInstalls.Count -gt 0) { $registeredCodexInstalls[0] } else { $null }
   $savedPathCandidate = Get-DreamSkinCodexStatePathCandidate -State $state
-  $savedCodex = Get-DreamSkinCodexInstallFromState -State $state
+  $savedCodex = Resolve-DreamSkinCodexInstallFromState -State $state -RegisteredInstalls $registeredCodexInstalls
+  $managedRecoveryProcesses = @()
+  $managedCurrentProcesses = @()
+  $managedRecoveryListeners = @()
+  if ($managedCdpRecovery) {
+    if ($null -eq $savedCodex) {
+      throw 'The retained managed CDP recovery identity no longer matches a registered Codex package.'
+    }
+    $managedRecoveryProcesses = @(Get-DreamSkinCodexProcessesStrict -Codex $savedCodex)
+    $managedCurrentProcesses = if ($null -eq $currentCodex -or
+      (Test-DreamSkinPathEqual -Left $currentCodex.Executable -Right $savedCodex.Executable)) {
+      $managedRecoveryProcesses
+    } else {
+      @(Get-DreamSkinCodexProcessesStrict -Codex $currentCodex)
+    }
+    $managedRecoveryListeners = @(Get-DreamSkinPortListenersStrict -Port $Port)
+  }
   $candidateMatchesCurrent = [bool]($null -ne $savedPathCandidate -and $null -ne $currentCodex -and
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.PackageRoot -Right $currentCodex.PackageRoot) -and
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.Executable -Right $currentCodex.Executable))
@@ -103,9 +154,27 @@ try {
   }
   $savedIsDifferent = [bool]($null -ne $savedCodex -and $null -ne $currentCodex -and
     -not (Test-DreamSkinPathEqual -Left $savedCodex.Executable -Right $currentCodex.Executable))
-  $currentRunning = $null -ne $currentCodex -and (Get-DreamSkinCodexProcesses -Codex $currentCodex).Count -gt 0
-  $savedRunning = $null -ne $savedCodex -and (Get-DreamSkinCodexProcesses -Codex $savedCodex).Count -gt 0
-  $savedOwnsPort = $null -ne $savedCodex -and (Test-DreamSkinCodexPortOwner -Port $Port -Codex $savedCodex)
+  $currentRunning = if ($managedCdpRecovery) {
+    $managedCurrentProcesses.Count -gt 0
+  } else {
+    $null -ne $currentCodex -and (Get-DreamSkinCodexProcesses -Codex $currentCodex).Count -gt 0
+  }
+  $damagedRunningCodexInstalls = @()
+  if ($RecoverDamagedState) {
+    $damagedRunningCodexInstalls = @($registeredCodexInstalls | Where-Object {
+      (Get-DreamSkinCodexProcesses -Codex $_).Count -gt 0
+    })
+  }
+  $savedRunning = if ($managedCdpRecovery) {
+    $managedRecoveryProcesses.Count -gt 0
+  } else {
+    $null -ne $savedCodex -and (Get-DreamSkinCodexProcesses -Codex $savedCodex).Count -gt 0
+  }
+  $savedOwnsPort = if ($managedCdpRecovery) {
+    $managedRecoveryListeners.Count -gt 0
+  } else {
+    $null -ne $savedCodex -and (Test-DreamSkinCodexPortOwner -Port $Port -Codex $savedCodex)
+  }
   if ($savedIsDifferent -and $currentRunning -and ($savedRunning -or $savedOwnsPort)) {
     throw 'Multiple Codex package versions are active. Close them manually before restore; state and configuration were preserved.'
   }
@@ -120,8 +189,21 @@ try {
     }
   }
   $relaunchCodex = if ($null -ne $currentCodex) { $currentCodex } else { $codex }
-  $codexRunning = $null -ne $codex -and (Get-DreamSkinCodexProcesses -Codex $codex).Count -gt 0
-  $portOwnedByCodex = $null -ne $codex -and (Test-DreamSkinCodexPortOwner -Port $Port -Codex $codex)
+  $codexRunning = if ($managedCdpRecovery) {
+    if ($null -ne $codex -and $null -ne $currentCodex -and
+      (Test-DreamSkinPathEqual -Left $codex.Executable -Right $currentCodex.Executable)) {
+      $managedCurrentProcesses.Count -gt 0
+    } else {
+      $managedRecoveryProcesses.Count -gt 0
+    }
+  } else {
+    $null -ne $codex -and (Get-DreamSkinCodexProcesses -Codex $codex).Count -gt 0
+  }
+  $portOwnedByCodex = if ($managedCdpRecovery) {
+    $managedRecoveryListeners.Count -gt 0
+  } else {
+    $null -ne $codex -and (Test-DreamSkinCodexPortOwner -Port $Port -Codex $codex)
+  }
   if ($portOwnedByCodex -and -not $codexRunning) {
     throw 'A Codex-owned listener exists without a manageable Codex process; state was preserved.'
   }
@@ -129,7 +211,9 @@ try {
     throw "Port $Port is still active, but Codex ownership cannot be verified. State and configuration were preserved."
   }
 
-  $shouldCloseCodex = $codexRunning
+  $shouldCloseCodex = if ($RecoverDamagedState) {
+    $damagedRunningCodexInstalls.Count -gt 0
+  } else { $codexRunning }
   $restartAuthorized = [bool]$CloseRunning
   if ($shouldCloseCodex -and $PromptRestart) {
     $restartMessage = if ($NoRelaunch) {
@@ -158,7 +242,6 @@ try {
   $restoreAlreadyCommitted = $restoreRequested -and (Test-DreamSkinRestoreCompleted `
     -StateRoot $StateRoot -CompletionEvidence $completionEvidence -BackupPath $backup)
   $artifactSnapshots = @(
-    (Get-DreamSkinRecoveryArtifactSnapshot -Path $StatePath),
     (Get-DreamSkinRecoveryArtifactSnapshot -Path $pausedPath),
     (Get-DreamSkinRecoveryArtifactSnapshot -Path $backup),
     (Get-DreamSkinRecoveryArtifactSnapshot -Path $backupMarkerPath),
@@ -198,19 +281,55 @@ try {
   $currentConfigSnapshot = $null
   $transactionCommitted = $false
   try {
+    if (-not $RecoverDamagedState -and $stateArtifactSnapshot.Exists) {
+      Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $stateArtifactSnapshot
+    }
+    if ($null -ne $statePathGuard) { $statePathGuard.AssertUnchanged() }
+    if ($RecoverDamagedState) {
+      Assert-DreamSkinNoManagedWatcherProcess -EngineRoot $EngineRoot -ScriptsRoot $PSScriptRoot
+      Assert-DreamSkinNoManagedTrayProcess -ScriptsRoot $PSScriptRoot
+    }
     if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     if ($shouldCloseCodex) {
-      Stop-DreamSkinCodex -Codex $codex -AllowForce:$ForceRestart
-      if ($portOwnedByCodex -and -not (Wait-DreamSkinPortAvailable -Port $Port -TimeoutSeconds 5)) {
+      if ($RecoverDamagedState) {
+        foreach ($registeredCodex in $damagedRunningCodexInstalls) {
+          Stop-DreamSkinCodex -Codex $registeredCodex -AllowForce:$ForceRestart
+        }
+      } else {
+        Stop-DreamSkinCodex -Codex $codex -AllowForce:$ForceRestart
+      }
+      if (-not $managedCdpRecovery -and -not $RecoverDamagedState -and $portOwnedByCodex -and
+        -not (Wait-DreamSkinPortAvailable -Port $Port -TimeoutSeconds 5)) {
         throw "Port $Port is still listening after Codex closed; state was preserved for inspection."
       }
     }
+    if ($null -ne $statePathGuard) { $statePathGuard.AssertUnchanged() }
+    if ($managedCdpRecovery) {
+      if ((Get-DreamSkinCodexProcessesStrict -Codex $savedCodex).Count -ne 0) {
+        throw 'The saved Codex process appeared or remained before retained startup recovery mutation.'
+      }
+      if ($null -ne $currentCodex -and
+        -not (Test-DreamSkinPathEqual -Left $currentCodex.Executable -Right $savedCodex.Executable) -and
+        (Get-DreamSkinCodexProcessesStrict -Codex $currentCodex).Count -ne 0) {
+        throw 'The current Codex process appeared or remained before retained startup recovery mutation.'
+      }
+      if ((Get-DreamSkinPortListenersStrict -Port $Port).Count -ne 0) {
+        throw "Port $Port appeared or remained before retained startup recovery mutation."
+      }
+    }
+    if ($RecoverDamagedState) {
+      Assert-DreamSkinNoRegisteredCodexProcessOrListener `
+        -RegisteredInstalls $registeredCodexInstalls -Port $Port
+    }
 
+    if ($null -ne $statePathGuard) { $statePathGuard.AssertUnchanged() }
     Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root
-    Stop-DreamSkinTrayProcess
-    $recordedInjectorStopped = Stop-DreamSkinRecordedInjector -State $state
-    if (-not $recordedInjectorStopped) {
-      Write-Warning 'The recorded injector identity was stale; lifecycle state will be removed only if restore commits.'
+    if (-not $RecoverDamagedState) { Stop-DreamSkinTrayProcess }
+    if (-not $RecoverDamagedState) {
+      $recordedInjectorStopped = Stop-DreamSkinRecordedInjector -State $state
+      if (-not $recordedInjectorStopped) {
+        Write-Warning 'The recorded injector identity was stale; lifecycle state will be removed only if restore commits.'
+      }
     }
 
     if ($RecoverConfigBackup -and -not $restoreAlreadyCommitted) {
@@ -226,13 +345,19 @@ try {
       $currentConfigSnapshot = Get-DreamSkinStableFileSnapshot -Path $config
     }
 
+    if ($RecoverDamagedState) {
+      Assert-DreamSkinNoManagedWatcherProcess -EngineRoot $EngineRoot -ScriptsRoot $PSScriptRoot
+      Assert-DreamSkinNoManagedTrayProcess -ScriptsRoot $PSScriptRoot
+      Assert-DreamSkinNoRegisteredCodexProcessOrListener `
+        -RegisteredInstalls $registeredCodexInstalls -Port $Port
+    }
+
+    if ($null -ne $statePathGuard) { $statePathGuard.AssertUnchanged() }
     if ($restoreRequested -and -not $restoreAlreadyCommitted) {
       if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
       Publish-DreamSkinConfigBackupArchive -BackupPath $backup -ArchivePath $archivePath
       if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     }
-    if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
-    Remove-DreamSkinRecoveryArtifact -Path $StatePath
     if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')
     if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
@@ -244,6 +369,28 @@ try {
       if ($null -ne $missingConfigGuard) { $missingConfigGuard.AssertUnchanged() }
     }
     if ($null -ne $missingConfigGuard) { $missingConfigGuard.Complete() }
+    if ($RecoverDamagedState) {
+      $quarantinedStatePath = Archive-DreamSkinStateFile -Path $StatePath `
+        -ExpectedSnapshot $stateArtifactSnapshot
+      if (-not $quarantinedStatePath) { throw 'Malformed state could not be quarantined.' }
+      $damagedStatePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)
+      $damagedStatePathGuard.AssertUnchanged()
+    }
+    if (-not $RecoverDamagedState -and $stateArtifactSnapshot.Exists) {
+      [DreamSkinConfigNative]::DeleteExpectedFile(
+        $StatePath, $stateArtifactSnapshot.Identity, $stateArtifactSnapshot.Bytes)
+      $statePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)
+      $statePathGuard.AssertUnchanged()
+    }
+    if ($null -ne $statePathGuard) {
+      $statePathGuard.AssertUnchanged()
+      $statePathGuard.Complete()
+      $statePathGuard = $null
+    }
+    if ($null -ne $damagedStatePathGuard) {
+      $damagedStatePathGuard.Complete()
+      $damagedStatePathGuard = $null
+    }
     $transactionCommitted = $true
     if ($restoreRequested) { Write-Host "Archived the completed pre-install backup at $archivePath" }
     if ($Uninstall) { Remove-DreamSkinManagedLegacyShortcuts }
@@ -281,6 +428,8 @@ try {
 
   Write-Host 'Dream Skin restore actions completed; any saved CDP session was closed.'
 } finally {
+  if ($null -ne $statePathGuard) { $statePathGuard.Dispose() }
+  if ($null -ne $damagedStatePathGuard) { $damagedStatePathGuard.Dispose() }
   if ($null -ne $missingConfigGuard) { $missingConfigGuard.Dispose() }
   if ($null -ne $operationLock) { Exit-DreamSkinOperationLock -Mutex $operationLock }
 }

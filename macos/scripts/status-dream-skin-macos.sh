@@ -45,6 +45,12 @@ status_renderer_rollback_is_valid() (
   renderer_rollback_evidence_is_valid
 )
 
+status_renderer_rollback_field() (
+  . "$PROJECT_ROOT/scripts/common-macos.sh" >/dev/null 2>&1 || exit 1
+  renderer_rollback_evidence_is_valid || exit 1
+  renderer_rollback_field "$1"
+)
+
 if [ "$STUDIO_JSON" = "true" ] && studio_operation_is_busy; then
   printf '{"schemaVersion":1,"ok":false,"operation":"%s","state":{"install":"not-installed","codex":"not-installed","session":"official","operation":"busy","themeName":null,"requiresRestart":false,"availableActions":[],"verified":null},"error":{"code":"OPERATION_BUSY","message":"Another Studio operation is already running.","recoveryActions":["retry","cancel"]}}\n' \
     "$OPERATION"
@@ -59,6 +65,7 @@ THEME_NAME=""
 CODEX_RUNNING="false"
 SAVED_BROWSER_ID=""
 ROLLBACK_EVIDENCE_UNSAFE="false"
+ROLLBACK_LAUNCHER=""
 
 read_json_field() {
   # Parse machine-written JSON (one key per line) without python3, which macOS
@@ -166,7 +173,11 @@ if [ -f "$STATE_PATH" ]; then
 fi
 if [ -e "$ROLLBACK_STATE_PATH" ] || [ -L "$ROLLBACK_STATE_PATH" ]; then
   SESSION="stale"
-  status_renderer_rollback_is_valid || ROLLBACK_EVIDENCE_UNSAFE="true"
+  if status_renderer_rollback_is_valid; then
+    ROLLBACK_LAUNCHER="$(status_renderer_rollback_field launcher 2>/dev/null || true)"
+  else
+    ROLLBACK_EVIDENCE_UNSAFE="true"
+  fi
 fi
 
 safe_theme_display_name() {
@@ -232,6 +243,43 @@ studio_strict_verify() {
   )
 }
 
+studio_managed_cdp_is_ready() {
+  local port="$1"
+  local browser_id=""
+  local active_browser_id=""
+  case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  browser_id="$(read_json_field "$STATE_PATH" browserId)"
+  [ -n "$browser_id" ] || return 1
+  (
+    . "$PROJECT_ROOT/scripts/common-macos.sh" >/dev/null 2>&1 || exit 1
+    try_discover_codex_app >/dev/null 2>&1 || exit 1
+    try_validate_codex_app_control_identity >/dev/null 2>&1 || exit 1
+    browser_id_is_valid "$browser_id" || exit 1
+    active_browser_id="$(verified_cdp_browser_id "$port")" || exit 1
+    [ "$active_browser_id" = "$browser_id" ]
+  )
+}
+
+studio_deep_preflight_result() {
+  local configured="${CODEX_APP_BUNDLE:-}"
+  local candidate=""
+  (
+    . "$PROJECT_ROOT/scripts/common-macos.sh" >/dev/null 2>&1 || exit 3
+    if ! try_discover_codex_app >/dev/null 2>&1; then
+      [ -n "${CODEX_BUNDLE:-}" ] && exit 2
+      for candidate in "$configured" \
+        "/Applications/ChatGPT.app" "$HOME/Applications/ChatGPT.app" \
+        "/Applications/Codex.app" "$HOME/Applications/Codex.app"; do
+        [ -n "$candidate" ] || continue
+        { [ -e "$candidate" ] || [ -L "$candidate" ]; } && exit 2
+      done
+      exit 1
+    fi
+    try_validate_codex_app_identity >/dev/null 2>&1 || exit 2
+    try_require_macos_node_runtime >/dev/null 2>&1 || exit 3
+  )
+}
+
 if [ "$DEEP" = "true" ] && [ "$STUDIO_JSON" != "true" ] && studio_strict_verify "$PORT"; then
   CDP_OK="true"
 fi
@@ -259,7 +307,7 @@ installed_engine_is_present() {
 
 installed_engine_is_complete() {
   native_restore_helper_is_safe "$INSTALL_ROOT" \
-    && [ -f "$INSTALL_ROOT/VERSION" ] && /usr/bin/cmp -s "$INSTALL_ROOT/VERSION" "$PROJECT_ROOT/VERSION" \
+    && [ -f "$INSTALL_ROOT/VERSION" ] \
     && [ -x "$INSTALL_ROOT/scripts/studio-adapter-macos.sh" ] \
     && [ -x "$INSTALL_ROOT/scripts/start-dream-skin-macos.sh" ] \
     && [ -x "$INSTALL_ROOT/scripts/pause-dream-skin-macos.sh" ] \
@@ -268,6 +316,30 @@ installed_engine_is_complete() {
     && [ -f "$INSTALL_ROOT/scripts/common-macos.sh" ] \
     && [ -f "$INSTALL_ROOT/scripts/injector.mjs" ] \
     && [ -f "$INSTALL_ROOT/scripts/theme-config.mjs" ]
+}
+
+installed_engine_matches_bundle() {
+  installed_engine_is_complete \
+    && /usr/bin/cmp -s "$INSTALL_ROOT/VERSION" "$PROJECT_ROOT/VERSION"
+}
+
+installed_engine_is_older() {
+  local installed=""
+  local bundled=""
+  installed_engine_is_complete || return 1
+  installed="$(/bin/cat "$INSTALL_ROOT/VERSION" 2>/dev/null)" || return 1
+  bundled="$(/bin/cat "$PROJECT_ROOT/VERSION" 2>/dev/null)" || return 1
+  /usr/bin/awk -v installed="$installed" -v bundled="$bundled" 'BEGIN {
+    installedCount = split(installed, installedParts, ".")
+    bundledCount = split(bundled, bundledParts, ".")
+    if (installedCount != 3 || bundledCount != 3) exit 1
+    for (part = 1; part <= 3; part++) {
+      if (installedParts[part] !~ /^[0-9]+$/ || bundledParts[part] !~ /^[0-9]+$/) exit 1
+      if ((installedParts[part] + 0) < (bundledParts[part] + 0)) exit 0
+      if ((installedParts[part] + 0) > (bundledParts[part] + 0)) exit 1
+    }
+    exit 1
+  }'
 }
 
 if [ "$STUDIO_JSON" = "true" ]; then
@@ -283,21 +355,33 @@ if [ "$STUDIO_JSON" = "true" ]; then
   ERROR="null"
   EXIT_CODE=0
   ENGINE_COMPLETE="false"
+  ENGINE_CURRENT="false"
+  ENGINE_OUTDATED="false"
   ENGINE_PRESENT="false"
+  ENGINE_SESSION_READY="false"
   RESTORE_PROOF_VALID="false"
   LIVE_BACKUP_VALID="false"
+  PREFLIGHT_RESULT=0
 
   if installed_engine_is_complete; then ENGINE_COMPLETE="true"; fi
+  if installed_engine_matches_bundle; then ENGINE_CURRENT="true"; fi
+  if installed_engine_is_older; then ENGINE_OUTDATED="true"; fi
   if installed_engine_is_present; then ENGINE_PRESENT="true"; fi
   if status_theme_backup_is_valid "$RESTORED_THEME_BACKUP_PATH"; then RESTORE_PROOF_VALID="true"; fi
   if status_theme_backup_is_valid "$THEME_BACKUP_PATH"; then LIVE_BACKUP_VALID="true"; fi
   if [ "$ENGINE_COMPLETE" = "true" ] \
     && [ "$LIVE_BACKUP_VALID" = "true" ] \
     && [ -f "$THEME_DIR/theme.json" ] && [ ! -L "$THEME_DIR/theme.json" ]; then
-    INSTALL="ready"
+    ENGINE_SESSION_READY="true"
+    [ "$ENGINE_CURRENT" = "true" ] && INSTALL="ready"
   fi
 
-  if official_codex_bundle_exists; then
+  if [ "$DEEP" = "true" ] && [ "$OPERATION" = "preflight" ]; then
+    studio_deep_preflight_result
+    PREFLIGHT_RESULT="$?"
+  fi
+
+  if { [ "$PREFLIGHT_RESULT" -ge 2 ] 2>/dev/null || official_codex_bundle_exists; }; then
     if [ -f "$HOME/.codex/config.toml" ]; then
       [ "$CODEX_RUNNING" = "true" ] && CODEX="running" || CODEX="stopped"
     else
@@ -310,20 +394,32 @@ if [ "$STUDIO_JSON" = "true" ]; then
     unknown) STUDIO_SESSION="stale" ;;
   esac
   if [ "$STUDIO_SESSION" = "active" ] \
-    && { [ "$INSTALL" != "ready" ] || [ "$CODEX" != "running" ]; }; then
+    && { [ "$ENGINE_SESSION_READY" != "true" ] || [ "$CODEX" != "running" ]; }; then
     STUDIO_SESSION="stale"
   fi
   CDP_OK="false"
-  if [ "$DEEP" = "true" ] && studio_strict_verify "$PORT"; then
-    CDP_OK="true"
+  MANAGED_CDP_READY="false"
+  if [ "$DEEP" = "true" ]; then
+    if studio_managed_cdp_is_ready "$PORT"; then
+      MANAGED_CDP_READY="true"
+      VERIFIED="false"
+    fi
+    if studio_strict_verify "$PORT"; then
+      CDP_OK="true"
+      MANAGED_CDP_READY="true"
+      VERIFIED="true"
+    fi
   fi
-  [ "$CDP_OK" = "true" ] && VERIFIED="true"
   if [ "$CODEX_RUNNING" = "true" ] && [ "$CODEX" != "not-installed" ] \
-    && [ "$VERIFIED" != "true" ]; then
+    && [ "$MANAGED_CDP_READY" != "true" ]; then
     REQUIRES_RESTART="true"
   fi
 
-  if [ "$INSTALL" = "ready" ]; then
+  if [ "$ROLLBACK_LAUNCHER" = "managed-cdp" ] \
+    && [ "$ENGINE_CURRENT" = "true" ] \
+    && [ "$ENGINE_SESSION_READY" = "true" ]; then
+    ACTIONS='["apply","resume","restore","uninstall"]'
+  elif [ "$INSTALL" = "ready" ]; then
     case "$STUDIO_SESSION" in
       active) ACTIONS='["pause","resume","restore","verify","uninstall"]' ;;
       paused) ACTIONS='["apply","resume","restore","verify","uninstall"]' ;;
@@ -336,6 +432,10 @@ if [ "$STUDIO_JSON" = "true" ]; then
         fi
         ;;
       esac
+  elif [ "$ENGINE_OUTDATED" = "true" ] \
+    && [ "$ENGINE_SESSION_READY" = "true" ] \
+    && [ "$STUDIO_SESSION" != "stale" ]; then
+    ACTIONS='["install","restore","uninstall"]'
   elif [ "$LIVE_BACKUP_VALID" = "true" ]; then
     ACTIONS='["restore","uninstall"]'
   elif [ "$ENGINE_PRESENT" = "true" ] && [ "$STUDIO_SESSION" = "stale" ] \
@@ -345,7 +445,11 @@ if [ "$STUDIO_JSON" = "true" ]; then
     && [ ! -e "$STATE_PATH" ] && [ ! -L "$STATE_PATH" ] \
     && [ ! -e "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BACKUP_PATH" ]; then
     if [ "$RESTORE_PROOF_VALID" = "true" ]; then
-      ACTIONS='["install","restore","uninstall"]'
+      if [ "$ENGINE_CURRENT" = "true" ] || [ "$ENGINE_OUTDATED" = "true" ]; then
+        ACTIONS='["install","restore","uninstall"]'
+      else
+        ACTIONS='["restore","uninstall"]'
+      fi
     else
       STUDIO_SESSION="stale"
       ACTIONS='[]'
@@ -372,10 +476,26 @@ if [ "$STUDIO_JSON" = "true" ]; then
     EXIT_CODE=1
     if [ "$ROLLBACK_EVIDENCE_UNSAFE" = "true" ]; then
       ERROR='{"code":"STATE_UNSAFE","message":"Renderer rollback evidence is unsafe or damaged.","recoveryActions":["diagnostics","cancel"]}'
+    elif [ "$ROLLBACK_LAUNCHER" = "managed-cdp" ]; then
+      ERROR='{"code":"STATE_UNSAFE","message":"The managed session needs authorized cleanup before retry.","recoveryActions":["authorize-force-stop","restore","diagnostics","cancel"]}'
     else
       ERROR='{"code":"STATE_UNSAFE","message":"Theme state needs recovery before it can be used.","recoveryActions":["restore","diagnostics","cancel"]}'
     fi
   fi
+  case "$PREFLIGHT_RESULT" in
+    2)
+      OK="false"
+      EXIT_CODE=1
+      ACTIONS='[]'
+      ERROR='{"code":"CODEX_IDENTITY_INVALID","message":"The Codex app identity is invalid.","recoveryActions":["diagnostics","cancel"]}'
+      ;;
+    3)
+      OK="false"
+      EXIT_CODE=1
+      ACTIONS='[]'
+      ERROR='{"code":"RUNTIME_INVALID","message":"The Codex bundled runtime is unavailable.","recoveryActions":["diagnostics","cancel"]}'
+      ;;
+  esac
 
   printf '{"schemaVersion":1,"ok":%s,"operation":"%s","state":{"install":"%s","codex":"%s","session":"%s","operation":"idle","themeName":%s,"requiresRestart":%s,"availableActions":%s,"verified":%s},"error":%s}\n' \
     "$OK" "$(json_escape "$OPERATION")" "$INSTALL" "$CODEX" "$STUDIO_SESSION" \

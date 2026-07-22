@@ -208,6 +208,118 @@ function Get-DreamSkinProcessExecutablePath {
   }
 }
 
+function Assert-DreamSkinNoManagedWatcherProcess {
+  param(
+    [Parameter(Mandatory = $true)][string]$EngineRoot,
+    [Parameter(Mandatory = $true)][string]$ScriptsRoot
+  )
+  $currentNode = [IO.Path]::GetFullPath((Join-Path $EngineRoot 'runtime\node.exe'))
+  $currentInjector = [IO.Path]::GetFullPath((Join-Path $ScriptsRoot 'injector.mjs'))
+  $versionsRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA `
+    'Programs\CodexDreamSkinStudio\versions')).TrimEnd('\')
+  $versionsPrefix = $versionsRoot + '\'
+  $versionedNodeSuffix = 'engine\runtime\node.exe'
+  $versionedInjectorSuffix = 'engine\scripts\injector.mjs'
+  $historicalInjectorSuffix = 'windows\scripts\injector.mjs'
+  $versionedInjectorPattern = '(?i)(?:^|[\s"])' + [regex]::Escape($versionsPrefix) +
+    '[^\\\s"]+\\' + [regex]::Escape($versionedInjectorSuffix) + '(?=$|[\s"])'
+  $historicalInjectorPattern = '(?i)(?:^|[\s"])[^"\r\n]*\\' +
+    [regex]::Escape($historicalInjectorSuffix) + '(?=$|[\s"])'
+
+  $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction Stop)
+  foreach ($process in $processes) {
+    $processPath = Get-DreamSkinProcessExecutablePath -ProcessInfo $process
+    $commandLine = "$($process.CommandLine)"
+    if (-not $processPath -or -not $commandLine) {
+      throw 'A Node process cannot be inspected well enough to exclude a Dream Skin watcher. No process was stopped.'
+    }
+
+    try {
+      $fullProcessPath = [IO.Path]::GetFullPath($processPath)
+    } catch {
+      throw 'A Node process path cannot be validated well enough to exclude a Dream Skin watcher. No process was stopped.'
+    }
+    $managedNode = Test-DreamSkinPathEqual -Left $fullProcessPath -Right $currentNode
+    if (-not $managedNode -and
+      $fullProcessPath.StartsWith($versionsPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      $relative = $fullProcessPath.Substring($versionsPrefix.Length)
+      $parts = @($relative -split '\\')
+      $managedNode = $parts.Count -eq 4 -and $parts[0] -notin @('', '.', '..') -and
+        (($parts[1..3] -join '\').Equals($versionedNodeSuffix, [StringComparison]::OrdinalIgnoreCase))
+    }
+
+    $managedInjector = (Test-DreamSkinCommandLineToken -CommandLine $commandLine -Token $currentInjector) -or
+      [regex]::IsMatch($commandLine, $versionedInjectorPattern)
+    $historicalWatcher = [regex]::IsMatch($commandLine, $historicalInjectorPattern) -and
+      (Test-DreamSkinCommandLineToken -CommandLine $commandLine -Token '--watch')
+    if ($managedNode -or $managedInjector -or $historicalWatcher) {
+      throw 'A possible Dream Skin watcher is still running. Close it before retrying recovery; no process was stopped.'
+    }
+  }
+}
+
+function Assert-DreamSkinNoRegisteredCodexProcessOrListener {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$RegisteredInstalls,
+    [Parameter(Mandatory = $true)][int]$Port
+  )
+  $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction Stop)
+  foreach ($process in $processes) {
+    $processPath = Get-DreamSkinProcessExecutablePath -ProcessInfo $process
+    if (-not $processPath) {
+      throw 'A Codex process cannot be inspected well enough to prove damaged-state recovery safe.'
+    }
+    foreach ($install in $RegisteredInstalls) {
+      if (Test-DreamSkinPathEqual -Left $processPath -Right "$($install.Executable)") {
+        throw 'A registered Codex process remains during damaged-state recovery.'
+      }
+    }
+    throw 'An unregistered ChatGPT process remains during damaged-state recovery.'
+  }
+  foreach ($install in $RegisteredInstalls) {
+    if ((Get-DreamSkinCodexProcesses -Codex $install).Count -gt 0) {
+      throw 'A registered Codex process remains during damaged-state recovery.'
+    }
+  }
+  if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+    throw 'Get-NetTCPConnection is required to prove listener absence during damaged-state recovery.'
+  }
+  $connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop)
+  $listeners = @($connections | Where-Object { [int]$_.LocalPort -eq $Port })
+  if ($listeners.Count -gt 0) {
+    throw "Port $Port still has a listener during damaged-state recovery."
+  }
+}
+
+function Assert-DreamSkinNoManagedTrayProcess {
+  param([Parameter(Mandatory = $true)][string]$ScriptsRoot)
+  $currentTray = [IO.Path]::GetFullPath((Join-Path $ScriptsRoot 'tray-dream-skin.ps1'))
+  $versionsRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA `
+    'Programs\CodexDreamSkinStudio\versions')).TrimEnd('\')
+  $versionsPrefix = $versionsRoot + '\'
+  $versionedTraySuffix = 'engine\scripts\tray-dream-skin.ps1'
+  $historicalTraySuffix = 'windows\scripts\tray-dream-skin.ps1'
+  $versionedTrayPattern = '(?i)(?:^|[\s"])' + [regex]::Escape($versionsPrefix) +
+    '[^\\\s"]+\\' + [regex]::Escape($versionedTraySuffix) + '(?=$|[\s"])'
+  $historicalTrayPattern = '(?i)(?:^|[\s"])[^"\r\n]*\\' +
+    [regex]::Escape($historicalTraySuffix) + '(?=$|[\s"])'
+  $processes = @(Get-CimInstance Win32_Process `
+    -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" -ErrorAction Stop)
+  foreach ($process in $processes) {
+    $processPath = Get-DreamSkinProcessExecutablePath -ProcessInfo $process
+    $commandLine = "$($process.CommandLine)"
+    if (-not $processPath -or -not $commandLine) {
+      throw 'A PowerShell process cannot be inspected well enough to exclude a Dream Skin tray.'
+    }
+    $managedTray = (Test-DreamSkinCommandLineToken -CommandLine $commandLine -Token $currentTray) -or
+      [regex]::IsMatch($commandLine, $versionedTrayPattern) -or
+      [regex]::IsMatch($commandLine, $historicalTrayPattern)
+    if ($managedTray) {
+      throw 'A possible Dream Skin tray process remains during damaged-state recovery.'
+    }
+  }
+}
+
 function Get-DreamSkinNodeRuntime {
   param([int]$MinimumMajor = 22, [string]$NodePath, [string]$ExpectedVersion)
 
@@ -410,6 +522,15 @@ function Get-DreamSkinPortListeners {
   return @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
 }
 
+function Get-DreamSkinPortListenersStrict {
+  param([int]$Port)
+  if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+    throw 'Get-NetTCPConnection is required to prove CDP listener absence.'
+  }
+  $connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop)
+  return @($connections | Where-Object { [int]$_.LocalPort -eq $Port })
+}
+
 function Test-DreamSkinPortAvailable {
   param([int]$Port)
   return (Get-DreamSkinPortListeners -Port $Port).Count -eq 0
@@ -470,10 +591,18 @@ function Wait-DreamSkinPortAvailable {
 }
 
 function Read-DreamSkinState {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [byte[]]$Bytes
+  )
+  if (-not $PSBoundParameters.ContainsKey('Bytes') -and -not (Test-Path -LiteralPath $Path)) { return $null }
   try {
-    $state = (Read-DreamSkinUtf8File -Path $Path) | ConvertFrom-Json -ErrorAction Stop
+    $content = if ($PSBoundParameters.ContainsKey('Bytes')) {
+      ConvertFrom-DreamSkinUtf8Bytes -Bytes $Bytes -Path $Path
+    } else {
+      Read-DreamSkinUtf8File -Path $Path
+    }
+    $state = $content | ConvertFrom-Json -ErrorAction Stop
     if ($null -eq $state -or $state -is [string] -or $state -is [array]) { throw 'State root must be an object.' }
     $properties = @($state.PSObject.Properties.Name)
     if ($properties -contains 'platform' -and "$($state.platform)" -ine 'windows') {
@@ -483,18 +612,25 @@ function Read-DreamSkinState {
     if ($properties -contains 'schemaVersion') {
       $schemaVersion = 0
       if (-not [int]::TryParse("$($state.schemaVersion)", [ref]$schemaVersion) -or
-        $schemaVersion -lt 1 -or $schemaVersion -gt 3) {
+        $schemaVersion -lt 1 -or $schemaVersion -gt 4) {
         throw 'State schema is not supported.'
       }
     }
     if ($schemaVersion -ge 3) {
-      foreach ($required in @(
-        'platform', 'port', 'injectorPid', 'injectorStartedAt', 'injectorPath', 'nodePath',
-        'codexExe', 'codexPackageRoot', 'codexPackageFullName', 'codexPackageFamilyName', 'browserId'
-      )) {
+      $requiredFields = if ($schemaVersion -eq 4) {
+        @('platform', 'recoveryKind', 'port', 'codexExe', 'codexPackageRoot',
+          'codexPackageFullName', 'codexPackageFamilyName')
+      } else {
+        @('platform', 'port', 'injectorPid', 'injectorStartedAt', 'injectorPath', 'nodePath',
+          'codexExe', 'codexPackageRoot', 'codexPackageFullName', 'codexPackageFamilyName', 'browserId')
+      }
+      foreach ($required in $requiredFields) {
         if ($properties -notcontains $required -or -not $state.$required) {
-          throw "State schema 3 is missing required field: $required"
+          throw "State schema $schemaVersion is missing required field: $required"
         }
+      }
+      if ($schemaVersion -eq 4 -and "$($state.recoveryKind)" -cne 'managed-cdp') {
+        throw 'State schema 4 recovery kind is invalid.'
       }
     }
     if ($properties -contains 'port') {
@@ -525,12 +661,26 @@ function Write-DreamSkinState {
 }
 
 function Archive-DreamSkinStateFile {
-  param([Parameter(Mandatory = $true)][string]$Path)
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [object]$ExpectedSnapshot
+  )
   if (-not (Test-Path -LiteralPath $Path)) { return $null }
   $directory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($Path))
   $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
   $archivePath = Join-Path $directory "state.stale-$stamp-$([guid]::NewGuid().ToString('N')).json"
-  Move-Item -LiteralPath $Path -Destination $archivePath -ErrorAction Stop
+  if ($PSBoundParameters.ContainsKey('ExpectedSnapshot')) {
+    $normalizedPath = [DreamSkinConfigNative]::NormalizePath($Path)
+    $normalizedSnapshotPath = [DreamSkinConfigNative]::NormalizePath("$($ExpectedSnapshot.FullPath)")
+    if (-not $normalizedPath.Equals($normalizedSnapshotPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw 'Dream Skin state snapshot path does not match the quarantine source.'
+    }
+    Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $ExpectedSnapshot
+    [DreamSkinConfigNative]::QuarantineExpectedFile(
+      $Path, $archivePath, $ExpectedSnapshot.Identity, $ExpectedSnapshot.Bytes)
+  } else {
+    Move-Item -LiteralPath $Path -Destination $archivePath -ErrorAction Stop
+  }
   return $archivePath
 }
 
@@ -547,7 +697,7 @@ function Stop-DreamSkinRecordedInjector {
   param([AllowNull()][object]$State)
   if ($null -eq $State -or -not $State.injectorPid) { return $true }
   $processId = [int]$State.injectorPid
-  $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop
   if (-not $process) { return $true }
 
   $expectedInjector = if ($State.injectorPath) {
@@ -601,6 +751,19 @@ function Get-DreamSkinCodexProcesses {
       $processPath = Get-DreamSkinProcessExecutablePath -ProcessInfo $_
       Test-DreamSkinPathEqual -Left $processPath -Right $Codex.Executable
     })
+}
+
+function Get-DreamSkinCodexProcessesStrict {
+  param([Parameter(Mandatory = $true)][object]$Codex)
+  $matches = @()
+  foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction Stop)) {
+    $processPath = Get-DreamSkinProcessExecutablePath -ProcessInfo $process
+    if (-not $processPath) {
+      throw 'A Codex process cannot be inspected well enough to prove startup cleanup.'
+    }
+    if (Test-DreamSkinPathEqual -Left $processPath -Right $Codex.Executable) { $matches += $process }
+  }
+  return @($matches)
 }
 
 function Stop-DreamSkinCodex {

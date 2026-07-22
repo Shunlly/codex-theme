@@ -19,6 +19,9 @@
 - Config install/restore rejects aliased, dotted, inline, nested, and array-table appearance structures without changing config or deleting recovery data.
 - Studio and advanced shell entries share one stale-recoverable per-user lifecycle lock. Concurrent operations return `OPERATION_BUSY`, and normal Quit or window close is disabled while a mutation is active.
 - Active sessions without a verified watcher are reported stale, install upgrades discard verified-stopped watcher state, and progress messages use `DREAM_SKIN_PROGRESS=<value>` consistently.
+- Failed strict Apply keeps Browser-ID/port recovery authority until Codex and its managed listener are proven closed; Complete Restore now applies the same fail-closed listener gate to ordinary and rollback state before touching watcher, backup, or config bytes.
+- Engine upgrades retain the prior installation and exact config/backup evidence until in-place initialization commits, and uninstall removes only regular Desktop launchers bearing the exact installer ownership header.
+- Paused sessions with a matching managed endpoint resume without a restart while renderer verification remains strict; safe older engines expose Install, and deep preflight distinguishes invalid Codex identity from an invalid bundled runtime.
 - Ad-hoc Studio builds now use labeled names and a dedicated `release/adhoc` manifest; canonical app/DMG names are reserved for verified notarized output under `release/notarized`.
 
 ### Verification

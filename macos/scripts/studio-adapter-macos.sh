@@ -166,14 +166,24 @@ recovery_artifact_is_available() {
     || { status_has_action uninstall && restored_theme_backup_is_valid; }
     }
 }
+codex_control_identity_is_valid() (
+  try_discover_codex_app >/dev/null 2>&1 \
+    && try_validate_codex_app_control_identity >/dev/null 2>&1
+)
 if [ "$status_exit" -ne 0 ] && [ -n "$status_error" ]; then
   case "$OPERATION:$status_error:$status_install" in
-    install:STATE_UNSAFE:not-installed) ;;
+    install:STATE_UNSAFE:not-installed)
+      status_has_action install || { printf '%s\n' "$STATUS_JSON"; exit 1; }
+      ;;
     restore:STATE_UNSAFE:*|restore:CODEX_NOT_INSTALLED:*|restore:CODEX_FIRST_RUN_REQUIRED:*)
       recovery_artifact_is_available || { printf '%s\n' "$STATUS_JSON"; exit 1; }
       ;;
     uninstall:STATE_UNSAFE:*|uninstall:CODEX_NOT_INSTALLED:*|uninstall:CODEX_FIRST_RUN_REQUIRED:*)
       recovery_artifact_is_available || { printf '%s\n' "$STATUS_JSON"; exit 1; }
+      ;;
+    apply:STATE_UNSAFE:*|resume:STATE_UNSAFE:*)
+      [ "$FORCE_AUTHORIZED" = "true" ] && status_has_action "$OPERATION" \
+        || { printf '%s\n' "$STATUS_JSON"; exit 1; }
       ;;
     *) printf '%s\n' "$STATUS_JSON"; exit 1 ;;
   esac
@@ -200,14 +210,18 @@ case "$OPERATION" in
   restore)
     progress="restoring"; command_root="$status_root"; args=(--restore-base-theme)
     case "$codex_state:$requires_restart" in
-      running:*|stopped:*|needs-first-run:true) args+=(--restart-codex) ;;
+      running:*|stopped:*|needs-first-run:true)
+        codex_control_identity_is_valid && args+=(--restart-codex)
+        ;;
     esac
     ;;
   verify) progress="verifying"; command_root="$INSTALL_ROOT"; args=(--reload) ;;
   uninstall)
     progress="uninstalling"; command_root="$status_root"; args=(--restore-base-theme)
     case "$codex_state:$requires_restart" in
-      running:*|stopped:*|needs-first-run:true) args+=(--restart-codex) ;;
+      running:*|stopped:*|needs-first-run:true)
+        codex_control_identity_is_valid && args+=(--restart-codex)
+        ;;
     esac
     args+=(--uninstall)
     ;;
@@ -253,7 +267,7 @@ fi
 command_exit="$?"
 set -e
 if [ "$command_exit" -ne 0 ]; then
-  if /usr/bin/grep -Eqi 'identity does not match|state is damaged|identity is incomplete|state was preserved' "$OPERATION_LOG"; then
+  if /usr/bin/grep -Eqi 'identity does not match|state is damaged|identity is incomplete|state was preserved|Saved lifecycle state has no trustworthy managed listener port' "$OPERATION_LOG"; then
     emit_error STATE_UNSAFE "Theme state needs recovery before it can be used." '["restore","diagnostics","cancel"]'
   elif /usr/bin/grep -Fqi 'Codex did not close within 15 seconds; explicit restart authorization is required for a forced stop.' "$OPERATION_LOG"; then
     emit_error FORCE_STOP_REQUIRED "Codex must close before the theme can be applied." '["authorize-force-stop","cancel"]'
@@ -293,10 +307,7 @@ if [ "$OPERATION" = "uninstall" ]; then
   (
     set -e
     /bin/rm -rf "$INSTALL_ROOT"
-    /bin/rm -f "$HOME/Desktop/Codex Dream Skin.command"
-    /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Customize.command"
-    /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Verify.command"
-    /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Restore.command"
+    remove_managed_macos_launchers
     if [ "$DELETE_USER_THEMES" = "true" ]; then
       /bin/rm -rf "$STATE_ROOT/themes" "$STATE_ROOT/images" "$STATE_ROOT/theme"
     fi

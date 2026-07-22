@@ -767,7 +767,7 @@ run_adapter status
 [ "$ADAPTER_EXIT" -eq 0 ] || { printf 'restored partial-engine status failed.\n' >&2; exit 1; }
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
-  if (value.state.availableActions.join(",") !== "install,restore,uninstall") process.exit(1);
+  if (value.state.availableActions.join(",") !== "restore,uninstall") process.exit(1);
 ' "$ADAPTER_JSON"
 
 /bin/rm -f "$STATE_ROOT/theme-backup.restored.json"
@@ -893,7 +893,8 @@ write_status() {
 
 make_stub() {
   local path="$1"
-  /usr/bin/sed "s|__MARKER__|$MARKER|g; s|__STATUS__|$STATUS_FIXTURE|g" > "$path" <<'STUB'
+  local temporary="$path.next"
+  /usr/bin/sed "s|__MARKER__|$MARKER|g; s|__STATUS__|$STATUS_FIXTURE|g" > "$temporary" <<'STUB'
 #!/bin/bash
 set -euo pipefail
 name="$(/usr/bin/basename "$0")"
@@ -913,18 +914,21 @@ else
   fi
 fi
 STUB
-  /bin/chmod 755 "$path"
+  /bin/chmod 755 "$temporary"
+  /bin/mv "$temporary" "$path"
 }
 
 make_failure_stub() {
   local path="$1"
   local message="$2"
-  /usr/bin/sed "s|__MESSAGE__|$message|g" > "$path" <<'STUB'
+  local temporary="$path.next"
+  /usr/bin/sed "s|__MESSAGE__|$message|g" > "$temporary" <<'STUB'
 #!/bin/bash
 printf '%s\n' '__MESSAGE__' >&2
 exit 1
 STUB
-  /bin/chmod 755 "$path"
+  /bin/chmod 755 "$temporary"
+  /bin/mv "$temporary" "$path"
 }
 
 for root in "$BUNDLED" "$INSTALLED"; do
@@ -1130,9 +1134,13 @@ try_validate_codex_app_identity() { CODEX_APP_VALIDATED=true; }
 try_require_macos_node_runtime() { NODE="$SCRIPT_DIR/node-stub"; NODE_RUNTIME_VALIDATED=true; }
 ensure_state_root() { printf 'ensure\n' >> "__MARKER__"; }
 state_field() { printf '9341\n'; }
+browser_id_is_valid() { [ -n "$1" ]; }
 codex_is_running() { return 0; }
 verified_cdp_endpoint() { return 1; }
-verified_cdp_browser_id() { return 1; }
+verified_cdp_browser_id() {
+  [ "${DREAM_SKIN_TEST_LIVE_CDP:-false}" = true ] && printf 'Browser-A\n'
+}
+saved_managed_listener_is_absent() { return 0; }
 stop_codex() { printf 'stop:%s\n' "$1" >> "__MARKER__"; }
 stop_recorded_injector() { printf 'injector\n' >> "__MARKER__"; }
 release_codex_launchd_job() { printf 'release\n' >> "__MARKER__"; }
@@ -1147,6 +1155,11 @@ live_theme_backup_is_valid() { [ -f "$THEME_BACKUP_PATH" ] && [ ! -L "$THEME_BAC
 restored_theme_backup_is_valid() { [ -f "$RESTORED_THEME_BACKUP_PATH" ]; }
 clear_renderer_rollback_evidence() { /bin/rm -f "$ROLLBACK_STATE_PATH"; }
 STUB
+/usr/bin/sed -n \
+  -e '/^managed_macos_launcher_is_owned() {$/,/^}$/p' \
+  -e '/^restore_quarantined_macos_launcher() {$/,/^}$/p' \
+  -e '/^remove_managed_macos_launchers() {$/,/^}$/p' \
+  "$ROOT/scripts/common-macos.sh" >> "$RESTORE_REAL/scripts/common-macos.sh"
 /usr/bin/sed > "$RESTORE_REAL/scripts/node-stub" <<'STUB'
 #!/bin/bash
 set -euo pipefail
@@ -1187,6 +1200,19 @@ set -e
 [ ! -e "$RESTORE_REAL_HOME/state/state.json" ]
 [ ! -e "$RESTORE_REAL_HOME/state/theme-backup.json" ]
 [ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'backup sentinel' ]
+
+# A live verified CDP endpoint without ordinary or rollback state must not
+# expand an uninitialized saved port before restore can proceed.
+/usr/bin/printf 'config sentinel\n' > "$RESTORE_REAL_HOME/.codex/config.toml"
+/usr/bin/printf 'no-state backup\n' > "$RESTORE_REAL_HOME/state/theme-backup.json"
+/bin/rm -f "$RESTORE_REAL_HOME/state/state.json" "$RESTORE_REAL_HOME/state/rollback.json"
+/usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
+  DREAM_SKIN_TEST_LIVE_CDP=true \
+  "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme \
+  --restart-codex --restart-authorized \
+  >/dev/null
+[ ! -e "$RESTORE_REAL_HOME/state/theme-backup.json" ]
+[ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'no-state backup' ]
 
 # State cleanup failure must retain the live recovery backup and be retryable.
 /usr/bin/printf 'state sentinel\n' > "$RESTORE_REAL_HOME/state/state.json"
@@ -1254,9 +1280,23 @@ set -e
 [ ! -e "$RESTORE_REAL_HOME/state/theme-backup.json" ] || { printf 'completed restore retained its live backup after relaunch failure.\n' >&2; exit 1; }
 [ "$(/bin/cat "$RESTORE_REAL_HOME/state/theme-backup.restored.json")" = 'backup sentinel' ]
 
+/bin/mkdir -p "$RESTORE_REAL_HOME/Desktop"
+/usr/bin/printf '%s\n' '#!/bin/bash' '# CodexDreamSkinStudio launcher' 'set -e' \
+  > "$RESTORE_REAL_HOME/Desktop/Codex Dream Skin.command"
+/usr/bin/printf '%s\n' '#!/bin/bash' '# user-owned launcher' 'set -e' \
+  '# CodexDreamSkinStudio launcher' \
+  > "$RESTORE_REAL_HOME/Desktop/Codex Dream Skin - Customize.command"
+/usr/bin/printf 'direct symlink target\n' > "$RESTORE_REAL/direct-launcher-target"
+/bin/ln -s "$RESTORE_REAL/direct-launcher-target" \
+  "$RESTORE_REAL_HOME/Desktop/Codex Dream Skin - Verify.command"
 /usr/bin/env HOME="$RESTORE_REAL_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
   "$RESTORE_REAL/scripts/restore-dream-skin-macos.sh" --restore-base-theme --restart-codex --uninstall --restart-authorized \
   >/dev/null
+[ ! -e "$RESTORE_REAL_HOME/Desktop/Codex Dream Skin.command" ]
+[ -f "$RESTORE_REAL_HOME/Desktop/Codex Dream Skin - Customize.command" ]
+[ -L "$RESTORE_REAL_HOME/Desktop/Codex Dream Skin - Verify.command" ]
+[ "$(/bin/cat "$RESTORE_REAL/direct-launcher-target")" = 'direct symlink target' ]
+[ ! -e "$RESTORE_REAL_HOME/Desktop/Codex Dream Skin - Restore.command" ]
 
 # Restore and uninstall must stay adapter-to-native-helper complete when the
 # installed engine is partial and every Node candidate is unavailable or unsafe.
@@ -1268,6 +1308,7 @@ RECOVERY_STATE="$RECOVERY_HOME/Library/Application Support/CodexDreamSkinStudio"
 RECOVERY_CONFIG="$RECOVERY_HOME/.codex/config.toml"
 RECOVERY_BACKUP="$RECOVERY_STATE/theme-backup.json"
 RECOVERY_NODE_MARKER="$RECOVERY_FIXTURE/node-executed"
+RECOVERY_LISTENER_MARKER="$RECOVERY_FIXTURE/listener-gate.log"
 /bin/mkdir -p "$RECOVERY_BUNDLED/bin" "$RECOVERY_BUNDLED/scripts" "$RECOVERY_HOME/.codex" "$RECOVERY_STATE"
 /bin/cp "$ROOT/VERSION" "$RECOVERY_BUNDLED/VERSION"
 /bin/cp "$ROOT/bin/dream-skin-config-restore" "$RECOVERY_BUNDLED/bin/"
@@ -1278,7 +1319,7 @@ NO_NODE_CANDIDATE="$RECOVERY_FIXTURE/no-candidate"
   -e "s|/Applications/Codex.app/Contents/Resources/cua_node/bin/node|$NO_NODE_CANDIDATE|g" \
   "$ROOT/scripts/studio-adapter-macos.sh" > "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh"
 /bin/cp "$ROOT/scripts/common-macos.sh" "$RECOVERY_BUNDLED/scripts/common-production-macos.sh"
-/usr/bin/sed "s|__ROOT__|$RECOVERY_BUNDLED|g; s|__HOME__|$RECOVERY_HOME|g" \
+/usr/bin/sed "s|__ROOT__|$RECOVERY_BUNDLED|g; s|__HOME__|$RECOVERY_HOME|g; s|__FIXTURE__|$RECOVERY_FIXTURE|g" \
   > "$RECOVERY_BUNDLED/scripts/common-macos.sh" <<'STUB'
 #!/bin/bash
 set -euo pipefail
@@ -1288,11 +1329,26 @@ try_discover_codex_app() {
   CODEX_APP_VALIDATED="false"
   CODEX_APP_CONTROL_VALIDATED="false"
   NODE_RUNTIME_VALIDATED="false"
+  if [ "${RECOVERY_DISCOVERY_SUCCEEDS:-false}" = true ]; then
+    CODEX_BUNDLE="__FIXTURE__/Codex.app"
+    CODEX_EXE="$CODEX_BUNDLE/Contents/MacOS/Codex"
+    CODEX_VERSION=fixture
+    return 0
+  fi
   return 1
 }
 try_validate_codex_app_identity() { return 1; }
 try_validate_codex_app_control_identity() { return 1; }
 try_require_macos_node_runtime() { return 1; }
+listener_pids() {
+  /usr/bin/printf '%s:%s\n' "$1" "${RECOVERY_LISTENER_MODE:-absent}" >> "__FIXTURE__/listener-gate.log"
+  case "${RECOVERY_LISTENER_MODE:-absent}" in
+    absent) return 0 ;;
+    present) printf '4242\n' ;;
+    uncertain) return 1 ;;
+    *) return 1 ;;
+  esac
+}
 STUB
 /usr/bin/sed > "$RECOVERY_BUNDLED/scripts/status-dream-skin-macos.sh" <<'STUB'
 #!/bin/bash
@@ -1345,10 +1401,29 @@ STUB
 /bin/chmod 700 "$TAMPERED_NODE"
 
 recreate_native_recovery() {
+  local state_case="${1:-missing-browser}"
   /bin/mkdir -p "$RECOVERY_INSTALLED" "$RECOVERY_STATE"
+  /bin/rm -f "$RECOVERY_STATE/theme-backup.restored.json" "$RECOVERY_LISTENER_MARKER"
   /usr/bin/printf 'partial engine\n' > "$RECOVERY_INSTALLED/partial"
   /usr/bin/printf '[desktop]\nappearanceTheme = "dark"\n' > "$RECOVERY_CONFIG"
-  /usr/bin/printf '{damaged state\n' > "$RECOVERY_STATE/state.json"
+  case "$state_case" in
+    missing-browser)
+      /usr/bin/printf '{"port":19473,"session":"paused","injectorPid":"damaged"}\n' \
+        > "$RECOVERY_STATE/state.json"
+      ;;
+    invalid-browser)
+      /usr/bin/printf '{"port":19473,"browserId":"bad id","session":"paused","injectorPid":"damaged"}\n' \
+        > "$RECOVERY_STATE/state.json"
+      ;;
+    no-port)
+      /usr/bin/printf '{"session":"paused","injectorPid":"damaged"}\n' \
+        > "$RECOVERY_STATE/state.json"
+      ;;
+    malformed)
+      /usr/bin/printf '{malformed\n' > "$RECOVERY_STATE/state.json"
+      ;;
+    *) return 1 ;;
+  esac
   "$NODE" -e '
     const fs = require("node:fs");
     fs.writeFileSync(process.argv[1], `${JSON.stringify({
@@ -1399,9 +1474,84 @@ for watcher_protocol in 2 3; do
   RECOVERY_WATCHER_PID=""
 done
 
+# Malformed ordinary state must retain any trustworthy port independently of
+# Browser identity and fail before mutation when listener absence is uncertain.
+for recovery_case in missing-browser:present invalid-browser:uncertain no-port:absent; do
+  state_case="${recovery_case%%:*}"
+  listener_mode="${recovery_case##*:}"
+  recreate_native_recovery "$state_case"
+  RECOVERY_ARTIFACTS_BEFORE="$(/usr/bin/shasum -a 256 \
+    "$RECOVERY_CONFIG" "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")"
+  set +e
+  /usr/bin/env HOME="$RECOVERY_HOME" NODE="$RECOVERY_FIXTURE/missing-node" \
+    RECOVERY_LISTENER_MODE="$listener_mode" \
+    "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+    > "$RECOVERY_FIXTURE/malformed-$state_case-$listener_mode.json" \
+    2> "$RECOVERY_FIXTURE/malformed-$state_case-$listener_mode.stderr"
+  RECOVERY_MALFORMED_EXIT="$?"
+  set -e
+  [ "$RECOVERY_MALFORMED_EXIT" -eq 1 ] || {
+    printf '%s/%s malformed-state recovery did not fail closed.\n' \
+      "$state_case" "$listener_mode" >&2
+    exit 1
+  }
+  [ "$RECOVERY_ARTIFACTS_BEFORE" = "$(/usr/bin/shasum -a 256 \
+    "$RECOVERY_CONFIG" "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")" ] || {
+    printf '%s/%s malformed-state recovery changed protected artifacts.\n' \
+      "$state_case" "$listener_mode" >&2
+    exit 1
+  }
+  if [ "$state_case" = no-port ]; then
+    [ ! -e "$RECOVERY_LISTENER_MARKER" ] \
+      || { printf 'portless recovery invoked a listener gate without port authority.\n' >&2; exit 1; }
+  else
+    /usr/bin/grep -Fx "19473:$listener_mode" "$RECOVERY_LISTENER_MARKER" >/dev/null \
+      || { printf '%s recovery skipped the production saved-listener gate.\n' "$state_case" >&2; exit 1; }
+  fi
+done
+
+# A syntactically malformed ordinary state is not a damaged valid record: it
+# must fail through the adapter before changing config, state, or backup bytes.
+recreate_native_recovery malformed
+RECOVERY_MALFORMED_BEFORE="$(/usr/bin/shasum -a 256 \
+  "$RECOVERY_CONFIG" "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")"
+set +e
+/usr/bin/env HOME="$RECOVERY_HOME" NODE="$RECOVERY_FIXTURE/missing-node" \
+  RECOVERY_LISTENER_MODE=absent \
+  "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+  > "$RECOVERY_FIXTURE/malformed-ordinary.json" \
+  2> "$RECOVERY_FIXTURE/malformed-ordinary.stderr"
+RECOVERY_MALFORMED_EXIT="$?"
+set -e
+[ "$RECOVERY_MALFORMED_EXIT" -eq 1 ] \
+  || { printf 'syntactically malformed ordinary state did not fail closed.\n' >&2; exit 1; }
+[ "$RECOVERY_MALFORMED_BEFORE" = "$(/usr/bin/shasum -a 256 \
+  "$RECOVERY_CONFIG" "$RECOVERY_STATE/state.json" "$RECOVERY_BACKUP")" ] \
+  || { printf 'syntactically malformed ordinary state changed protected artifacts.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (value.error?.code !== "STATE_UNSAFE") process.exit(1);
+' "$RECOVERY_FIXTURE/malformed-ordinary.json"
+[ ! -e "$RECOVERY_LISTENER_MARKER" ] \
+  || { printf 'malformed ordinary state invoked a listener gate without port authority.\n' >&2; exit 1; }
+
+recreate_native_recovery invalid-browser
+set +e
+/usr/bin/env HOME="$RECOVERY_HOME" NODE="$RECOVERY_FIXTURE/missing-node" \
+  RECOVERY_LISTENER_MODE=absent \
+  "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+  > "$RECOVERY_FIXTURE/invalid-browser-absent.json" \
+  2> "$RECOVERY_FIXTURE/invalid-browser-absent.stderr"
+RECOVERY_INVALID_ABSENT_EXIT="$?"
+set -e
+[ "$RECOVERY_INVALID_ABSENT_EXIT" -eq 0 ] \
+  || { printf 'invalid-Browser recovery did not accept proven listener absence.\n' >&2; exit 1; }
+/usr/bin/grep -Fx '19473:absent' "$RECOVERY_LISTENER_MARKER" >/dev/null \
+  || { printf 'invalid-Browser recovery skipped the production saved-listener gate.\n' >&2; exit 1; }
+
 for recovery_operation in restore uninstall; do
   for node_case in missing non-executable tampered; do
-    recreate_native_recovery
+    recreate_native_recovery missing-browser
     /bin/rm -f "$RECOVERY_NODE_MARKER"
     case "$node_case" in
       missing) RECOVERY_NODE="$RECOVERY_FIXTURE/missing-node" ;;
@@ -1410,6 +1560,7 @@ for recovery_operation in restore uninstall; do
     esac
     set +e
     /usr/bin/env HOME="$RECOVERY_HOME" NODE="$RECOVERY_NODE" \
+      RECOVERY_LISTENER_MODE=absent \
       "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" "$recovery_operation" \
       > "$RECOVERY_FIXTURE/$recovery_operation-$node_case.json" \
       2> "$RECOVERY_FIXTURE/$recovery_operation-$node_case.stderr"
@@ -1429,8 +1580,55 @@ for recovery_operation in restore uninstall; do
     [ ! -e "$RECOVERY_BACKUP" ]
     [ -f "$RECOVERY_STATE/theme-backup.restored.json" ]
     [ ! -e "$RECOVERY_NODE_MARKER" ] || { printf 'unsafe Node was executed during native recovery.\n' >&2; exit 1; }
+    /usr/bin/grep -Fx '19473:absent' "$RECOVERY_LISTENER_MARKER" >/dev/null \
+      || { printf 'native recovery skipped the production saved-listener gate.\n' >&2; exit 1; }
   done
 done
+
+# Discovery may find a concrete bundle/executable while control validation
+# still fails. Adapter must omit --restart-codex; the child then proves the
+# saved listener absent and completes through the native helper without Node.
+/bin/mkdir -p "$RECOVERY_FIXTURE/Codex.app/Contents/MacOS"
+: > "$RECOVERY_FIXTURE/Codex.app/Contents/MacOS/Codex"
+/bin/chmod 755 "$RECOVERY_FIXTURE/Codex.app/Contents/MacOS/Codex"
+if [ "${DREAM_SKIN_TEST_SEED_RESTART_REGRESSION:-false}" = true ]; then
+  /usr/bin/sed 's/args=(--restore-base-theme)/args=(--restore-base-theme --restart-codex)/' \
+    "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" \
+    > "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh.next"
+  /bin/chmod 755 "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh.next"
+  /bin/mv "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh.next" \
+    "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh"
+  /usr/bin/grep -Fx '    progress="restoring"; command_root="$status_root"; args=(--restore-base-theme --restart-codex)' \
+    "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" >/dev/null
+fi
+recreate_native_recovery missing-browser
+CONTROL_INVALID_XTRACE="$RECOVERY_FIXTURE/control-invalid.xtrace"
+set +e
+/usr/bin/env HOME="$RECOVERY_HOME" NODE="$RECOVERY_FIXTURE/missing-node" \
+  RECOVERY_DISCOVERY_SUCCEEDS=true RECOVERY_CODEX_STATE=stopped \
+  RECOVERY_LISTENER_MODE=absent \
+  /bin/bash -x "$RECOVERY_BUNDLED/scripts/studio-adapter-macos.sh" restore \
+  > "$RECOVERY_FIXTURE/control-invalid.json" \
+  2> "$CONTROL_INVALID_XTRACE"
+CONTROL_INVALID_EXIT="$?"
+set -e
+[ "$CONTROL_INVALID_EXIT" -eq 0 ] || {
+  /bin/cat "$RECOVERY_FIXTURE/control-invalid.json" >&2 || true
+  /bin/cat "$CONTROL_INVALID_XTRACE" >&2 || true
+  printf 'Control-invalid Node-free restore did not complete.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F "$RECOVERY_BUNDLED/scripts/restore-dream-skin-macos.sh" \
+  "$CONTROL_INVALID_XTRACE" > "$RECOVERY_FIXTURE/control-invalid-restore.trace" \
+  || { printf 'Adapter xtrace omitted the restore child invocation.\n' >&2; exit 1; }
+! /usr/bin/grep -Fq -- '--restart-codex' \
+  "$RECOVERY_FIXTURE/control-invalid-restore.trace" \
+  || { printf 'Adapter passed --restart-codex to restore with invalid control identity.\n' >&2; exit 1; }
+[ ! -e "$RECOVERY_NODE_MARKER" ]
+[ ! -e "$RECOVERY_BACKUP" ]
+[ -f "$RECOVERY_STATE/theme-backup.restored.json" ]
+/usr/bin/grep -Fx '19473:absent' "$RECOVERY_LISTENER_MARKER" >/dev/null \
+  || { printf 'Control-invalid recovery skipped the production saved-listener gate.\n' >&2; exit 1; }
 
 # A valid live backup remains completion proof when config.toml disappeared.
 # Restore is retryable, Uninstall continues, and default recovery preserves themes.
@@ -1491,7 +1689,7 @@ FIRST_RUN_CONFIG="$FIRST_RUN_HOME/.codex/config.toml"
 FIRST_RUN_BACKUP="$FIRST_RUN_STATE/theme-backup.json"
 FIRST_RUN_ARCHIVE="$FIRST_RUN_STATE/theme-backup.restored.json"
 FIRST_RUN_MARKER="$FIRST_RUN_FIXTURE/lifecycle.log"
-FIRST_RUN_BUNDLE="$FIRST_RUN_HOME/Applications/ChatGPT.app"
+FIRST_RUN_BUNDLE="$FIRST_RUN_HOME/Applications/ChatGPT.bundle"
 FIRST_RUN_CODEX_EXE="$FIRST_RUN_BUNDLE/Contents/MacOS/ChatGPT"
 FIRST_RUN_CODEX_SOURCE="$FIRST_RUN_FIXTURE/ChatGPT.c"
 /bin/mkdir -p "$FIRST_RUN_BUNDLED/bin" "$FIRST_RUN_BUNDLED/scripts" \
@@ -1727,10 +1925,11 @@ INSTALL_ROOT="$HOME/.codex/codex-dream-skin-studio"
 STATE_ROOT="$HOME/Library/Application Support/CodexDreamSkinStudio"
 STATE_PATH="$STATE_ROOT/state.json"
 THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.json"
+RESTORED_THEME_BACKUP_PATH="$STATE_ROOT/theme-backup.restored.json"
 THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="$HOME/.codex/config.toml"
 INJECTOR="$SCRIPT_DIR/injector.mjs"
-NODE=/usr/bin/true
+NODE="$SCRIPT_DIR/node-stub"
 SKIN_VERSION=1.3.0
 CODEX_VERSION=fixture
 NODE_VERSION=v20.0.0
@@ -1764,8 +1963,15 @@ for script in start-dream-skin-macos.sh pause-dream-skin-macos.sh restore-dream-
 exit 0
 STUB
 done
-for script in theme-config.mjs injector.mjs; do : > "$UPGRADE_BUNDLED/scripts/$script"; done
-/bin/chmod 755 "$UPGRADE_BUNDLED/scripts/"*.sh "$UPGRADE_BUNDLED/bin/dream-skin-config-restore"
+/bin/cp "$ROOT/scripts/theme-config.mjs" "$UPGRADE_BUNDLED/scripts/theme-config.mjs"
+: > "$UPGRADE_BUNDLED/scripts/injector.mjs"
+/usr/bin/sed "s|__NODE__|$NODE|g" > "$UPGRADE_BUNDLED/scripts/node-stub" <<'STUB'
+#!/bin/bash
+case "${2:-}" in upgrade-*) exec "__NODE__" "$@" ;; esac
+exit 0
+STUB
+/bin/chmod 755 "$UPGRADE_BUNDLED/scripts/"*.sh "$UPGRADE_BUNDLED/scripts/node-stub" \
+  "$UPGRADE_BUNDLED/bin/dream-skin-config-restore"
 /usr/bin/printf '[desktop]\n' > "$UPGRADE_HOME/.codex/config.toml"
 /usr/bin/printf '{}\n' > "$UPGRADE_STATE/theme-backup.json"
 /usr/bin/printf '{"name":"Fixture"}\n' > "$UPGRADE_STATE/theme/theme.json"
@@ -1775,7 +1981,13 @@ set +e
   > "$UPGRADE_FIXTURE/install.json" 2> "$UPGRADE_FIXTURE/install.stderr"
 UPGRADE_EXIT="$?"
 set -e
-[ "$UPGRADE_EXIT" -eq 0 ] || { printf 'production upgrade fixture failed.\n' >&2; exit 1; }
+[ "$UPGRADE_EXIT" -eq 0 ] || {
+  /bin/cat "$UPGRADE_FIXTURE/install.json" >&2 || true
+  /bin/cat "$UPGRADE_FIXTURE/install.stderr" >&2 || true
+  /bin/cat "$UPGRADE_STATE/studio-operation.log" >&2 || true
+  printf 'production upgrade fixture failed.\n' >&2
+  exit 1
+}
 /usr/bin/grep -Fx 'verified-stop' "$UPGRADE_MARKER" >/dev/null
 [ ! -e "$UPGRADE_STATE/state.json" ] || { printf 'successful production upgrade retained old watcher state.\n' >&2; exit 1; }
 
@@ -1793,6 +2005,15 @@ run_fixture_adapter resume
 : > "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/themes/saved"
 : > "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/images/saved"
 : > "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/theme/active"
+/bin/mkdir -p "$FIXTURE_HOME/Desktop"
+/usr/bin/printf '%s\n' '#!/bin/bash' '# CodexDreamSkinStudio launcher' 'set -e' \
+  > "$FIXTURE_HOME/Desktop/Codex Dream Skin.command"
+/usr/bin/printf '%s\n' '#!/bin/bash' '# user-owned launcher' 'set -e' \
+  '# CodexDreamSkinStudio launcher' \
+  > "$FIXTURE_HOME/Desktop/Codex Dream Skin - Customize.command"
+/usr/bin/printf 'Studio symlink target\n' > "$FIXTURE/studio-launcher-target"
+/bin/ln -s "$FIXTURE/studio-launcher-target" \
+  "$FIXTURE_HOME/Desktop/Codex Dream Skin - Verify.command"
 write_status ready stopped official false false
 : > "$MARKER"
 run_fixture_adapter uninstall --restart-authorized
@@ -1801,6 +2022,11 @@ run_fixture_adapter uninstall --restart-authorized
 [ -e "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/images/saved" ]
 [ -e "$FIXTURE_HOME/Library/Application Support/CodexDreamSkinStudio/theme/active" ]
 [ "$(/usr/bin/head -n 1 "$MARKER")" = 'restore-dream-skin-macos.sh --restore-base-theme --restart-codex --uninstall --restart-authorized' ]
+[ ! -e "$FIXTURE_HOME/Desktop/Codex Dream Skin.command" ]
+[ -f "$FIXTURE_HOME/Desktop/Codex Dream Skin - Customize.command" ]
+[ -L "$FIXTURE_HOME/Desktop/Codex Dream Skin - Verify.command" ]
+[ "$(/bin/cat "$FIXTURE/studio-launcher-target")" = 'Studio symlink target' ]
+[ ! -e "$FIXTURE_HOME/Desktop/Codex Dream Skin - Restore.command" ]
 
 # Recreate the installed fixture after uninstall, then prove explicit theme deletion is last.
 /bin/mkdir -p "$INSTALLED/bin" "$INSTALLED/scripts"

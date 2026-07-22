@@ -17,6 +17,9 @@
 - Config marker publication failures retain the exact recovery backup. Restore now publishes fixed `config.restored.toml` completion proof, removes lifecycle state and live recovery artifacts inside the same rollback-protected transaction, commits before relaunch, and never rolls back settings written after Codex reopens.
 - A per-user current-user-only named pipe activates a hidden resident window, delegates Apps & Features removal with exact exit propagation, releases the owning executable before success, and hands ownership to a newly installed version.
 - Studio now exposes action-gated Verify and Refresh controls, blocks tray mutations for the full uninstall dialog lifetime, and redacts path-like or control-character theme display names while preserving Chinese names.
+- Failed Apply and Resume keep `state.json` until an existing renderer is removed through its exact Browser ID or a newly launched Codex process and listener are both proven closed.
+- Restore and uninstall can now recover malformed lifecycle state without Node by proving no matching, mismatched, or uninspectable Dream Skin watcher is present before and after config restore, then quarantining the exact malformed bytes.
+- Every deep preflight/status validates the fixed private Node `22.23.1`, including fresh, official, paused, and active states; Restore and uninstall continue to use a non-deep Node-free lifecycle boundary.
 - Windows setup executables now derive file and product version resources from `windows/VERSION`, and the matching-host builder verifies that metadata before signing or publication.
 
 ### Verification

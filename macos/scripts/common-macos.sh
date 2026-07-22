@@ -80,13 +80,87 @@ ensure_state_root() {
   /bin/chmod 700 "$STATE_ROOT"
 }
 
+managed_macos_launcher_is_owned() {
+  local launcher_path="$1"
+  local expected_identity="${2:-}"
+  local identity=""
+  local header=""
+  [ -f "$launcher_path" ] && [ ! -L "$launcher_path" ] || return 1
+  identity="$(/usr/bin/stat -f '%d:%i' "$launcher_path" 2>/dev/null)" || return 1
+  [ -z "$expected_identity" ] || [ "$identity" = "$expected_identity" ] || return 1
+  header="$(/usr/bin/sed -n '1,3p' "$launcher_path" 2>/dev/null)" || return 1
+  [ "$header" = $'#!/bin/bash\n# CodexDreamSkinStudio launcher\nset -e' ] || return 1
+  [ "$(/usr/bin/stat -f '%d:%i' "$launcher_path" 2>/dev/null)" = "$identity" ]
+}
+
+restore_quarantined_macos_launcher() {
+  local quarantine_path="$1"
+  local launcher_path="$2"
+  local identity=""
+  [ -f "$quarantine_path" ] && [ ! -L "$quarantine_path" ] \
+    && [ ! -e "$launcher_path" ] && [ ! -L "$launcher_path" ] || return 1
+  identity="$(/usr/bin/stat -f '%d:%i' "$quarantine_path" 2>/dev/null)" || return 1
+  /bin/ln "$quarantine_path" "$launcher_path" || return 1
+  [ "$(/usr/bin/stat -f '%d:%i' "$launcher_path" 2>/dev/null || true)" = "$identity" ] \
+    && [ "$(/usr/bin/stat -f '%d:%i' "$quarantine_path" 2>/dev/null || true)" = "$identity" ] \
+    || return 1
+  /bin/rm -f "$quarantine_path" || return 1
+  [ ! -e "$quarantine_path" ] && [ ! -L "$quarantine_path" ]
+}
+
+remove_managed_macos_launchers() {
+  local desktop_path="${1:-$HOME/Desktop}"
+  local launcher_name=""
+  local launcher_path=""
+  local original_identity=""
+  local quarantine_dir=""
+  local quarantine_path=""
+  for launcher_name in \
+    'Codex Dream Skin.command' \
+    'Codex Dream Skin - Customize.command' \
+    'Codex Dream Skin - Verify.command' \
+    'Codex Dream Skin - Restore.command'; do
+    launcher_path="$desktop_path/$launcher_name"
+    [ -e "$launcher_path" ] || [ -L "$launcher_path" ] || continue
+    if [ ! -f "$launcher_path" ] || [ -L "$launcher_path" ]; then continue; fi
+    original_identity="$(/usr/bin/stat -f '%d:%i' "$launcher_path" 2>/dev/null)" || return 1
+    quarantine_dir="$(/usr/bin/mktemp -d "$desktop_path/.codex-dream-skin-launcher.XXXXXX")" \
+      || return 1
+    /bin/chmod 700 "$quarantine_dir" || return 1
+    quarantine_path="$quarantine_dir/entry"
+    if ! /bin/mv "$launcher_path" "$quarantine_path"; then
+      /bin/rmdir "$quarantine_dir" 2>/dev/null || true
+      return 1
+    fi
+    if [ "$(/usr/bin/stat -f '%d:%i' "$quarantine_path" 2>/dev/null || true)" != "$original_identity" ]; then
+      if [ ! -e "$launcher_path" ] && [ ! -L "$launcher_path" ]; then
+        restore_quarantined_macos_launcher "$quarantine_path" "$launcher_path" || return 1
+        /bin/rmdir "$quarantine_dir" || return 1
+      fi
+      return 1
+    fi
+    if managed_macos_launcher_is_owned "$quarantine_path" "$original_identity"; then
+      [ "$(/usr/bin/stat -f '%d:%i' "$quarantine_path" 2>/dev/null || true)" = "$original_identity" ] \
+        || return 1
+      /bin/rm -f "$quarantine_path" || return 1
+      [ ! -e "$quarantine_path" ] && [ ! -L "$quarantine_path" ] || return 1
+      /bin/rmdir "$quarantine_dir" || return 1
+    elif [ ! -e "$launcher_path" ] && [ ! -L "$launcher_path" ]; then
+      restore_quarantined_macos_launcher "$quarantine_path" "$launcher_path" || return 1
+      /bin/rmdir "$quarantine_dir" || return 1
+    else
+      return 1
+    fi
+  done
+}
+
 # Seed bundled preset packs into the user's themes/ library so a fresh install
 # ships with ready-to-use skins. Idempotent (each preset is refreshed in place)
 # and scoped to preset-* ids, so user-made custom-* packs are never touched.
-seed_bundled_presets() {
+seed_bundled_presets_into() {
+  local themes_root="$1"
   local presets_root="$PROJECT_ROOT/presets"
   [ -d "$presets_root" ] || return 0
-  local themes_root="$STATE_ROOT/themes"
   /bin/mkdir -p "$themes_root"
   local src id dest entry
   for src in "$presets_root"/preset-*/; do
@@ -103,6 +177,63 @@ seed_bundled_presets() {
     done
     /bin/chmod 600 "$dest"/* 2>/dev/null || true
   done
+}
+
+seed_bundled_presets() {
+  local presets_root="$PROJECT_ROOT/presets"
+  local themes_root="$STATE_ROOT/themes"
+  local staging=""
+  local previous=""
+  local original_identity=""
+  local original_digest=""
+  [ -d "$presets_root" ] || return 0
+  if [ -n "${UPGRADE_SNAPSHOT_ROOT:-}" ]; then
+    staging="$(/usr/bin/mktemp -d "$UPGRADE_SNAPSHOT_ROOT/staged-theme-library.XXXXXX")" || return 1
+  else
+    staging="$(/usr/bin/mktemp -d "$STATE_ROOT/.themes-seed.XXXXXX")" || return 1
+  fi
+  /bin/chmod 700 "$staging" || return 1
+  if [ -e "$themes_root" ] || [ -L "$themes_root" ]; then
+    [ -d "$themes_root" ] && [ ! -L "$themes_root" ] || return 1
+    if command -v upgrade_path_identity >/dev/null 2>&1; then
+      original_identity="$(upgrade_path_identity "$themes_root")" || return 1
+      original_digest="$(upgrade_path_digest "$themes_root")" || return 1
+    fi
+    /bin/cp -pPR "$themes_root"/. "$staging"/ || return 1
+    if [ -n "$original_identity" ]; then
+      [ "$(upgrade_path_identity "$themes_root" 2>/dev/null || true)" = "$original_identity" ] \
+        && [ "$(upgrade_path_digest "$themes_root" 2>/dev/null || true)" = "$original_digest" ] \
+        || return 1
+    fi
+  fi
+  seed_bundled_presets_into "$staging" || return 1
+  if [ -n "${UPGRADE_SNAPSHOT_ROOT:-}" ]; then
+    record_upgrade_transaction_path "$staging" theme-library || return 1
+    upgrade_path_matches_any_expected "$staging" theme-library || return 1
+    "$NODE" "$SCRIPT_DIR/theme-config.mjs" upgrade-receipt-replace \
+      "$UPGRADE_SNAPSHOT_ROOT" "$UPGRADE_SNAPSHOT_IDENTITY" \
+      "$UPGRADE_SNAPSHOT_ROOT/original" \
+      "$UPGRADE_ORIGINAL_GROUP_IDENTITY" "$UPGRADE_ORIGINAL_RECEIPT_IDENTITY" \
+      "$UPGRADE_ORIGINAL_RECEIPT_DIGEST" \
+      "$UPGRADE_SNAPSHOT_ROOT/$MATCHED_UPGRADE_EXPECTED_GROUP" \
+      theme-library.state "$staging" "$themes_root" \
+      "$UPGRADE_SNAPSHOT_ROOT/held-theme-library" >/dev/null
+    return
+  fi
+  previous="$STATE_ROOT/.themes-before-seed.$$"
+  [ ! -e "$previous" ] && [ ! -L "$previous" ] || return 1
+  if [ -e "$themes_root" ]; then
+    /bin/mv "$themes_root" "$previous" || return 1
+    if [ -n "$original_identity" ]; then
+      [ "$(upgrade_path_identity "$previous" 2>/dev/null || true)" = "$original_identity" ] \
+        && [ "$(upgrade_path_digest "$previous" 2>/dev/null || true)" = "$original_digest" ] \
+        || return 1
+    fi
+  fi
+  /bin/mv "$staging" "$themes_root" || return 1
+  if [ -e "$previous" ]; then
+    /bin/rm -rf "$previous"
+  fi
 }
 
 runtime_discovery_error() {
@@ -578,7 +709,7 @@ renderer_rollback_evidence_is_valid() {
     || return 1
   schema="$(/usr/bin/plutil -extract schemaVersion raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" \
     || return 1
-  case "$schema" in 2|3) ;; *) return 1 ;; esac
+  case "$schema" in 2|3|4) ;; *) return 1 ;; esac
   [ "$(/usr/bin/plutil -extract themeDir raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" = "$THEME_DIR" ] \
     && [ "$(/usr/bin/plutil -extract jobLabel raw -o - "$ROLLBACK_STATE_PATH" 2>/dev/null)" = "$INJECTOR_JOB_LABEL" ] \
     || return 1
@@ -601,7 +732,11 @@ renderer_rollback_evidence_is_valid() {
     || return 1
   case "$node_path:$injector_path" in /*:/*) ;; *) return 1 ;; esac
   if [ "$injector_pid" = "0" ]; then
-    [ "$schema" = "2" ] && [ -z "$injector_started_at" ] && [ "$launcher" = "renderer" ]
+    [ -z "$injector_started_at" ] || return 1
+    case "$schema:$launcher" in
+      2:renderer|4:managed-cdp) return 0 ;;
+      *) return 1 ;;
+    esac
   else
     [ "$injector_pid" != "1" ] && [ -n "$injector_started_at" ] \
       && { [ "$launcher" = "direct" ] || [ "$launcher" = "launchctl" ]; } \
@@ -995,7 +1130,19 @@ stop_codex() {
 }
 
 listener_records() {
-  /usr/sbin/lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fpn 2>/dev/null || true
+  local records=""
+  local status=0
+  if records="$(/usr/sbin/lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fpn 2>&1)"; then
+    [ -z "$records" ] || printf '%s\n' "$records"
+    return 0
+  else
+    status="$?"
+  fi
+  # lsof uses status 1 with no output for an empty result set. Any diagnostic
+  # output or different failure is uncertainty, not proof that the port closed.
+  [ "$status" -eq 1 ] && [ -z "$records" ] && return 0
+  [ -z "$records" ] || printf '%s\n' "$records" >&2
+  return 1
 }
 
 listener_pids() {
@@ -1032,6 +1179,12 @@ listener_pids() {
         for (value in pids) print value
       }
     ' | /usr/bin/sort -n -u
+}
+
+saved_managed_listener_is_absent() {
+  local pids=""
+  pids="$(listener_pids "$1")" || return 1
+  [ -z "$pids" ]
 }
 
 port_is_available() {
@@ -1345,8 +1498,12 @@ write_renderer_rollback_evidence() {
   case "$injector_pid" in ''|*[!0-9]*|??????????*) return 1 ;; esac
   [ "$theme_dir" = "$THEME_DIR" ] || return 1
   if [ "$injector_pid" = "0" ]; then
-    [ -z "$injector_started_at" ] && [ "$launcher" = "renderer" ] \
-      && [ -z "$activation_gate" ] || return 1
+    [ -z "$injector_started_at" ] && [ -z "$activation_gate" ] || return 1
+    case "$launcher" in
+      renderer) schema="2" ;;
+      managed-cdp) schema="4" ;;
+      *) return 1 ;;
+    esac
   else
     [ "$injector_pid" != "1" ] && [ -n "$injector_started_at" ] \
       && { [ "$launcher" = "direct" ] || [ "$launcher" = "launchctl" ]; } || return 1
@@ -1404,8 +1561,16 @@ write_renderer_rollback_evidence() {
     && [ "$(renderer_rollback_field injectorPath)" = "$injector_path" ] \
     && [ "$(renderer_rollback_field themeDir)" = "$theme_dir" ] \
     && [ "$(renderer_rollback_field launcher)" = "$launcher" ] \
-    && { [ "$schema" = "2" ] \
+    && { [ "$schema" != "3" ] \
       || [ "$(renderer_rollback_field activationGate)" = "$activation_gate" ]; }
+}
+
+write_managed_cdp_recovery_evidence() {
+  local port="$1"
+  local browser_id="${2:-managed-cdp-pending}"
+  browser_id_is_valid "$browser_id" || return 1
+  write_renderer_rollback_evidence \
+    "$port" "$browser_id" 0 "" "$NODE" "$INJECTOR" "$THEME_DIR" managed-cdp
 }
 
 clear_renderer_rollback_evidence() {

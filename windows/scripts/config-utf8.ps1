@@ -884,6 +884,51 @@ public static class DreamSkinConfigNative
         }
     }
 
+    public static void QuarantineExpectedFile(string path, string archivePath,
+        string expectedIdentity, byte[] expectedBytes)
+    {
+        if (expectedIdentity == null) throw new ArgumentNullException("expectedIdentity");
+        if (expectedBytes == null) throw new ArgumentNullException("expectedBytes");
+        string fullPath = NormalizePath(path);
+        string fullArchivePath = NormalizePath(archivePath);
+        string directory = Path.GetDirectoryName(fullPath);
+        if (!ComparablePath(directory).Equals(
+            ComparablePath(Path.GetDirectoryName(fullArchivePath)), StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Dream Skin state quarantine must remain in the state directory.");
+        string archiveName = Path.GetFileName(fullArchivePath);
+        ValidateComponentLength(archiveName);
+
+        using (SafeFileHandle parent = OpenStable(directory, FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, true))
+        {
+            bool archiveMissing;
+            using (SafeFileHandle archive = TryOpenStableEntry(fullArchivePath,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, out archiveMissing))
+            {
+                if (!archiveMissing)
+                    throw new IOException("Dream Skin state quarantine destination already exists.");
+            }
+            bool missing;
+            using (SafeFileHandle file = TryOpenStableFile(fullPath,
+                GENERIC_READ | FILE_READ_ATTRIBUTES | DELETE, FILE_SHARE_READ, out missing))
+            {
+                if (missing) throw new IOException("Expected Dream Skin state disappeared before quarantine.");
+                if (Identity(Inspect(file, fullPath)) != expectedIdentity)
+                    throw new IOException("Dream Skin state identity changed before quarantine.");
+                byte[] actual = ReadAll(file, fullPath);
+                if (!EqualBytes(actual, expectedBytes))
+                    throw new IOException("Dream Skin state bytes changed before quarantine.");
+                RenameRelative(file, parent, archiveName, 0);
+                if (!ComparablePath(ResolvedPath(file, fullPath)).Equals(
+                    ComparablePath(fullArchivePath), StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Dream Skin state quarantine resolved to an unexpected path.");
+                if (Identity(Inspect(file, fullArchivePath)) != expectedIdentity ||
+                    !EqualBytes(ReadAll(file, fullArchivePath), expectedBytes))
+                    throw new IOException("Dream Skin state identity or bytes changed during quarantine.");
+            }
+        }
+    }
+
     public static DreamSkinNativePathSnapshot Snapshot(string path, bool readBytes)
     {
         uint access = readBytes ? GENERIC_READ : FILE_READ_ATTRIBUTES;

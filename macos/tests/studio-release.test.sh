@@ -503,6 +503,29 @@ make_allowed_tree "$CASE_ROOT"
 expect_scanner_failure_reason 'absolute user path' \
   --root "$CASE_ROOT" --allowlist "$ALLOWLIST"
 
+windows_path_index=0
+for windows_path in \
+  'C:/Users/Release User/private/file' \
+  'c:/users/Release User/private/file' \
+  'D:/Users/Release User/private/file' \
+  'C:/Users\Release User/private\file'
+do
+  windows_path_index=$((windows_path_index + 1))
+  CASE_ROOT="$TMP/windows-user-path-latin1-$windows_path_index"
+  make_allowed_tree "$CASE_ROOT"
+  /usr/bin/printf '%s\n' "$windows_path" > "$CASE_ROOT/paths.bin"
+  expect_scanner_failure_reason 'absolute user path' \
+    --root "$CASE_ROOT" --allowlist "$ALLOWLIST"
+
+  CASE_ROOT="$TMP/windows-user-path-utf16le-$windows_path_index"
+  make_allowed_tree "$CASE_ROOT"
+  "$NODE" -e '
+    require("node:fs").writeFileSync(process.argv[1], Buffer.from(process.argv[2] + "\n", "utf16le"));
+  ' "$CASE_ROOT/paths.bin" "$windows_path"
+  expect_scanner_failure_reason 'absolute user path' \
+    --root "$CASE_ROOT" --allowlist "$ALLOWLIST"
+done
+
 CASE_ROOT="$TMP/utf16le-macos-absolute-path"
 make_allowed_tree "$CASE_ROOT"
 "$NODE" -e '

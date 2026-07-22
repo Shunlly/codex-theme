@@ -486,8 +486,8 @@ run_parent_kill_activation_case() {
     "$TRANSACTION_ENGINE/scripts/restore-dream-skin-macos.sh" >/dev/null
   assert_watcher_stopped "$watcher_pid"
   WATCHER_PID=""
-  [ ! -e "$skin_marker" ] && [ ! -e "$TRANSACTION_STATE/rollback.json" ] \
-    || { printf 'Restore did not remove the activated pre-state renderer transaction.\n' >&2; return 1; }
+  [ ! -e "$TRANSACTION_STATE/rollback.json" ] \
+    || { printf 'Restore did not consume activated pre-state rollback evidence.\n' >&2; return 1; }
   /bin/kill -0 "$FOREIGN_JOB_PID" 2>/dev/null \
     || { printf 'Restore signaled the unrelated foreign watcher fixture.\n' >&2; return 1; }
   /bin/kill -TERM "$FOREIGN_JOB_PID" 2>/dev/null || true

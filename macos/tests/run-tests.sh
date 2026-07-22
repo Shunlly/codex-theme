@@ -2,12 +2,17 @@
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+NODE="${NODE:-$(command -v node)}" /bin/bash "$ROOT/tests/launcher-entrypoint-race.test.sh"
 NODE="${NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 [ -x "$NODE" ] || { printf 'Codex bundled Node.js was not found: %s\n' "$NODE" >&2; exit 1; }
 /bin/bash "$ROOT/tests/listener-address.test.sh"
 /bin/bash "$ROOT/tests/theme-backup-safety.test.sh"
 "$NODE" "$ROOT/tests/injector-identity.test.mjs"
 /bin/bash "$ROOT/tests/browser-state.test.sh"
+"$NODE" "$ROOT/tests/lifecycle-v4-contract.test.mjs"
+/bin/bash "$ROOT/tests/lifecycle-v4-behavior.test.sh"
+NODE="$NODE" /bin/bash "$ROOT/tests/status-v4.test.sh"
 "$NODE" "$ROOT/tests/diagnostics-wiring.test.mjs"
 "$NODE" "$ROOT/tests/studio-status-action.test.mjs"
 
@@ -189,7 +194,7 @@ fi
 "$NODE" "$ROOT/tests/renderer-inject.test.mjs"
 "$NODE" "$ROOT/tests/theme-stage.test.mjs"
 "$NODE" "$ROOT/tests/theme-config.test.mjs"
-NODE="$NODE" "$ROOT/tests/studio-adapter.test.sh"
+NODE="$NODE" /bin/bash "$ROOT/tests/studio-adapter.test.sh"
 
 /usr/bin/swift build --package-path "$ROOT/studio" --product dream-skin-config-restore >/dev/null
 NATIVE_CONFIG_RESTORE="$(/usr/bin/swift build --package-path "$ROOT/studio" --show-bin-path)/dream-skin-config-restore"
@@ -249,7 +254,7 @@ ROOT_GUARD_HOME="$TMP/root-guard-home"
 for guarded_script in install-dream-skin-macos.sh apply-from-menubar-macos.sh; do
   ROOT_GUARD_ERROR="$TMP/$guarded_script.error"
   if /usr/bin/env HOME="$ROOT_GUARD_HOME" SUDO_USER=fixture \
-    "$ROOT/scripts/$guarded_script" >/dev/null 2>"$ROOT_GUARD_ERROR"; then
+    /bin/bash "$ROOT/scripts/$guarded_script" >/dev/null 2>"$ROOT_GUARD_ERROR"; then
     printf '%s unexpectedly accepted sudo.\n' "$guarded_script" >&2
     exit 1
   fi
@@ -282,7 +287,7 @@ STANDALONE_DOCS="$TMP/standalone-source-docs"
   '- `../docs/images/presets/romantic-rose-source.png`' \
   "They are included at the maintainer's direction as a local theme preset, source archive, and real runtime previews." \
   > "$STANDALONE_ROOT/NOTICE.md"
-"$ROOT/scripts/prepare-standalone-docs.sh" "$STANDALONE_ROOT" "$STANDALONE_DOCS"
+/bin/bash "$ROOT/scripts/prepare-standalone-docs.sh" "$STANDALONE_ROOT" "$STANDALONE_DOCS"
 /usr/bin/grep -F -q 'presets/preset-romantic-rose/' \
   "$STANDALONE_ROOT/docs/reference-background-prompt-guide.md"
 /usr/bin/grep -F -q 'assets/portal-hero.png' \
@@ -304,7 +309,7 @@ STANDALONE_REPACK="$TMP/standalone-repack"
 /bin/cp "$ROOT/scripts/prepare-standalone-docs.sh" "$STANDALONE_SOURCE/scripts/"
 /bin/cp -R "$STANDALONE_ROOT/docs" "$STANDALONE_SOURCE/docs"
 /bin/cp "$STANDALONE_ROOT/NOTICE.md" "$STANDALONE_REPACK/NOTICE.md"
-"$STANDALONE_SOURCE/scripts/prepare-standalone-docs.sh" "$STANDALONE_REPACK"
+/bin/bash "$STANDALONE_SOURCE/scripts/prepare-standalone-docs.sh" "$STANDALONE_REPACK"
 REPACK_GUIDE="$STANDALONE_REPACK/docs/reference-background-prompt-guide.md"
 /usr/bin/grep -F -q \
   'https://github.com/Fei-Away/Codex-Dream-Skin/blob/main/windows/assets/theme.json' \
@@ -322,7 +327,7 @@ UNSAFE_ENGINE="$TMP/unsafe\"engine"
 /bin/chmod +x "$UNSAFE_ENGINE/scripts/start-dream-skin-macos.sh"
 UNSAFE_MENU_OUTPUT="$(
   /usr/bin/env CODEX_DREAM_SKIN_ENGINE="$UNSAFE_ENGINE" \
-    "$ROOT/menubar/codex_dream_skin.10s.sh"
+    /bin/bash "$ROOT/menubar/codex_dream_skin.10s.sh"
 )"
 /usr/bin/printf '%s\n' "$UNSAFE_MENU_OUTPUT" | /usr/bin/grep -F -q \
   'Engine path contains unsupported SwiftBar characters'
@@ -339,7 +344,7 @@ MENU_IMAGES="$MENU_HOME/Library/Application Support/CodexDreamSkinStudio/images"
 : > "$MENU_IMAGES/"$'bad\033image.png'
 MENU_IMAGE_OUTPUT="$(
   /usr/bin/env HOME="$MENU_HOME" CODEX_DREAM_SKIN_ENGINE="$ROOT" \
-    "$ROOT/menubar/codex_dream_skin.10s.sh"
+    /bin/bash "$ROOT/menubar/codex_dream_skin.10s.sh"
 )"
 /usr/bin/printf '%s\n' "$MENU_IMAGE_OUTPUT" | /usr/bin/grep -F -q 'safe-image.png'
 if /usr/bin/printf '%s\n' "$MENU_IMAGE_OUTPUT" | /usr/bin/grep -F -q 'bad'; then
@@ -376,12 +381,12 @@ SWITCH_STATE="$SWITCH_HOME/Library/Application Support/CodexDreamSkinStudio"
   > "$SWITCH_STATE/theme/theme.json"
 : > "$SWITCH_STATE/theme/old.png"
 if /usr/bin/env HOME="$SWITCH_HOME" NODE="$NODE" \
-  "$ROOT/scripts/switch-theme-macos.sh" --id '../escape' --no-apply >/dev/null 2>&1; then
+  /bin/bash "$ROOT/scripts/switch-theme-macos.sh" --id '../escape' --no-apply >/dev/null 2>&1; then
   printf 'switch-theme unexpectedly accepted a path traversal theme id.\n' >&2
   exit 1
 fi
 /usr/bin/env HOME="$SWITCH_HOME" NODE="$NODE" \
-  "$ROOT/scripts/switch-theme-macos.sh" --id preset-switch-fixture --no-apply >/dev/null
+  /bin/bash "$ROOT/scripts/switch-theme-macos.sh" --id preset-switch-fixture --no-apply >/dev/null
 /usr/bin/cmp -s "$SWITCH_STATE/theme/background.png" \
   "$SWITCH_STATE/themes/preset-switch-fixture/background.png"
 [ ! -e "$SWITCH_STATE/theme/old.png" ]
@@ -517,7 +522,7 @@ STATUS_PID="$!"
     themeDir: process.argv[3],
   })}\n`);
 ' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$STATUS_STATE_ROOT/theme"
-STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
+STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" /bin/bash "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
   if (value.session !== "stale" || value.injectorAlive !== false) process.exit(1);
@@ -551,7 +556,7 @@ STATUS_START="$(/bin/ps -p "$STATUS_PID" -o lstart= 2>/dev/null | /usr/bin/awk '
     themeDir,
   })}\n`);
 ' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$NODE" "$STATUS_FAKE_INJECTOR" "$STATUS_START" "$STATUS_STATE_ROOT/theme"
-STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
+STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" /bin/bash "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
   if (value.session !== "stale" || value.injectorAlive !== false) process.exit(1);
@@ -586,7 +591,7 @@ STATUS_START="$(LC_ALL=C TZ=UTC /bin/ps -p "$STATUS_PID" -o lstart= 2>/dev/null 
   })}\n`);
 ' "$STATUS_STATE_ROOT/state.json" "$STATUS_PID" "$NODE" "$STATUS_FAKE_INJECTOR" \
   "$STATUS_START" "$STATUS_STATE_ROOT/theme" "$STATUS_ACTIVATION_GATE"
-STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
+STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" /bin/bash "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
   if (value.session !== "active" || value.injectorAlive !== true) process.exit(1);
@@ -598,7 +603,7 @@ STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin
   value.activationGate = process.argv[2];
   fs.writeFileSync(file, `${JSON.stringify(value)}\n`);
 ' "$STATUS_STATE_ROOT/state.json" "$STATUS_STATE_ROOT/.watcher-activation.R3pl4C"
-STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
+STATUS_JSON="$(/usr/bin/env HOME="$STATUS_HOME" /bin/bash "$ROOT/scripts/status-dream-skin-macos.sh" --json)"
 "$NODE" -e '
   const value = JSON.parse(process.argv[1]);
   if (value.session !== "stale" || value.injectorAlive !== false) process.exit(1);
@@ -1070,7 +1075,7 @@ launch_codex_normally() { printf 'launch\n' >> "__MARKER__"; }
 STUB
 : > "$NATIVE_MARKER"
 NATIVE_OUTPUT="$(/usr/bin/env -u NODE HOME="$NATIVE_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
-  "$NATIVE_ENGINE/scripts/restore-dream-skin-macos.sh" \
+  /bin/bash "$NATIVE_ENGINE/scripts/restore-dream-skin-macos.sh" \
   --restore-base-theme --restart-codex --restart-authorized)"
 /usr/bin/grep -F -q 'appearanceTheme = "system"' "$NATIVE_HOME/.codex/config.toml"
 /usr/bin/grep -F -q 'keepMe = "中文保留"' "$NATIVE_HOME/.codex/config.toml"
@@ -1156,7 +1161,7 @@ STUB
 
   set +e
   /usr/bin/env -u NODE HOME="$fixture_home" DREAM_SKIN_STUDIO_ADAPTER=true \
-    "$fixture_engine/scripts/restore-dream-skin-macos.sh" \
+    /bin/bash "$fixture_engine/scripts/restore-dream-skin-macos.sh" \
     --restore-base-theme --restart-codex --restart-authorized \
     >/dev/null 2>"$error_path"
   restore_exit="$?"
@@ -1238,7 +1243,7 @@ STUB
 : > "$RACE_MARKER"
 set +e
 /usr/bin/env -u NODE HOME="$RACE_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
-  "$RACE_ENGINE/scripts/restore-dream-skin-macos.sh" \
+  /bin/bash "$RACE_ENGINE/scripts/restore-dream-skin-macos.sh" \
   --restore-base-theme --restart-codex --restart-authorized \
   >/dev/null 2>"$RACE_ERROR"
 RACE_EXIT="$?"
@@ -1296,7 +1301,7 @@ STUB
 : > "$UNTRUSTED_MARKER"
 set +e
 /usr/bin/env -u NODE HOME="$UNTRUSTED_HOME" DREAM_SKIN_STUDIO_ADAPTER=true \
-  "$UNTRUSTED_ENGINE/scripts/restore-dream-skin-macos.sh" \
+  /bin/bash "$UNTRUSTED_ENGINE/scripts/restore-dream-skin-macos.sh" \
   --restore-base-theme --restart-codex --restart-authorized >/dev/null 2>&1
 UNTRUSTED_EXIT="$?"
 set -e
@@ -1524,6 +1529,6 @@ DOCTOR_HOME="$TMP/doctor-home"
 /bin/mkdir -p "$DOCTOR_HOME/.codex" "$DOCTOR_HOME/Library/Application Support/CodexDreamSkinStudio/theme"
 /usr/bin/printf '%s\n' 'model = "gpt-5"' > "$DOCTOR_HOME/.codex/config.toml"
 /bin/cp "$ROOT/presets/preset-midnight-aurora"/* "$DOCTOR_HOME/Library/Application Support/CodexDreamSkinStudio/theme/"
-HOME="$DOCTOR_HOME" "$ROOT/scripts/doctor-macos.sh" >/dev/null
+HOME="$DOCTOR_HOME" /bin/bash "$ROOT/scripts/doctor-macos.sh" >/dev/null
 
 printf 'PASS: syntax, payload, bundled presets, preset seeding, runtime-state safety, custom-theme, config round-trips, HOME recovery, signature, and doctor checks.\n'

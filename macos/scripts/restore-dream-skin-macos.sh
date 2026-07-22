@@ -144,11 +144,7 @@ if try_discover_codex_app; then
   elif try_validate_codex_app_control_identity; then
     CODEX_AVAILABLE="true"
     unset NODE RUNTIME_NODE NODE_VERSION NODE_TEAM_ID
-  elif [ "$RESTART_CODEX" = "true" ]; then
-    fail "The official Codex app is required to complete the requested restart."
   fi
-elif [ "$RESTART_CODEX" = "true" ]; then
-  fail "The official Codex app is required to complete the requested restart."
 fi
 NATIVE_CONFIG_RESTORE=""
 NATIVE_CONFIG_RESTORE_IDENTITY=""
@@ -166,29 +162,63 @@ cleanup_restore_resources() {
   release_lifecycle_lock
 }
 trap cleanup_restore_resources EXIT
-if [ "$RESTORE_BASE_THEME" = "true" ] \
-  && { [ -e "$THEME_BACKUP_PATH" ] || [ -L "$THEME_BACKUP_PATH" ]; }; then
-  stage_live_theme_backup \
-    || fail "The selective pre-install theme backup changed while it was staged; restore state was preserved."
-fi
 DAMAGED_STATE_RECOVERY="false"
 ROLLBACK_RECOVERY="false"
+ROLLBACK_LAUNCHER=""
+ROLLBACK_PORT=""
+ROLLBACK_BROWSER_ID=""
+SAVED_PORT=""
+SAVED_STATE_BROWSER_ID=""
+STATE_LISTENER_EVIDENCE="false"
+SAVED_LIFECYCLE_EVIDENCE="false"
 if [ -e "$ROLLBACK_STATE_PATH" ] || [ -L "$ROLLBACK_STATE_PATH" ]; then
   renderer_rollback_evidence_is_valid \
     || fail "Renderer rollback evidence is unsafe or damaged; recovery data was preserved."
   ROLLBACK_RECOVERY="true"
-  if [ "$PORT_EXPLICIT" = "false" ]; then
-    PORT="$(renderer_rollback_field port)"
+  SAVED_LIFECYCLE_EVIDENCE="true"
+  ROLLBACK_LAUNCHER="$(renderer_rollback_field launcher)"
+  ROLLBACK_PORT="$(renderer_rollback_field port)"
+  ROLLBACK_BROWSER_ID="$(renderer_rollback_field browserId)"
+  if [ "$PORT_EXPLICIT" = "true" ]; then
+    [ "$PORT" = "$ROLLBACK_PORT" ] \
+      || fail "The requested port does not match renderer rollback evidence; recovery data was preserved."
+  else
+    PORT="$ROLLBACK_PORT"
   fi
 fi
-if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
+if [ -f "$STATE_PATH" ]; then
   SAVED_PORT="$(state_field port 2>/dev/null || true)"
+  SAVED_STATE_BROWSER_ID="$(state_field browserId 2>/dev/null || true)"
   case "$SAVED_PORT" in
-    ''|*[!0-9]*) ;;
+    ''|*[!0-9]*) SAVED_PORT="" ;;
     *)
-      if [ "$SAVED_PORT" -ge 1024 ] && [ "$SAVED_PORT" -le 65535 ]; then PORT="$SAVED_PORT"; fi
+      if [ "$SAVED_PORT" -ge 1024 ] && [ "$SAVED_PORT" -le 65535 ]; then
+        SAVED_LIFECYCLE_EVIDENCE="true"
+      else
+        SAVED_PORT=""
+      fi
       ;;
   esac
+  if [ -n "$SAVED_PORT" ]; then
+    [ -z "$ROLLBACK_PORT" ] || [ "$SAVED_PORT" = "$ROLLBACK_PORT" ] \
+      || fail "Saved state and renderer rollback ports do not match; recovery data was preserved."
+    if [ "$PORT_EXPLICIT" = "true" ]; then
+      [ "$PORT" = "$SAVED_PORT" ] \
+        || fail "The requested port does not match saved lifecycle state; recovery data was preserved."
+    else
+      PORT="$SAVED_PORT"
+    fi
+    if browser_id_is_valid "$SAVED_STATE_BROWSER_ID"; then
+      STATE_LISTENER_EVIDENCE="true"
+    fi
+    if [ -n "$ROLLBACK_BROWSER_ID" ] && [ "$ROLLBACK_BROWSER_ID" != "managed-cdp-pending" ]; then
+      [ "$STATE_LISTENER_EVIDENCE" != "true" ] \
+        || [ "$SAVED_STATE_BROWSER_ID" = "$ROLLBACK_BROWSER_ID" ] \
+        || fail "Saved state and renderer rollback Browser IDs do not match; recovery data was preserved."
+    fi
+  fi
+  [ -n "$SAVED_PORT" ] || [ -n "$ROLLBACK_PORT" ] \
+    || fail "Saved lifecycle state has no trustworthy managed listener port; recovery data was preserved."
 fi
 
 CODEX_RUNNING="false"
@@ -201,39 +231,48 @@ if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ] \
   && [ "$RESTART_AUTHORIZED" != "true" ]; then
   fail "Explicit restart authorization is required before Studio can close Codex."
 fi
-ensure_state_root
 DEBUG_READY="false"
 BROWSER_ID=""
 if [ "$CODEX_AVAILABLE" = "true" ]; then
   if BROWSER_ID="$(verified_cdp_browser_id "$PORT")"; then DEBUG_READY="true"; fi
 fi
-if [ "$DEBUG_READY" = "true" ] && [ "$ROLLBACK_RECOVERY" = "true" ]; then
-  SAVED_BROWSER_ID="$(renderer_rollback_field browserId)"
-  [ "$SAVED_BROWSER_ID" = "$BROWSER_ID" ] \
-    || fail "The active CDP browser does not match the saved rollback session; recovery data was preserved."
-  BROWSER_ID="$SAVED_BROWSER_ID"
-elif [ "$DEBUG_READY" = "true" ] && [ -f "$STATE_PATH" ]; then
-  SAVED_BROWSER_ID="$(state_field browserId 2>/dev/null || true)"
-  browser_id_is_valid "$SAVED_BROWSER_ID" \
+if [ "$ROLLBACK_RECOVERY" = "true" ]; then
+  SAVED_BROWSER_ID="$ROLLBACK_BROWSER_ID"
+  if [ "$ROLLBACK_LAUNCHER" != "managed-cdp" ] && [ "$DEBUG_READY" = "true" ]; then
+    [ "$SAVED_BROWSER_ID" = "$BROWSER_ID" ] \
+      || fail "The active CDP browser does not match the saved rollback session; recovery data was preserved."
+    BROWSER_ID="$SAVED_BROWSER_ID"
+  elif [ "$ROLLBACK_LAUNCHER" = "managed-cdp" ] \
+    && [ "$DEBUG_READY" = "true" ]; then
+    if [ "$SAVED_BROWSER_ID" = "managed-cdp-pending" ]; then
+      [ -n "$SAVED_STATE_BROWSER_ID" ] || fail "Pending managed-CDP recovery has no Browser ID authority; recovery data was preserved."
+      SAVED_BROWSER_ID="$SAVED_STATE_BROWSER_ID"
+    fi
+    [ "$SAVED_BROWSER_ID" = "$BROWSER_ID" ] \
+      || fail "The active CDP browser does not match the saved managed session; recovery data was preserved."
+  fi
+elif [ "$DEBUG_READY" = "true" ] && [ -n "$SAVED_PORT" ]; then
+  [ "$STATE_LISTENER_EVIDENCE" = "true" ] \
     || fail "The saved Dream Skin Browser ID is missing or invalid; restore state was preserved."
+  SAVED_BROWSER_ID="$SAVED_STATE_BROWSER_ID"
   [ "$SAVED_BROWSER_ID" = "$BROWSER_ID" ] \
     || fail "The active CDP browser does not match the saved Dream Skin session; restore state was preserved."
   BROWSER_ID="$SAVED_BROWSER_ID"
 fi
 
-if [ "$ROLLBACK_RECOVERY" = "true" ]; then
-  stop_renderer_rollback_watcher \
-    || fail "The rollback-recorded injector could not be stopped safely; recovery data was preserved."
-  if [ "$CODEX_AVAILABLE" != "true" ]; then
-    ROLLBACK_LISTENERS="$(listener_pids "$PORT" 2>/dev/null || true)"
-    [ -z "$ROLLBACK_LISTENERS" ] \
-      || fail "The saved rollback listener is still present but the official Codex app cannot be validated; recovery data was preserved."
-  fi
+if [ "$SAVED_LIFECYCLE_EVIDENCE" = "true" ] && [ "$DEBUG_READY" != "true" ]; then
+  saved_managed_listener_is_absent "$PORT" \
+    || fail "The saved managed listener is still present or could not be disproved before recovery; recovery data was preserved."
+  if [ "$CODEX_AVAILABLE" != "true" ]; then RESTART_CODEX="false"; fi
 fi
 
 # Close before touching the watcher, state, backup, or config. Studio calls
 # pass only their explicit force authorization; legacy CLI behavior stays the
 # same when it is not invoked through the adapter.
+if [ "$SAVED_LIFECYCLE_EVIDENCE" = "true" ] \
+  && [ "$CODEX_RUNNING" = "true" ] && [ "$RESTART_CODEX" != "true" ]; then
+  fail "The saved managed CDP session must close before recovery; pass --restart-codex."
+fi
 if [ "$CODEX_RUNNING" = "true" ] && [ "$RESTART_CODEX" = "true" ]; then
   if [ "${DREAM_SKIN_STUDIO_ADAPTER:-false}" = "true" ]; then
     stop_codex "$FORCE_STOP_AUTHORIZED"
@@ -242,6 +281,24 @@ if [ "$CODEX_RUNNING" = "true" ] && [ "$RESTART_CODEX" = "true" ]; then
   fi
   CODEX_RUNNING="false"
   DEBUG_READY="false"
+fi
+
+if [ "$SAVED_LIFECYCLE_EVIDENCE" = "true" ] && [ "$CODEX_RUNNING" != "true" ]; then
+  saved_managed_listener_is_absent "$PORT" \
+    || fail "The saved managed CDP listener did not close; recovery data was preserved."
+  DEBUG_READY="false"
+fi
+
+ensure_state_root
+if [ "$RESTORE_BASE_THEME" = "true" ] \
+  && { [ -e "$THEME_BACKUP_PATH" ] || [ -L "$THEME_BACKUP_PATH" ]; }; then
+  stage_live_theme_backup \
+    || fail "The selective pre-install theme backup changed while it was staged; restore state was preserved."
+fi
+
+if [ "$ROLLBACK_RECOVERY" = "true" ]; then
+  stop_renderer_rollback_watcher \
+    || fail "The rollback-recorded injector could not be stopped safely; recovery data was preserved."
 fi
 
 if [ -f "$STATE_PATH" ]; then
@@ -322,10 +379,8 @@ if [ "$RESTART_CODEX" = "true" ]; then
 fi
 
 if [ "$UNINSTALL" = "true" ] && [ "${DREAM_SKIN_DEFER_UNINSTALL_DELETE:-false}" != "true" ]; then
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin.command"
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Customize.command"
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Verify.command"
-  /bin/rm -f "$HOME/Desktop/Codex Dream Skin - Restore.command"
+  remove_managed_macos_launchers \
+    || fail "Owned Desktop launchers could not be removed safely."
 fi
 
 printf 'Codex Dream Skin Studio was removed and the requested macOS restore actions completed successfully.\n'

@@ -230,6 +230,7 @@ ensure_state_root() { :; }
 state_field() { printf '9341\n'; }
 codex_is_running() { return 1; }
 verified_cdp_browser_id() { printf 'endpoint-probe\n' >> "__MARKER__"; return 1; }
+saved_managed_listener_is_absent() { return 0; }
 stop_recorded_injector() { printf 'stop-injector\n' >> "__MARKER__"; return 0; }
 recover_damaged_injector_state_without_live_candidate() { return 1; }
 release_codex_launchd_job() { printf 'release-job\n' >> "__MARKER__"; }

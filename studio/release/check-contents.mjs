@@ -5,6 +5,7 @@ import path from "node:path";
 const FILE_OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 const DIRECTORY_OPEN_FLAGS = FILE_OPEN_FLAGS | (fsConstants.O_DIRECTORY ?? 0);
 const CAN_OPEN_DIRECTORY_HANDLE = typeof fsConstants.O_DIRECTORY === "number";
+const WINDOWS_USER_PATH_RE = /[A-Za-z]:[\\/]Users[\\/][^\\/\0\r\n]+[\\/]/i;
 
 class ReleaseContentError extends Error {
   constructor(reason) {
@@ -134,7 +135,7 @@ function isNativeExecutable(bytes) {
 function containsUserPathText(text) {
   const withoutRuntimeTemplate = text.replace(/"\/Users\/\$CURRENT_USER"/g, "");
   return /\/Users\/[^/\0\r\n]+\//.test(withoutRuntimeTemplate)
-    || /C:\\Users\\[^\\\0\r\n]+\\/i.test(text);
+    || WINDOWS_USER_PATH_RE.test(text);
 }
 
 function containsUserPath(bytes) {

@@ -148,6 +148,7 @@ function Start-StudioProcess {
   $savedArgv = $env:DREAM_SKIN_TEST_ARGV
   $savedStateTemplate = $env:DREAM_SKIN_TEST_STATE_TEMPLATE
   $savedRendererTrace = $env:DREAM_SKIN_TEST_RENDERER_TRACE
+  $savedRuntimeTrace = $env:DREAM_SKIN_TEST_RUNTIME_TRACE
   try {
     $env:LOCALAPPDATA = $Case.LocalAppData
     $env:USERPROFILE = $Case.UserProfile
@@ -157,6 +158,7 @@ function Start-StudioProcess {
     $env:DREAM_SKIN_TEST_ARGV = $Case.ArgvPath
     $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $Case.StateTemplate
     $env:DREAM_SKIN_TEST_RENDERER_TRACE = Join-Path $Case.Root 'renderer-trace.txt'
+    $env:DREAM_SKIN_TEST_RUNTIME_TRACE = Join-Path $Case.Root 'runtime-trace.txt'
     $argumentLine = "-NoProfile -File `"$adapterPath`""
     if (-not $OmitOperation) { $argumentLine += " -Operation $Operation" }
     if ($ExtraArguments.Count -gt 0) { $argumentLine += ' ' + ($ExtraArguments -join ' ') }
@@ -171,6 +173,7 @@ function Start-StudioProcess {
     $env:DREAM_SKIN_TEST_ARGV = $savedArgv
     $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $savedStateTemplate
     $env:DREAM_SKIN_TEST_RENDERER_TRACE = $savedRendererTrace
+    $env:DREAM_SKIN_TEST_RUNTIME_TRACE = $savedRuntimeTrace
   }
   return [pscustomobject]@{ Process = $process; StdoutPath = $stdoutPath; StderrPath = $stderrPath; Case = $Case }
 }
@@ -299,10 +302,10 @@ foreach ($required in @(
   '$powershellPath = Join-Path $PSHOME ''powershell.exe''',
   "'install-dream-skin.ps1'", "@('-NoShortcuts', '-NodePath', `$PrivateNodePath)",
   "'pause-dream-skin.ps1'", "@('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')",
-  "[Console]::Error.WriteLine(\"DREAM_SKIN_PROGRESS=`$progress\")",
+  '[Console]::Error.WriteLine("DREAM_SKIN_PROGRESS=$progress")',
   "Get-DreamSkinNodeRuntime -NodePath `$PrivateNodePath -ExpectedVersion '22.23.1'",
   "`$childArguments += '-AdapterLockHeld'",
-  "`$startInfo.EnvironmentVariables['DREAM_SKIN_ADAPTER_LOCK_OWNER_PID'] = \"`$PID\"",
+  '$startInfo.EnvironmentVariables[''DREAM_SKIN_ADAPTER_LOCK_OWNER_PID''] = "$PID"',
   "@('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')",
   "New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official'",
   'Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot',
@@ -369,7 +372,6 @@ $restoreStop = $restoreSourceContract.IndexOf('Stop-DreamSkinCodex -Codex $codex
 $restoreWrite = $restoreSourceContract.IndexOf('Ensure-DreamSkinManagedDirectory', [StringComparison]::Ordinal)
 if ($restoreStop -lt 0 -or $restoreWrite -le $restoreStop) { throw 'Restore mutates managed state before Codex closes.' }
 $restorePublish = $restoreSourceContract.IndexOf('Publish-DreamSkinConfigBackupArchive -BackupPath $backup', [StringComparison]::Ordinal)
-$restoreStateCleanup = $restoreSourceContract.IndexOf('Remove-DreamSkinRecoveryArtifact -Path $StatePath', [StringComparison]::Ordinal)
 $restorePauseCleanup = $restoreSourceContract.IndexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path `$StateRoot 'paused')", [StringComparison]::Ordinal)
 $restoreMarkerToken = 'Remove-DreamSkinRecoveryArtifact -Path $backupMarkerPath'
 $restoreMarkerCleanup = if ($restorePauseCleanup -ge 0) {
@@ -379,11 +381,18 @@ $restoreBackupCleanup = if ($restoreMarkerCleanup -ge 0) {
   $restoreSourceContract.IndexOf('Remove-DreamSkinRecoveryArtifact -Path $backup',
     $restoreMarkerCleanup + $restoreMarkerToken.Length, [StringComparison]::Ordinal)
 } else { -1 }
-$restoreCommit = if ($restoreBackupCleanup -ge 0) {
-  $restoreSourceContract.IndexOf('$transactionCommitted = $true', $restoreBackupCleanup, [StringComparison]::Ordinal)
-} else { -1 }
 $restoreGuardComplete = if ($restoreBackupCleanup -ge 0) {
   $restoreSourceContract.IndexOf('$missingConfigGuard.Complete()', $restoreBackupCleanup, [StringComparison]::Ordinal)
+} else { -1 }
+$restoreStateCleanup = if ($restoreGuardComplete -ge 0) {
+  $restoreSourceContract.IndexOf('[DreamSkinConfigNative]::DeleteExpectedFile(',
+    $restoreGuardComplete, [StringComparison]::Ordinal)
+} else { -1 }
+$restoreStateGuardComplete = if ($restoreStateCleanup -ge 0) {
+  $restoreSourceContract.IndexOf('$statePathGuard.Complete()', $restoreStateCleanup, [StringComparison]::Ordinal)
+} else { -1 }
+$restoreCommit = if ($restoreStateGuardComplete -ge 0) {
+  $restoreSourceContract.IndexOf('$transactionCommitted = $true', $restoreStateGuardComplete, [StringComparison]::Ordinal)
 } else { -1 }
 $restoreRelaunch = if ($restoreCommit -ge 0) {
   $restoreSourceContract.IndexOf('Start-Process -FilePath $relaunchCodex.Executable', $restoreCommit, [StringComparison]::Ordinal)
@@ -393,10 +402,11 @@ if (-not $restoreSourceContract.Contains("Join-Path `$StateRoot 'config.restored
   -not $restoreSourceContract.Contains('$transactionCommitted = $false') -or
   -not $restoreSourceContract.Contains('Get-DreamSkinRecoveryArtifactSnapshot') -or
   -not $restoreSourceContract.Contains('Restore-DreamSkinRecoveryArtifactSnapshot') -or
-  $restorePublish -lt 0 -or $restoreStateCleanup -le $restorePublish -or
-  $restorePauseCleanup -le $restoreStateCleanup -or $restoreMarkerCleanup -le $restorePauseCleanup -or
+  $restorePublish -lt 0 -or $restorePauseCleanup -le $restorePublish -or
+  $restoreMarkerCleanup -le $restorePauseCleanup -or
   $restoreBackupCleanup -le $restoreMarkerCleanup -or $restoreGuardComplete -le $restoreBackupCleanup -or
-  $restoreCommit -le $restoreGuardComplete -or
+  $restoreStateCleanup -le $restoreGuardComplete -or
+  $restoreStateGuardComplete -le $restoreStateCleanup -or $restoreCommit -le $restoreStateGuardComplete -or
   $restoreRelaunch -le $restoreCommit -or $shortcutCleanup -le $restorePublish -or
   -not $restoreSourceContract.Contains('if (-not $transactionCommitted -and $configChanged') -or
   -not $restoreSourceContract.Contains('Write-DreamSkinBytesAtomically -Path $config -Bytes $configBeforeRestoreSnapshot.Bytes') -or
@@ -505,6 +515,7 @@ using System.IO;
 
 public static class StudioFakeNode {
   public static int Main(string[] args) {
+    string scenario = Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_SCENARIO");
     if (args.Length == 2 && args[0] == "-p" && args[1] == "process.versions.node") {
       Console.Write(Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_NODE_VERSION") ?? "22.23.1");
       return 0;
@@ -515,11 +526,33 @@ public static class StudioFakeNode {
     }
     if (Array.IndexOf(args, "--remove") >= 0) {
       File.AppendAllText(Environment.GetEnvironmentVariable("DREAM_SKIN_REAL_TRACE"), "remove\n");
-      return Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_SCENARIO") == "real-pause-remove-fail" ? 9 : 0;
+      File.AppendAllText(Environment.GetEnvironmentVariable("DREAM_SKIN_REAL_TRACE"),
+        "remove-args:" + String.Join(" ", args) + "\n");
+      return scenario == "real-pause-remove-fail" ||
+        scenario == "start-rollback-remove-fail" || scenario == "resume-rollback-remove-fail" ? 9 : 0;
+    }
+    if (Array.IndexOf(args, "--watch") >= 0) {
+      File.AppendAllText(Environment.GetEnvironmentVariable("DREAM_SKIN_REAL_TRACE"), "foreground-watch\n");
+      if (scenario == "start-foreground-state-replaced" ||
+        scenario == "combined-closed-new-foreground-resume-saved-state-replaced") {
+        string statePath = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"),
+          "CodexDreamSkin", "state.json");
+        File.Delete(statePath);
+        File.WriteAllText(statePath, "{\"schemaVersion\":3,\"newTransaction\":true}",
+          new System.Text.UTF8Encoding(false));
+        File.AppendAllText(Environment.GetEnvironmentVariable("DREAM_SKIN_REAL_TRACE"),
+          "foreground-state-replaced\n");
+      }
+      if (scenario == "combined-closed-new-foreground-resume-saved-browser-replaced") {
+        File.AppendAllText(Environment.GetEnvironmentVariable("DREAM_SKIN_REAL_TRACE"),
+          "foreground-browser-replaced\n");
+      }
+      return scenario == "start-foreground-success" ? 0 : 9;
     }
     string expectedInjector = Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_INJECTOR");
-    string scenario = Environment.GetEnvironmentVariable("DREAM_SKIN_TEST_SCENARIO");
-    string expectedTimeout = scenario.StartsWith("real-") ? "30000" : "5000";
+    bool realLifecycle = scenario.StartsWith("real-") || scenario.StartsWith("start-rollback-") ||
+      scenario.StartsWith("resume-rollback-");
+    string expectedTimeout = realLifecycle ? "30000" : "5000";
     bool exact = args.Length == 8 &&
       String.Equals(Path.GetFullPath(args[0]), Path.GetFullPath(expectedInjector), StringComparison.OrdinalIgnoreCase) &&
       args[1] == "--verify" && args[2] == "--port" && args[3] == "9335" &&
@@ -580,7 +613,7 @@ function Get-DreamSkinCodexProcesses {
   }
   $running = $env:DREAM_SKIN_TEST_SCENARIO -in @(
     'running', 'active', 'stale', 'reused', 'damaged', 'renderer-pass', 'browser-mismatch',
-    'renderer-fail', 'active-exact-runtime', 'active-wrong-runtime', 'mutex-hold',
+    'renderer-fail', 'active-exact-runtime', 'active-wrong-runtime', 'deep-active-wrong-runtime', 'mutex-hold',
     'lifecycle-install-running', 'lifecycle-install-timeout', 'lifecycle-apply',
     'lifecycle-apply-timeout', 'lifecycle-pause', 'pause-remove-fail', 'resume-hot', 'resume-cold-paused',
     'lifecycle-resume', 'lifecycle-resume-timeout', 'lifecycle-restore',
@@ -623,9 +656,37 @@ function ConvertTo-DreamSkinProcessArgument {
 }
 function Get-DreamSkinVerifiedCdpIdentity {
   param([int]$Port, [object]$Codex)
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'start-foreground-existing-fail') {
+    Add-RealLifecycleTrace 'cdp'
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'start-foreground-existing-identity-replaced') {
+    Add-RealLifecycleTrace 'cdp'
+    if ((Test-Path -LiteralPath $env:DREAM_SKIN_REAL_TRACE -PathType Leaf) -and
+      [IO.File]::ReadAllText($env:DREAM_SKIN_REAL_TRACE).Contains('foreground-watch')) {
+      return [pscustomobject]@{ BrowserId = 'browser-other' }
+    }
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq
+    'combined-closed-new-foreground-resume-saved-browser-replaced') {
+    if (-not $script:DreamSkinCdpLaunched) { return $null }
+    Add-RealLifecycleTrace 'cdp'
+    if ((Test-Path -LiteralPath $env:DREAM_SKIN_REAL_TRACE -PathType Leaf) -and
+      [IO.File]::ReadAllText($env:DREAM_SKIN_REAL_TRACE).Contains('foreground-browser-replaced')) {
+      return [pscustomobject]@{ BrowserId = 'browser-other' }
+    }
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'start-foreground-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-foreground-*') {
+    if (-not $script:DreamSkinCdpLaunched) { return $null }
+    Add-RealLifecycleTrace 'cdp'
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'browser-mismatch') { return [pscustomobject]@{ BrowserId = 'browser-other' } }
   if ($env:DREAM_SKIN_TEST_SCENARIO -in @(
-    'renderer-pass', 'renderer-fail', 'active-exact-runtime', 'active-wrong-runtime',
+    'renderer-pass', 'renderer-fail', 'active-exact-runtime', 'active-wrong-runtime', 'deep-active-wrong-runtime',
     'lifecycle-apply', 'lifecycle-pause', 'pause-remove-fail',
     'resume-hot', 'lifecycle-resume', 'lifecycle-verify', 'verify-fail'
   )) { return [pscustomobject]@{ BrowserId = 'browser-123' } }
@@ -633,10 +694,13 @@ function Get-DreamSkinVerifiedCdpIdentity {
 }
 function Get-DreamSkinNodeRuntime {
   param([int]$MinimumMajor = 22, [string]$NodePath, [string]$ExpectedVersion)
+  if ($env:DREAM_SKIN_TEST_RUNTIME_TRACE) {
+    [IO.File]::AppendAllText($env:DREAM_SKIN_TEST_RUNTIME_TRACE, "runtime`r`n", [Text.UTF8Encoding]::new($false))
+  }
   $expected = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime\node.exe'
   if (-not (Test-DreamSkinPathEqual -Left $NodePath -Right $expected) -or
     -not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw 'Deep status did not use the fixed private runtime.' }
-  $version = if ($env:DREAM_SKIN_TEST_SCENARIO -in @('wrong-runtime', 'active-wrong-runtime')) {
+  $version = if ($env:DREAM_SKIN_TEST_SCENARIO -match 'wrong-runtime') {
     '22.22.0'
   } else {
     '22.23.1'
@@ -689,6 +753,63 @@ foreach ($scriptName in @(
 }
 $realRestoreFixturePath = Join-Path $realScripts 'restore-dream-skin.ps1'
 $realRestoreFixture = [IO.File]::ReadAllText($realRestoreFixturePath)
+$managedStateProofToken = '      Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $stateArtifactSnapshot'
+if (-not $realRestoreFixture.Contains($managedStateProofToken)) {
+  throw 'schema-4 state race fixture could not locate the pre-mutation state proof.'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($managedStateProofToken, @'
+      Invoke-DreamSkinManagedStateRace -Phase 'before-proof'
+      Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $stateArtifactSnapshot
+      Invoke-DreamSkinManagedStateRace -Phase 'post-proof'
+'@.TrimEnd())
+$managedStateGuardToken = '      $statePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)'
+if (-not $realRestoreFixture.Contains($managedStateGuardToken)) {
+  throw 'schema-4 state race fixture could not locate the post-delete path guard.'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($managedStateGuardToken, @'
+      $statePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)
+      Invoke-DreamSkinManagedStateRace -Phase 'post-delete'
+'@.TrimEnd())
+$transitionBeforeSnapshotToken = '  $registeredCodexInstalls = @(Get-DreamSkinRegisteredCodexInstalls)'
+if (-not $realRestoreFixture.Contains($transitionBeforeSnapshotToken)) {
+  throw 'state transition fixture could not locate the pre-snapshot boundary.'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($transitionBeforeSnapshotToken, @'
+  Invoke-DreamSkinStateTransitionRace -Phase 'before-snapshot'
+  $registeredCodexInstalls = @(Get-DreamSkinRegisteredCodexInstalls)
+'@.TrimEnd())
+$transitionAfterSnapshotToken = '  $configBeforeRestoreSnapshot = $null'
+if (-not $realRestoreFixture.Contains($transitionAfterSnapshotToken)) {
+  throw 'state transition fixture could not locate the post-snapshot boundary.'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($transitionAfterSnapshotToken, @'
+  Invoke-DreamSkinStateTransitionRace -Phase 'after-snapshot'
+  $configBeforeRestoreSnapshot = $null
+'@.TrimEnd())
+$transitionRollbackToken = '    if (-not $transactionCommitted) {'
+if (-not $realRestoreFixture.Contains($transitionRollbackToken)) {
+  throw 'state transition fixture could not locate the artifact rollback boundary.'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($transitionRollbackToken, @'
+    Invoke-DreamSkinStateTransitionRace -Phase 'during-rollback'
+    if (-not $transactionCommitted) {
+'@.TrimEnd())
+$stateQuarantineToken = '      $damagedStatePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)'
+if (-not $realRestoreFixture.Contains($stateQuarantineToken)) {
+  throw 'damaged-state race fixture could not locate the post-quarantine guard.'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($stateQuarantineToken, @'
+      $damagedStatePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)
+      Invoke-DreamSkinStateRace -Phase 'post-proof'
+'@.TrimEnd())
+$stateArchiveToken = '      $quarantinedStatePath = Archive-DreamSkinStateFile -Path $StatePath `'
+if (-not $realRestoreFixture.Contains($stateArchiveToken)) {
+  throw 'damaged-state race fixture could not locate the quarantine boundary.'
+}
+$realRestoreFixture = $realRestoreFixture.Replace($stateArchiveToken, @'
+      Invoke-DreamSkinStateRace -Phase 'before-quarantine'
+      $quarantinedStatePath = Archive-DreamSkinStateFile -Path $StatePath `
+'@.TrimEnd())
 $completeBoundaryToken = '    if ($null -ne $missingConfigGuard) { $missingConfigGuard.Complete() }'
 if (-not $realRestoreFixture.Contains($completeBoundaryToken)) {
   throw 'missing-config-complete-boundary could not locate MissingPathGuard.Complete().'
@@ -704,6 +825,11 @@ $realRestoreFixture = $realRestoreFixture.Replace($completeBoundaryToken, @'
 $realCommonStub = @'
 . $env:DREAM_SKIN_REAL_COMMON
 $script:realShortcutCleanup = ${function:Remove-DreamSkinManagedLegacyShortcuts}
+$script:realArchiveState = ${function:Archive-DreamSkinStateFile}
+$script:realReadState = ${function:Read-DreamSkinState}
+$script:realStableFileSnapshot = ${function:Get-DreamSkinStableFileSnapshot}
+$script:realStrictCodexProcesses = ${function:Get-DreamSkinCodexProcessesStrict}
+$script:realStrictPortListeners = ${function:Get-DreamSkinPortListenersStrict}
 
 function Remove-DreamSkinManagedLegacyShortcuts {
   & $script:realShortcutCleanup `
@@ -714,6 +840,120 @@ function Remove-DreamSkinManagedLegacyShortcuts {
 function Add-RealLifecycleTrace {
   param([string]$Value)
   [IO.File]::AppendAllText($env:DREAM_SKIN_REAL_TRACE, $Value + "`r`n", [Text.UTF8Encoding]::new($false))
+}
+function Get-DreamSkinStableFileSnapshot {
+  param([string]$Path, [switch]$AllowMissing)
+  if (($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*-state-snapshot-fail*' -or
+      $env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error*state-snapshot-fail*') -and
+    [IO.Path]::GetFileName($Path) -ceq 'state.json') {
+    Add-RealLifecycleTrace 'state-snapshot-fail'
+    throw 'fixture state snapshot failure'
+  }
+  return & $script:realStableFileSnapshot -Path $Path -AllowMissing:$AllowMissing
+}
+function Get-DreamSkinCodexProcessesStrict {
+  param([object]$Codex)
+  $identity = if ([IO.Path]::GetFileName("$($Codex.Executable)") -ceq 'OldCodex.exe') {
+    'saved'
+  } else { 'current' }
+  Add-RealLifecycleTrace "strict-codex:$identity"
+  return & $script:realStrictCodexProcesses -Codex $Codex
+}
+function Get-DreamSkinPortListenersStrict {
+  param([int]$Port)
+  Add-RealLifecycleTrace "strict-listener:$Port"
+  return & $script:realStrictPortListeners -Port $Port
+}
+function Invoke-DreamSkinStateTransitionRace {
+  param([ValidateSet('before-snapshot', 'after-snapshot', 'during-rollback')][string]$Phase)
+  $scenario = $env:DREAM_SKIN_TEST_SCENARIO
+  if ($scenario -notlike 'state-transition-*') { return }
+  $expectedPhase = if ($scenario -like '*-before-snapshot-*') {
+    'before-snapshot'
+  } elseif ($scenario -like '*-after-snapshot-*') {
+    'after-snapshot'
+  } else {
+    'during-rollback'
+  }
+  if ($Phase -cne $expectedPhase) { return }
+  $statePath = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin\state.json'
+  if (Test-Path -LiteralPath $statePath) {
+    Microsoft.PowerShell.Management\Move-Item -LiteralPath $statePath `
+      -Destination (Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'initial-state.json') -Force
+  }
+  $codex = New-RealLifecycleCodex
+  $newState = [ordered]@{
+    schemaVersion = 4; platform = 'windows'; recoveryKind = 'managed-cdp'; port = 19473
+    codexExe = $codex.Executable; codexPackageRoot = $codex.PackageRoot
+    codexPackageFullName = $codex.PackageFullName; codexPackageFamilyName = $codex.PackageFamilyName
+    codexVersion = $codex.Version; createdAt = '2026-01-01T00:00:00.0000000Z'; newAuthority = $true
+  }
+  [IO.File]::WriteAllText($statePath, ($newState | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+  Add-RealLifecycleTrace "state-transition:$Phase"
+}
+function Invoke-DreamSkinManagedStateRace {
+  param([ValidateSet('before-proof', 'post-proof', 'post-delete')][string]$Phase)
+  $scenario = $env:DREAM_SKIN_TEST_SCENARIO
+  if ($scenario -notlike 'schema4-state-race-*') { return }
+  $race = if ($scenario -like '*-same-bytes-*') {
+    'same-bytes'
+  } elseif ($scenario -like '*-post-proof-*') {
+    'post-proof'
+  } elseif ($scenario -like '*-post-delete-*') {
+    'post-delete'
+  } elseif ($scenario -like '*-reparse-*') {
+    'reparse'
+  } else {
+    'replacement'
+  }
+  $expectedPhase = switch ($race) {
+    'post-proof' { 'post-proof' }
+    'post-delete' { 'post-delete' }
+    default { 'before-proof' }
+  }
+  if ($Phase -cne $expectedPhase) { return }
+  $statePath = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin\state.json'
+  if ($Phase -cne 'post-delete') {
+    $heldPath = Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'classified-state.json'
+    Microsoft.PowerShell.Management\Move-Item -LiteralPath $statePath -Destination $heldPath -Force
+  }
+  if ($race -ceq 'same-bytes') {
+    [IO.File]::WriteAllBytes($statePath, [IO.File]::ReadAllBytes($heldPath))
+  } elseif ($race -ceq 'reparse') {
+    $external = Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'replacement-state-directory'
+    [IO.Directory]::CreateDirectory($external) | Out-Null
+    New-Item -ItemType Junction -Path $statePath -Target $external | Out-Null
+  } else {
+    $replacement = if ($Phase -ceq 'post-delete') {
+      '{"schemaVersion":4,"postDeleteTransaction":true}'
+    } else {
+      '{"schemaVersion":4,"newTransaction":true}'
+    }
+    [IO.File]::WriteAllText($statePath, $replacement, [Text.UTF8Encoding]::new($false))
+  }
+  Add-RealLifecycleTrace "schema4-state-race:$Phase"
+}
+function Invoke-DreamSkinStateRace {
+  param([ValidateSet('before-quarantine', 'post-proof')][string]$Phase)
+  $scenario = $env:DREAM_SKIN_TEST_SCENARIO
+  $statePath = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin\state.json'
+  if ($Phase -ceq 'before-quarantine' -and $scenario -like 'damaged-race-before-*') {
+    $heldPath = Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'classified-state.json'
+    Microsoft.PowerShell.Management\Move-Item -LiteralPath $statePath -Destination $heldPath -Force
+    if ($scenario -like '*same-bytes*') {
+      [IO.File]::WriteAllBytes($statePath, [IO.File]::ReadAllBytes($heldPath))
+    } elseif ($scenario -like '*reparse*') {
+      $external = Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'replacement-state-directory'
+      [IO.Directory]::CreateDirectory($external) | Out-Null
+      New-Item -ItemType Junction -Path $statePath -Target $external | Out-Null
+    } else {
+      [IO.File]::WriteAllText($statePath, '{"schemaVersion":4,"replacement":true}', [Text.UTF8Encoding]::new($false))
+    }
+    Add-RealLifecycleTrace "state-race:$Phase"
+  } elseif ($Phase -ceq 'post-proof' -and $scenario -like 'damaged-race-post-proof-*') {
+    [IO.File]::WriteAllText($statePath, '{"schemaVersion":4,"postProof":true}', [Text.UTF8Encoding]::new($false))
+    Add-RealLifecycleTrace "state-race:$Phase"
+  }
 }
 function Invoke-DreamSkinCompleteBoundaryFault {
   param([ValidateSet('before', 'after')][string]$Phase)
@@ -740,7 +980,17 @@ function Invoke-DreamSkinCompleteBoundaryFault {
   }
   Add-RealLifecycleTrace "complete-boundary:$Phase"
 }
-function Enter-DreamSkinOperationLock { Add-RealLifecycleTrace 'lock-enter'; return [pscustomobject]@{ Held = $true } }
+function Enter-DreamSkinOperationLock {
+  Add-RealLifecycleTrace 'lock-enter'
+  $script:DreamSkinOperationLockEntries = 1 + [int]$script:DreamSkinOperationLockEntries
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq
+    'combined-closed-new-foreground-resume-saved-lock-reentry-fail' -and
+    $script:DreamSkinOperationLockEntries -eq 2) {
+    Add-RealLifecycleTrace 'lock-reentry-error'
+    throw 'fixture foreground operation-lock reentry failure'
+  }
+  return [pscustomobject]@{ Held = $true }
+}
 function Exit-DreamSkinOperationLock { param([object]$Mutex) Add-RealLifecycleTrace 'lock-exit' }
 function New-RealLifecycleCodex {
   $executable = $env:DREAM_SKIN_REAL_CODEX_EXE
@@ -752,11 +1002,79 @@ function New-RealLifecycleCodex {
     Version = '2.0.0.0'
   }
 }
-function Get-DreamSkinRegisteredCodexInstalls { return @((New-RealLifecycleCodex)) }
+function New-RealOlderCodex {
+  $executable = Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'OldCodex.exe'
+  return [pscustomobject]@{
+    Executable = $executable
+    PackageRoot = Split-Path -Parent $executable
+    PackageFullName = 'OpenAI.Codex_1.9.0.0_x64__test'
+    PackageFamilyName = 'OpenAI.Codex_test'
+    Version = '1.9.0.0'
+  }
+}
+function Get-DreamSkinRegisteredCodexInstalls {
+  Add-RealLifecycleTrace 'appx-scan'
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'schema4-appx-provider-error') {
+    throw 'fixture terminating Appx provider failure'
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'schema4-appx-update-race') {
+    $script:DreamSkinAppxScans = 1 + [int]$script:DreamSkinAppxScans
+    if ($script:DreamSkinAppxScans -gt 1) { throw 'fixture Appx inventory was re-enumerated' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-older-codex') {
+    return @((New-RealLifecycleCodex), (New-RealOlderCodex))
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -in @(
+    'schema4-current-running', 'schema4-appx-update-race',
+    'schema4-appx-distinct-current-running')) {
+    return @((New-RealLifecycleCodex), (New-RealOlderCodex))
+  }
+  return @((New-RealLifecycleCodex))
+}
 function Get-DreamSkinCodexInstall { return New-RealLifecycleCodex }
 function Read-DreamSkinState {
-  param([string]$Path)
-  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'real-pause*') {
+  param([string]$Path, [byte[]]$Bytes)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error-*') {
+    $codex = if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-saved-*') {
+      New-RealOlderCodex
+    } else { New-RealLifecycleCodex }
+    return [pscustomobject]@{
+      schemaVersion = 3; platform = 'windows'; port = 9335; injectorPid = 4242
+      injectorStartedAt = '2026-01-01T00:00:00.0000000Z'
+      injectorPath = (Join-Path $PSScriptRoot 'injector.mjs'); nodePath = $env:DREAM_SKIN_REAL_NODE
+      codexExe = $codex.Executable; codexPackageRoot = $codex.PackageRoot
+      codexPackageFullName = $codex.PackageFullName; codexPackageFamilyName = $codex.PackageFamilyName
+      codexVersion = $codex.Version; browserId = 'browser-123'
+    }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'schema4-*') {
+    $codex = if ($env:DREAM_SKIN_TEST_SCENARIO -in @(
+      'schema4-current-running', 'schema4-appx-update-race',
+      'schema4-appx-distinct-current-running')) {
+      New-RealOlderCodex
+    } else {
+      New-RealLifecycleCodex
+    }
+    return [pscustomobject]@{
+      schemaVersion = 4; platform = 'windows'; recoveryKind = 'managed-cdp'; port = 19473
+      codexExe = $codex.Executable; codexPackageRoot = $codex.PackageRoot
+      codexPackageFullName = $codex.PackageFullName; codexPackageFamilyName = $codex.PackageFamilyName
+      codexVersion = $codex.Version
+    }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'state-transition-*') {
+    return & $script:realReadState -Path $Path -Bytes $Bytes
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'damaged-recovery-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'damaged-race-*') {
+    return & $script:realReadState -Path $Path -Bytes $Bytes
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'real-pause*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'resume-rollback-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like '*-prior-state-fail') {
     return [pscustomobject]@{
       schemaVersion = 3; platform = 'windows'; port = 9335; injectorPid = 4242
       injectorStartedAt = '2026-01-01T00:00:00.0000000Z'
@@ -770,16 +1088,54 @@ function Read-DreamSkinState {
   return $null
 }
 function Get-DreamSkinCodexStatePathCandidate { param([object]$State) return $null }
-function Resolve-DreamSkinCodexInstallFromState { param([object]$State, [object[]]$RegisteredInstalls) return New-RealLifecycleCodex }
-function Get-DreamSkinCodexInstallFromState { param([object]$State) return $null }
+function Resolve-DreamSkinCodexInstallFromState {
+  param([object]$State, [object[]]$RegisteredInstalls)
+  foreach ($install in $RegisteredInstalls) {
+    if ((Test-DreamSkinPathEqual -Left "$($State.codexExe)" -Right $install.Executable) -and
+      "$($State.codexPackageFullName)" -ieq $install.PackageFullName -and
+      "$($State.codexPackageFamilyName)" -ieq $install.PackageFamilyName) {
+      return $install
+    }
+  }
+  return $null
+}
+function Get-DreamSkinCodexInstallFromState {
+  param([object]$State)
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error-*') {
+    if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-saved-*') { return New-RealOlderCodex }
+    return New-RealLifecycleCodex
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'schema4-current-running') { return New-RealOlderCodex }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'schema4-*') { return New-RealLifecycleCodex }
+  return $null
+}
 function Get-DreamSkinCodexProcesses {
   param([object]$Codex)
   Add-RealLifecycleTrace 'codex-process'
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error-*') {
+    $expected = if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-saved-*') {
+      New-RealOlderCodex
+    } else { New-RealLifecycleCodex }
+    if (-not $script:DreamSkinPrelaunchCodexStopped -and
+      (Test-DreamSkinPathEqual -Left $Codex.Executable -Right $expected.Executable)) {
+      return @([pscustomobject]@{ ProcessId = 5152; ExecutablePath = $Codex.Executable })
+    }
+    return @()
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-older-codex' -and
+    [IO.Path]::GetFileName("$($Codex.Executable)") -ceq 'OldCodex.exe' -and
+    -not $script:DreamSkinOlderCodexStopped) {
+    return @([pscustomobject]@{ ProcessId = 5252; ExecutablePath = $Codex.Executable })
+  }
   if ($env:DREAM_SKIN_TEST_SCENARIO -match '^real-(?:install|start|pause)' -or
     $env:DREAM_SKIN_TEST_SCENARIO -in @(
       'real-restore-unauthorized', 'real-restore-timeout', 'real-restore-force',
-      'real-restore-state-unlink-fail', 'real-restore-paused-unlink-fail',
-      'real-restore-archive-fail', 'real-restore-archive-marker-publish-fail',
+      'real-restore-paused-unlink-fail', 'real-restore-archive-fail',
+      'real-restore-archive-marker-publish-fail',
       'real-restore-archive-marker-unlink-fail', 'real-restore-marker-unlink-fail',
       'real-restore-backup-unlink-fail',
       'real-restore-launch-fail', 'real-restore-post-launch-write',
@@ -794,14 +1150,81 @@ function Get-DreamSkinCodexProcesses {
 function Stop-DreamSkinCodex {
   param([object]$Codex, [switch]$AllowForce)
   Add-RealLifecycleTrace "stop:$([bool]$AllowForce)"
-  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-timeout') {
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'start-foreground-new-fail' -and
+    $script:DreamSkinCdpLaunched) {
+    $script:DreamSkinCdpLaunched = $false
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error-*') {
+    $identity = if ([IO.Path]::GetFileName("$($Codex.Executable)") -ceq 'OldCodex.exe') {
+      'saved'
+    } else { 'current' }
+    Add-RealLifecycleTrace "stop-codex:$identity"
+    $script:DreamSkinPrelaunchCodexStopped = $true
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-timeout' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like '*-rollback-close-fail' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-force-fail') {
     throw 'Codex did not close within 15 seconds. Close it manually or explicitly authorize a forced restart.'
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-older-codex' -and
+    [IO.Path]::GetFileName("$($Codex.Executable)") -ceq 'OldCodex.exe') {
+    $script:DreamSkinOlderCodexStopped = $true
   }
 }
 function Test-DreamSkinCodexPortOwner { param([int]$Port, [object]$Codex) return $false }
 function Get-DreamSkinVerifiedCdpIdentity {
   param([int]$Port, [object]$Codex)
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'start-foreground-existing-fail') {
+    Add-RealLifecycleTrace 'cdp'
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'start-foreground-existing-identity-replaced') {
+    Add-RealLifecycleTrace 'cdp'
+    if ((Test-Path -LiteralPath $env:DREAM_SKIN_REAL_TRACE -PathType Leaf) -and
+      [IO.File]::ReadAllText($env:DREAM_SKIN_REAL_TRACE).Contains('foreground-watch')) {
+      return [pscustomobject]@{ BrowserId = 'browser-other' }
+    }
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq
+    'combined-closed-new-foreground-resume-saved-browser-replaced') {
+    if (-not $script:DreamSkinCdpLaunched) { return $null }
+    Add-RealLifecycleTrace 'cdp'
+    if ((Test-Path -LiteralPath $env:DREAM_SKIN_REAL_TRACE -PathType Leaf) -and
+      [IO.File]::ReadAllText($env:DREAM_SKIN_REAL_TRACE).Contains('foreground-browser-replaced')) {
+      return [pscustomobject]@{ BrowserId = 'browser-other' }
+    }
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'start-foreground-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-foreground-*') {
+    if (-not $script:DreamSkinCdpLaunched) { return $null }
+    Add-RealLifecycleTrace 'cdp'
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-rollback-identity-lost') {
+    $script:DreamSkinRollbackIdentityCalls = 1 + [int]$script:DreamSkinRollbackIdentityCalls
+    if ($script:DreamSkinRollbackIdentityCalls -le 3) {
+      Add-RealLifecycleTrace 'cdp'
+      return [pscustomobject]@{ BrowserId = 'browser-123' }
+    }
+    Add-RealLifecycleTrace 'cdp-missing'
+    return $null
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-rollback-close-fail' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like '*-rollback-listener-stuck') {
+    if (-not $script:DreamSkinCdpLaunched) { return $null }
+    Add-RealLifecycleTrace 'cdp'
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-rollback-remove-fail') {
+    Add-RealLifecycleTrace 'cdp'
+    return [pscustomobject]@{ BrowserId = 'browser-123' }
+  }
   if ($env:DREAM_SKIN_TEST_SCENARIO -like 'real-pause*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'resume-rollback-*' -or
     $env:DREAM_SKIN_TEST_SCENARIO -in @('real-verify', 'real-lock-owner-valid')) {
     Add-RealLifecycleTrace 'cdp'
     return [pscustomobject]@{ BrowserId = 'browser-123' }
@@ -816,25 +1239,280 @@ function Test-DreamSkinBrowserId { param([string]$Value) return $Value -cmatch '
 function Get-CimInstance {
   param([string]$ClassName, [string]$Filter, [object]$ErrorAction)
   if ($ClassName -ne 'Win32_Process') { return $null }
+  if ($Filter -eq "Name = 'ChatGPT.exe'") {
+    if ("$ErrorAction" -eq 'Stop') { Add-RealLifecycleTrace 'strict-cim-scan' }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*' -and "$ErrorAction" -eq 'Stop') {
+      $script:DreamSkinPrelaunchStrictCimScans = 1 + [int]$script:DreamSkinPrelaunchStrictCimScans
+      $closedError = $env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-closed-cim-error'
+      $currentError = $env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-current-cim-error'
+      if (($closedError -and $script:DreamSkinPrelaunchStrictCimScans -eq 1) -or
+        ($currentError -and $script:DreamSkinPrelaunchStrictCimScans -eq 2)) {
+        Add-RealLifecycleTrace 'strict-cim-error'
+        throw 'fixture pre-launch closed-session CIM enumeration failure'
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -and "$ErrorAction" -eq 'Stop') {
+      $script:DreamSkinCombinedStrictCimScans = 1 + [int]$script:DreamSkinCombinedStrictCimScans
+      $newError = $env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-new-cim-error'
+      $closedError = $env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-closed-cim-error'
+      if (($newError -and $script:DreamSkinCombinedStrictCimScans -eq 1) -or
+        ($closedError -and $script:DreamSkinCombinedStrictCimScans -eq 2)) {
+        Add-RealLifecycleTrace 'strict-cim-error'
+        throw 'fixture combined cleanup CIM enumeration failure'
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq
+      'combined-closed-new-foreground-resume-saved-browser-replaced' -and
+      "$ErrorAction" -eq 'Stop') {
+      $codex = New-RealLifecycleCodex
+      return [pscustomobject]@{
+        ProcessId = 5260; ExecutablePath = $codex.Executable; CommandLine = 'Codex.exe'
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'start-foreground-new-fail' -and
+      "$ErrorAction" -eq 'Stop' -and $script:DreamSkinCdpLaunched) {
+      $codex = New-RealLifecycleCodex
+      return [pscustomobject]@{
+        ProcessId = 5261; ExecutablePath = $codex.Executable; CommandLine = 'Codex.exe'
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'schema4-restore-cim-error' -and "$ErrorAction" -eq 'Stop') {
+      throw 'fixture retained-state CIM enumeration failure'
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'schema4-restore-process-appears' -and
+      "$ErrorAction" -eq 'Stop') {
+      $script:DreamSkinSchema4ProcessScans = 1 + [int]$script:DreamSkinSchema4ProcessScans
+      if ($script:DreamSkinSchema4ProcessScans -ge 2) {
+        $codex = New-RealLifecycleCodex
+        return [pscustomobject]@{
+          ProcessId = 5257; ExecutablePath = $codex.Executable; CommandLine = 'Codex.exe'
+        }
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -in @(
+      'schema4-current-running', 'schema4-appx-distinct-current-running') -and
+      "$ErrorAction" -eq 'Stop') {
+      $codex = New-RealLifecycleCodex
+      return [pscustomobject]@{
+        ProcessId = 5258; ExecutablePath = $codex.Executable; CommandLine = 'Codex.exe'
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-cim-error' -and "$ErrorAction" -eq 'Stop') {
+      Add-RealLifecycleTrace 'strict-cim-error'
+      throw 'fixture CIM enumeration failure'
+    }
+    Add-RealLifecycleTrace 'codex-absence-scan'
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-uninspectable-codex') {
+      return [pscustomobject]@{ ProcessId = 5253; ExecutablePath = $null; CommandLine = $null }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-unmatched-codex') {
+      return [pscustomobject]@{
+        ProcessId = 5254
+        ExecutablePath = 'C:\Other\ChatGPT.exe'
+        CommandLine = '"C:\Other\ChatGPT.exe"'
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-older-codex' -and
+      -not $script:DreamSkinOlderCodexStopped) {
+      $older = New-RealOlderCodex
+      return [pscustomobject]@{ ProcessId = 5252; ExecutablePath = $older.Executable; CommandLine = 'OldCodex.exe' }
+    }
+    return @()
+  }
+  if ($Filter -eq "Name = 'powershell.exe' OR Name = 'pwsh.exe'") {
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-tray-like') {
+      return [pscustomobject]@{
+        ProcessId = 6161
+        ExecutablePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+        CommandLine = "powershell.exe -File `"$PSScriptRoot\tray-dream-skin.ps1`""
+      }
+    }
+    if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-uninspectable-tray') {
+      return [pscustomobject]@{ ProcessId = 6162; ExecutablePath = $null; CommandLine = $null }
+    }
+    return @()
+  }
+  if ($Filter -eq "Name = 'node.exe'") {
+    Add-RealLifecycleTrace 'watcher-scan'
+    $scenario = $env:DREAM_SKIN_TEST_SCENARIO
+    if ($scenario -eq 'damaged-recovery-watcher-appears') {
+      $script:DreamSkinDamagedWatcherScans = 1 + [int]$script:DreamSkinDamagedWatcherScans
+      if ($script:DreamSkinDamagedWatcherScans -eq 1) { return @() }
+      $scenario = 'damaged-recovery-matching-watcher'
+    }
+    if ($scenario -eq 'damaged-recovery-matching-watcher') {
+      return [pscustomobject]@{
+        ProcessId = 8101
+        ExecutablePath = $env:DREAM_SKIN_REAL_NODE
+        CommandLine = "`"$env:DREAM_SKIN_REAL_NODE`" `"$PSScriptRoot\injector.mjs`" --watch --port 9335 --browser-id browser-123"
+      }
+    }
+    if ($scenario -eq 'damaged-recovery-mismatched-watcher') {
+      return [pscustomobject]@{
+        ProcessId = 8102
+        ExecutablePath = $env:DREAM_SKIN_REAL_NODE
+        CommandLine = '"C:\Other\node.exe" "C:\Other\foreign.mjs" --watch'
+      }
+    }
+    if ($scenario -eq 'damaged-recovery-uninspectable-watcher') {
+      return [pscustomobject]@{ ProcessId = 8103; ExecutablePath = $null; CommandLine = $null }
+    }
+    if ($scenario -eq 'damaged-recovery-versioned-watcher') {
+      $oldNode = Join-Path $env:LOCALAPPDATA `
+        'Programs\CodexDreamSkinStudio\versions\1.2.0\engine\runtime\node.exe'
+      return [pscustomobject]@{
+        ProcessId = 8104
+        ExecutablePath = $oldNode
+        CommandLine = "`"$oldNode`" `"C:\Other\foreign.mjs`" --watch"
+      }
+    }
+    if ($scenario -eq 'damaged-recovery-historical-watcher') {
+      $historicalInjector = Join-Path $env:DREAM_SKIN_REAL_CASE_ROOT 'checkout\windows\scripts\injector.mjs'
+      return [pscustomobject]@{
+        ProcessId = 8105
+        ExecutablePath = 'C:\Tools\node.exe'
+        CommandLine = "`"C:\Tools\node.exe`" `"$historicalInjector`" --watch"
+      }
+    }
+    return @()
+  }
   if ($Filter -eq "ProcessId = $PID") {
     return [pscustomobject]@{ ProcessId = $PID; ParentProcessId = [int]$env:DREAM_SKIN_REAL_PARENT_PID }
   }
   if ($Filter -match 'ProcessId = 4242') {
+    if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error-*') {
+      if ("$ErrorAction" -eq 'Stop') {
+        Add-RealLifecycleTrace 'recorded-injector-cim-provider-error'
+        throw 'fixture recorded injector CIM provider failure'
+      }
+      Add-RealLifecycleTrace 'recorded-injector-cim-provider-suppressed'
+      return $null
+    }
     Add-RealLifecycleTrace 'injector-identity'
     return [pscustomobject]@{ ProcessId = 4242; ExecutablePath = $env:DREAM_SKIN_REAL_NODE; CommandLine = 'fixture' }
   }
   return @()
 }
-function Stop-DreamSkinRecordedInjector { param([object]$State) Add-RealLifecycleTrace 'watcher-stop'; return $true }
+if ($env:DREAM_SKIN_TEST_SCENARIO -notlike 'prior-watcher-provider-error-*') {
+  function Stop-DreamSkinRecordedInjector {
+    param([object]$State)
+    Add-RealLifecycleTrace 'watcher-stop'
+    if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-prior-state-fail*') {
+      throw 'fixture prior state validation failure'
+    }
+    return $true
+  }
+}
 function Get-DreamSkinProcessExecutablePath { param([object]$ProcessInfo) return "$($ProcessInfo.ExecutablePath)" }
-function Test-DreamSkinPortAvailable { param([int]$Port) return $true }
-function Wait-DreamSkinPortAvailable { param([int]$Port, [int]$TimeoutSeconds) return $true }
-function Select-DreamSkinPort { param([int]$PreferredPort) return $PreferredPort }
+function Test-DreamSkinPortAvailable {
+  param([int]$Port)
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -or
+    (($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*' -or
+        $env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error-*') -and
+      $env:DREAM_SKIN_TEST_SCENARIO -like '*-state-*-fail*')) {
+    Add-RealLifecycleTrace "port-unavailable:$Port"
+    return $false
+  }
+  return $env:DREAM_SKIN_TEST_SCENARIO -ne 'damaged-recovery-residual-listener'
+}
+function Get-NetTCPConnection {
+  param([string]$State, [int]$LocalPort, [object]$ErrorAction)
+  Add-RealLifecycleTrace 'listener-scan'
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -and "$ErrorAction" -eq 'Stop') {
+    $script:DreamSkinCombinedStrictTcpScans = 1 + [int]$script:DreamSkinCombinedStrictTcpScans
+    $newError = $env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-new-tcp-error'
+    $closedError = $env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-closed-tcp-error'
+    if (($newError -and $script:DreamSkinCombinedStrictTcpScans -eq 1) -or
+      ($closedError -and $script:DreamSkinCombinedStrictTcpScans -eq 2)) {
+      Add-RealLifecycleTrace 'strict-tcp-error'
+      throw 'fixture combined cleanup TCP enumeration failure'
+    }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq
+    'combined-closed-new-foreground-resume-saved-browser-replaced' -and
+    "$ErrorAction" -eq 'Stop') {
+    return [pscustomobject]@{
+      LocalAddress = '127.0.0.1'; LocalPort = 19473; OwningProcess = 5260
+    }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'start-foreground-new-fail' -and
+    "$ErrorAction" -eq 'Stop' -and $script:DreamSkinCdpLaunched) {
+    return [pscustomobject]@{
+      LocalAddress = '127.0.0.1'; LocalPort = 19473; OwningProcess = 5261
+    }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-cleanup-tcp-error' -and "$ErrorAction" -eq 'Stop') {
+    Add-RealLifecycleTrace 'strict-tcp-error'
+    throw 'fixture TCP enumeration failure'
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'schema4-restore-tcp-error' -and "$ErrorAction" -eq 'Stop') {
+    throw 'fixture retained-state TCP enumeration failure'
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'schema4-restore-listener-appears' -and
+    "$ErrorAction" -eq 'Stop') {
+    $script:DreamSkinSchema4ListenerScans = 1 + [int]$script:DreamSkinSchema4ListenerScans
+    if ($script:DreamSkinSchema4ListenerScans -ge 2) {
+      return [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 19473; OwningProcess = 5259 }
+    }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-listener-probe-fail') {
+    throw 'fixture listener enumeration failure'
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'damaged-recovery-residual-listener') {
+    return [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 9335; OwningProcess = 5255 }
+  }
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-rollback-listener-stuck') {
+    return [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 9335; OwningProcess = 5256 }
+  }
+  return @()
+}
+function Wait-DreamSkinPortAvailable {
+  param([int]$Port, [int]$TimeoutSeconds)
+  Add-RealLifecycleTrace 'wait-port'
+  return $env:DREAM_SKIN_TEST_SCENARIO -notlike '*-rollback-listener-stuck'
+}
+function Select-DreamSkinPort {
+  param([int]$PreferredPort)
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'combined-closed-new-*' -or
+    $env:DREAM_SKIN_TEST_SCENARIO -like 'prior-watcher-provider-error-*') {
+    Add-RealLifecycleTrace 'port-selected:19473'
+    return 19473
+  }
+  return $PreferredPort
+}
 function Confirm-DreamSkinRestart { param([string]$Message) return $true }
+function Get-Date {
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-early-wait-*') {
+    $script:DreamSkinFakeClock = 1 + [int]$script:DreamSkinFakeClock
+    return ([datetime]'2026-01-01T00:00:00Z').AddSeconds(60 * $script:DreamSkinFakeClock)
+  }
+  return Microsoft.PowerShell.Utility\Get-Date
+}
+function Start-Sleep {
+  param([int]$Milliseconds)
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like '*-early-wait-*') { return }
+  Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $Milliseconds
+}
 function ConvertTo-DreamSkinProcessArgument { param([string]$Value) return $Value }
 function Get-DreamSkinProcessStartedAt { param([int]$ProcessId) return '2026-01-01T00:00:00.0000000Z' }
-function Write-DreamSkinState { param([string]$Path, [object]$State) Add-RealLifecycleTrace 'state-write' }
-function Archive-DreamSkinStateFile { param([string]$Path) Add-RealLifecycleTrace 'state-archive'; return "$Path.stale" }
+function Write-DreamSkinState {
+  param([string]$Path, [object]$State)
+  Add-RealLifecycleTrace 'state-write'
+  Add-RealLifecycleTrace "state-write:$($State.schemaVersion):$($State.port):$($State.recoveryKind)"
+  if ($env:DREAM_SKIN_TEST_SCENARIO -like 'prelaunch-closed-*-state-write-fail*') {
+    throw 'fixture state publication failure'
+  }
+  [IO.File]::WriteAllText($Path, ($State | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+}
+function Archive-DreamSkinStateFile {
+  param([string]$Path, [object]$ExpectedSnapshot)
+  Add-RealLifecycleTrace 'state-archive'
+  if ($PSBoundParameters.ContainsKey('ExpectedSnapshot')) {
+    return & $script:realArchiveState -Path $Path -ExpectedSnapshot $ExpectedSnapshot
+  }
+  return & $script:realArchiveState -Path $Path
+}
 function ConvertFrom-DreamSkinUtf8Bytes { param([byte[]]$Bytes, [string]$Path) return [Text.Encoding]::UTF8.GetString($Bytes) }
 function Read-DreamSkinUtf8File { param([string]$Path) return [IO.File]::ReadAllText($Path) }
 function Install-DreamSkinBaseTheme { param([string]$ConfigPath, [string]$BackupPath) Add-RealLifecycleTrace 'install-config' }
@@ -851,6 +1529,9 @@ function Write-DreamSkinBytesAtomically {
   param([string]$Path, [byte[]]$Bytes, [byte[]]$ExpectedBytes, [object]$ExpectedSnapshot)
   if ([IO.Path]::GetFileName($Path) -ceq 'config.restored.toml') {
     Add-RealLifecycleTrace 'archive-backup'
+    if ($env:DREAM_SKIN_TEST_SCENARIO -like 'state-transition-*-during-rollback-*') {
+      throw 'fixture transition rollback failure'
+    }
     if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-archive-fail') { throw 'fixture archive failure' }
   } elseif ([IO.Path]::GetFileName($Path) -ceq 'config.restored.toml.appearance.json') {
     Add-RealLifecycleTrace 'archive-marker'
@@ -868,6 +1549,16 @@ function Start-Process {
   param([string]$FilePath, [object]$ArgumentList, [object]$WindowStyle, [switch]$PassThru,
     [string]$RedirectStandardOutput, [string]$RedirectStandardError)
   Add-RealLifecycleTrace 'start-process'
+  if (Test-DreamSkinPathEqual -Left $FilePath -Right $env:DREAM_SKIN_REAL_NODE) {
+    Add-RealLifecycleTrace 'start-watcher'
+  } elseif ($null -ne $ArgumentList) {
+    $script:DreamSkinCdpLaunched = $true
+    Add-RealLifecycleTrace 'start-cdp'
+  } else {
+    Add-RealLifecycleTrace 'start-official'
+    $identity = if ([IO.Path]::GetFileName($FilePath) -ceq 'OldCodex.exe') { 'saved' } else { 'current' }
+    Add-RealLifecycleTrace "start-official:$identity"
+  }
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-launch-fail') { throw 'fixture relaunch failure' }
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-post-launch-write') {
     [IO.File]::WriteAllText((Join-Path $env:USERPROFILE '.codex\config.toml'), 'post-launch', [Text.UTF8Encoding]::new($false))
@@ -875,11 +1566,14 @@ function Start-Process {
   return [pscustomobject]@{ Id = 7000; HasExited = $false }
 }
 function Stop-Process { param([object]$InputObject, [int]$Id, [switch]$Force, [object]$ErrorAction) Add-RealLifecycleTrace 'stop-process' }
+function Move-Item {
+  param([string]$LiteralPath, [string]$Destination, [switch]$Force, [object]$ErrorAction)
+  Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination `
+    -Force:$Force -ErrorAction $ErrorAction
+}
 function Remove-Item {
   param([string]$LiteralPath, [switch]$Force, [switch]$Recurse, [object]$ErrorAction)
   Add-RealLifecycleTrace "remove:$LiteralPath"
-  if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-state-unlink-fail' -and
-    [IO.Path]::GetFileName($LiteralPath) -ceq 'state.json') { throw 'fixture state unlink failure' }
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-paused-unlink-fail' -and
     [IO.Path]::GetFileName($LiteralPath) -ceq 'paused') { throw 'fixture paused unlink failure' }
   if ($env:DREAM_SKIN_TEST_SCENARIO -eq 'real-restore-marker-unlink-fail' -and
@@ -926,11 +1620,20 @@ function Initialize-DreamSkinThemeStore {
 }
 function Assert-DreamSkinImageFile { param([string]$Path, [string]$NodePath) }
 function Read-DreamSkinTheme { param([string]$ThemeDirectory, [string]$NodePath) return [pscustomobject]@{ ImagePath = 'fixture.jpg' } }
-function Test-DreamSkinPaused { param([string]$StateRoot) return $false }
+function Test-DreamSkinPaused {
+  param([string]$StateRoot)
+  return Test-Path -LiteralPath (Join-Path $StateRoot 'paused') -PathType Leaf
+}
 function Set-DreamSkinPaused {
   param([bool]$Paused, [string]$StateRoot)
   Add-RealThemeTrace 'marker'
-  [IO.File]::WriteAllText((Join-Path $StateRoot 'paused'), 'paused', [Text.UTF8Encoding]::new($false))
+  Add-RealThemeTrace "pause-write:$Paused"
+  $path = Join-Path $StateRoot 'paused'
+  if ($Paused) {
+    [IO.File]::WriteAllText($path, 'paused', [Text.UTF8Encoding]::new($false))
+  } else {
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+  }
   return $Paused
 }
 '@
@@ -1105,6 +1808,43 @@ function Assert-TraceOrder {
   }
 }
 
+function Assert-RealStartRollbackState {
+  param(
+    [Parameter(Mandatory = $true)][object]$Case,
+    [Parameter(Mandatory = $true)][object]$Result,
+    [Parameter(Mandatory = $true)][string]$Message,
+    [switch]$Paused
+  )
+  $statePath = Join-Path $Case.StateRoot 'state.json'
+  if ($Result.ExitCode -eq 0 -or -not (Test-Path -LiteralPath $statePath -PathType Leaf) -or
+    $Result.Trace -notcontains 'watcher-stop' -or $Result.Trace -contains 'start-official') {
+    throw $Message
+  }
+  try { $state = [IO.File]::ReadAllText($statePath, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop } catch {
+    throw "$Message Retained state is not parseable."
+  }
+  $expectedInjector = Join-Path $realScripts 'injector.mjs'
+  $expectedTheme = Join-Path $Case.StateRoot 'active-theme'
+  $expectedPause = Join-Path $Case.StateRoot 'paused'
+  if ($state.schemaVersion -ne 3 -or "$($state.platform)" -cne 'windows' -or $state.port -ne 9335 -or
+    $state.injectorPid -ne 7000 -or "$($state.injectorStartedAt)" -cne '2026-01-01T00:00:00.0000000Z' -or
+    -not (Test-DreamSkinPathEqual -Left "$($state.injectorPath)" -Right $expectedInjector) -or
+    -not (Test-DreamSkinPathEqual -Left "$($state.nodePath)" -Right $nodePath) -or
+    "$($state.nodeVersion)" -cne '22.23.1' -or
+    -not (Test-DreamSkinPathEqual -Left "$($state.codexExe)" -Right $Case.CodexExecutable) -or
+    -not (Test-DreamSkinPathEqual -Left "$($state.codexPackageRoot)" -Right (Split-Path -Parent $Case.CodexExecutable)) -or
+    "$($state.codexPackageFullName)" -cne 'OpenAI.Codex_2.0.0.0_x64__test' -or
+    "$($state.codexPackageFamilyName)" -cne 'OpenAI.Codex_test' -or "$($state.codexVersion)" -cne '2.0.0.0' -or
+    "$($state.browserId)" -cne 'browser-123' -or
+    -not (Test-DreamSkinPathEqual -Left "$($state.themeDir)" -Right $expectedTheme) -or
+    -not (Test-DreamSkinPathEqual -Left "$($state.pauseFile)" -Right $expectedPause)) {
+    throw "$Message Retained state lost its exact cleanup identity."
+  }
+  if ($Paused -and -not (Test-Path -LiteralPath $expectedPause -PathType Leaf)) {
+    throw "$Message Resume did not restore the prior pause marker."
+  }
+}
+
 try {
   $realEngineSnapshot = @(Get-StateSnapshot -Root $realRoot)
   $privacyRejected = $false
@@ -1141,6 +1881,36 @@ try {
       -Codex $definition.Codex -Session $definition.Session -ThemeName '午夜极光' -RequiresRestart $definition.Restart `
       -Verified $null -AvailableActions $definition.Actions -ErrorCode $definition.Error -RecoveryActions $definition.Recovery
   }
+
+  $retainedResume = New-CaseRoot -Name 'retained-schema4-paused-status-resume'
+  $retainedStatePath = Join-Path $retainedResume.StateRoot 'state.json'
+  $retainedPausePath = Join-Path $retainedResume.StateRoot 'paused'
+  $retainedState = [ordered]@{
+    schemaVersion = 4; platform = 'windows'; recoveryKind = 'managed-cdp'; port = 19473
+    codexExe = 'C:\Program Files\WindowsApps\OpenAI.Codex.Primary\app\ChatGPT.exe'
+    codexPackageRoot = 'C:\Program Files\WindowsApps\OpenAI.Codex.Primary'
+    codexPackageFullName = 'OpenAI.Codex_2.0.0.0_x64__test'
+    codexPackageFamilyName = 'OpenAI.Codex_test'; codexVersion = '2.0.0.0'
+    createdAt = '2026-01-01T00:00:00.0000000Z'
+  }
+  [IO.File]::WriteAllText($retainedStatePath, ($retainedState | ConvertTo-Json -Compress), $utf8NoBom)
+  [IO.File]::WriteAllText($retainedPausePath, 'paused', $utf8NoBom)
+  $retainedBefore = Get-ProtectedSnapshot -Case $retainedResume
+  $result = Invoke-Studio -Case $retainedResume -Scenario 'active'
+  Assert-StudioResult -Result $result -ExitCode 1 -Ok $false -Install 'ready' -Codex 'running' `
+    -Session 'stale' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @('restore', 'uninstall') -ErrorCode 'STATE_UNSAFE' `
+    -RecoveryActions @('restore', 'diagnostics', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $retainedResume) $retainedBefore `
+    'Retained schema-4 status changed state or prior Resume pause intent.'
+  $result = Invoke-Studio -Case $retainedResume -Scenario 'active' -Operation 'resume'
+  Assert-StudioResult -Result $result -Operation 'resume' -ExitCode 1 -Ok $false -Install 'ready' `
+    -Codex 'running' -Session 'stale' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @('restore', 'uninstall') -ErrorCode 'STATE_UNSAFE' `
+    -RecoveryActions @('restore', 'diagnostics', 'cancel')
+  Assert-Equal (Get-ProtectedSnapshot -Case $retainedResume) $retainedBefore `
+    'Rejected retained schema-4 Resume changed state or removed its pause marker.'
+  Assert-NoChildOrLog -Case $retainedResume
 
   foreach ($malformedDefinition in @(
     @{ Name = 'malformed-regular-backup'; Marker = $false },
@@ -1235,6 +2005,60 @@ try {
     -RecoveryActions @('diagnostics', 'cancel')
   if (Test-Path -LiteralPath (Join-Path $wrongDeepRuntime.Root 'renderer-trace.txt')) {
     throw 'Wrong private Node version executed deep renderer verification.'
+  }
+
+  $deepFreshWrongRuntime = New-CaseRoot -Name 'deep-fresh-wrong-runtime' -NoState
+  Remove-Item -LiteralPath (Join-Path $deepFreshWrongRuntime.StateRoot 'config.before-dream-skin.toml') -Force
+  Remove-Item -LiteralPath (Join-Path $deepFreshWrongRuntime.StateRoot 'active-theme') -Recurse -Force
+  $deepOfficialWrongRuntime = New-CaseRoot -Name 'deep-official-wrong-runtime' -NoState
+  $deepPausedWrongRuntime = New-CaseRoot -Name 'deep-paused-wrong-runtime' -NoState
+  [IO.File]::WriteAllText((Join-Path $deepPausedWrongRuntime.StateRoot 'paused'), "paused`r`n", $utf8NoBom)
+  $deepActiveWrongRuntime = New-CaseRoot -Name 'deep-active-wrong-runtime'
+  foreach ($definition in @(
+    @{ Case = $deepFreshWrongRuntime; Scenario = 'deep-fresh-wrong-runtime'; Operation = 'preflight'; Session = 'official' },
+    @{ Case = $deepOfficialWrongRuntime; Scenario = 'deep-official-wrong-runtime'; Operation = 'status'; Session = 'official' },
+    @{ Case = $deepPausedWrongRuntime; Scenario = 'deep-paused-wrong-runtime'; Operation = 'status'; Session = 'paused' },
+    @{ Case = $deepActiveWrongRuntime; Scenario = 'deep-active-wrong-runtime'; Operation = 'status'; Session = 'active' }
+  )) {
+    $before = Get-StateSnapshot -Root $definition.Case.StateRoot
+    $result = Invoke-Studio -Case $definition.Case -Scenario $definition.Scenario `
+      -Operation $definition.Operation -ExtraArguments @('-Deep')
+    Assert-Equal (Get-StateSnapshot -Root $definition.Case.StateRoot) $before `
+      "$($definition.Scenario) mutated protected state."
+    if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'RUNTIME_INVALID' -or
+      $result.Envelope.state.session -cne $definition.Session -or
+      -not (Test-Path -LiteralPath (Join-Path $definition.Case.Root 'runtime-trace.txt') -PathType Leaf)) {
+      throw "$($definition.Scenario) did not validate exact private Node during deep status."
+    }
+  }
+
+  $deepMissingRuntime = New-CaseRoot -Name 'deep-missing-runtime' -NoState
+  $restoreMissingRuntime = New-CaseRoot -Name 'restore-missing-runtime' -NoState
+  $uninstallMissingRuntime = New-CaseRoot -Name 'uninstall-missing-runtime' -NoState
+  $nodeMissingBackup = "$nodePath.deep-missing"
+  Move-Item -LiteralPath $nodePath -Destination $nodeMissingBackup
+  try {
+    $result = Invoke-Studio -Case $deepMissingRuntime -Scenario 'deep-missing-runtime' -ExtraArguments @('-Deep')
+    if ($result.ExitCode -ne 1 -or $result.Envelope.error.code -cne 'RUNTIME_INVALID' -or
+      -not (Test-Path -LiteralPath (Join-Path $deepMissingRuntime.Root 'runtime-trace.txt') -PathType Leaf)) {
+      throw 'Deep status did not reject a missing private runtime.'
+    }
+
+    $result = Invoke-Studio -Case $restoreMissingRuntime -Scenario 'restore-missing-runtime' -Operation 'restore'
+    if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath (Join-Path $restoreMissingRuntime.Root 'runtime-trace.txt'))) {
+      throw 'Restore probed or required the missing private runtime.'
+    }
+    Assert-ChildInvocation -Case $restoreMissingRuntime `
+      -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-AdapterLockHeld'
+
+    $result = Invoke-Studio -Case $uninstallMissingRuntime -Scenario 'uninstall-missing-runtime' -Operation 'uninstall'
+    if ($result.ExitCode -ne 0 -or (Test-Path -LiteralPath (Join-Path $uninstallMissingRuntime.Root 'runtime-trace.txt'))) {
+      throw 'Uninstall probed or required the missing private runtime.'
+    }
+    Assert-ChildInvocation -Case $uninstallMissingRuntime `
+      -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-AdapterLockHeld'
+  } finally {
+    Move-Item -LiteralPath $nodeMissingBackup -Destination $nodePath
   }
 
   foreach ($probeScenario in @('probe-error', 'process-error')) {
@@ -1494,7 +2318,7 @@ try {
   Assert-Equal (Get-StateSnapshot -Root $wrongRuntimeRestoreUnauthorized.StateRoot) $before `
     'Unauthorized wrong-runtime restore changed protected state.'
   Assert-StudioResult -Result $result -Operation 'restore' -ExitCode 1 -Ok $false -Install 'ready' `
-    -Codex 'running' -Session 'active' -ThemeName '午夜极光' -RequiresRestart $true -Verified $false `
+    -Codex 'running' -Session 'active' -ThemeName '午夜极光' -RequiresRestart $true -Verified $null `
     -AvailableActions @('pause', 'resume', 'restore', 'verify', 'uninstall') -ErrorCode 'RESTART_REQUIRED' `
     -RecoveryActions @('authorize-restart', 'cancel')
   Assert-NoChildOrLog -Case $wrongRuntimeRestoreUnauthorized
@@ -1504,6 +2328,9 @@ try {
     -ExtraArguments @('-RestartAuthorized')
   if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'official') {
     throw 'Authorized Node-free restore was blocked by private Node validation.'
+  }
+  if (Test-Path -LiteralPath (Join-Path $wrongRuntimeRestore.Root 'runtime-trace.txt')) {
+    throw 'Node-free restore still probed the private runtime.'
   }
   Assert-ChildInvocation -Case $wrongRuntimeRestore `
     -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning|-AdapterLockHeld'
@@ -1614,6 +2441,15 @@ try {
   $result = Invoke-Studio -Case $staleRestore -Scenario 'stale' -Operation 'restore' -ExtraArguments @('-RestartAuthorized')
   if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'official') { throw 'STATE_UNSAFE blocked authorized restore recovery.' }
   Assert-ChildInvocation -Case $staleRestore -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-CloseRunning|-AdapterLockHeld'
+
+  $damagedRestoreDispatch = New-CaseRoot -Name 'damaged-recovery-restore-absent' -DamagedState
+  $result = Invoke-Studio -Case $damagedRestoreDispatch -Scenario 'damaged-recovery-restore-absent' `
+    -Operation 'restore'
+  if ($result.ExitCode -ne 0 -or $result.Envelope.state.session -cne 'official') {
+    throw 'Adapter did not dispatch malformed-state Restore recovery.'
+  }
+  Assert-ChildInvocation -Case $damagedRestoreDispatch `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-RecoverDamagedState|-AdapterLockHeld'
 
   $staleRestoreFailure = New-CaseRoot -Name 'stale-restore-fail'
   $protectedBefore = Get-ProtectedSnapshot -Case $staleRestoreFailure
@@ -1887,12 +2723,24 @@ try {
   }
   Assert-Equal (Get-StateSnapshot -Root $engineRoot) $engineBefore 'Uninstall deleted its running versioned engine.'
 
+  $damagedUninstallDispatch = New-CaseRoot -Name 'damaged-recovery-uninstall-absent' -DamagedState
+  $result = Invoke-Studio -Case $damagedUninstallDispatch -Scenario 'damaged-recovery-uninstall-absent' `
+    -Operation 'uninstall'
+  if ($result.ExitCode -ne 0 -or -not $result.Envelope.ok) {
+    throw 'Adapter did not dispatch malformed-state Uninstall recovery.'
+  }
+  Assert-ChildInvocation -Case $damagedUninstallDispatch `
+    -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-RecoverDamagedState|-AdapterLockHeld'
+
   $wrongRuntimeUninstall = New-CaseRoot -Name 'wrong-runtime-uninstall'
   $result = Invoke-Studio -Case $wrongRuntimeUninstall -Scenario 'active-wrong-runtime' -Operation 'uninstall' `
     -ExtraArguments @('-RestartAuthorized')
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
     -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
     -AvailableActions @('install') -ErrorCode $null
+  if (Test-Path -LiteralPath (Join-Path $wrongRuntimeUninstall.Root 'runtime-trace.txt')) {
+    throw 'Node-free uninstall still probed the private runtime.'
+  }
   Assert-ChildInvocation -Case $wrongRuntimeUninstall `
     -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-CloseRunning|-AdapterLockHeld'
 
@@ -2029,8 +2877,706 @@ try {
   $realResult = Invoke-RealLifecycle -Case $realStartForce -ScriptName 'start-dream-skin.ps1' `
     -Scenario 'real-start-force' -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart')
   if ($realResult.ExitCode -eq 0) { throw 'Bounded production start fixture did not stop after its authorized write boundary.' }
-  Assert-TraceOrder -Trace $realResult.Trace -Expected @('stop:True', 'ensure') `
-    -Message 'Production start did not propagate force before its first write.'
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'stop:True', 'ensure', 'strict-codex:current', 'strict-listener:9335',
+    'start-official', 'start-official:current'
+  ) -Message 'Production start did not recover the first post-close pre-launch failure.'
+
+  $priorWatcherProvider = New-RealLifecycleCase -Name 'prior-watcher-provider-error-state-snapshot-fail'
+  $priorWatcherState = Join-Path $priorWatcherProvider.StateRoot 'state.json'
+  $priorWatcherBytes = [IO.File]::ReadAllBytes($priorWatcherState)
+  $realResult = Invoke-RealLifecycle -Case $priorWatcherProvider -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'prior-watcher-provider-error-state-snapshot-fail' `
+    -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart')
+  if ($realResult.ExitCode -eq 0 -or
+    $realResult.Trace -notcontains 'recorded-injector-cim-provider-error' -or
+    $realResult.Trace -contains 'state-write' -or $realResult.Trace -contains 'start-cdp' -or
+    $realResult.Trace -contains 'start-official' -or
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($priorWatcherState)) -cne
+      [Convert]::ToBase64String($priorWatcherBytes)) {
+    throw 'Production recorded-watcher CIM provider failure was treated as cleanup authority.'
+  }
+
+  foreach ($operation in @('start', 'resume')) {
+    foreach ($closedIdentity in @('current', 'saved')) {
+      $scenario = "combined-closed-new-$operation-$closedIdentity-early-wait-success"
+      $combinedCleanup = New-RealLifecycleCase -Name $scenario
+      if ($operation -ceq 'resume') {
+        [IO.File]::WriteAllText((Join-Path $combinedCleanup.StateRoot 'paused'), 'paused', $utf8NoBom)
+      }
+      $realResult = Invoke-RealLifecycle -Case $combinedCleanup -ScriptName 'start-dream-skin.ps1' `
+        -Scenario $scenario -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart')
+      $statePath = Join-Path $combinedCleanup.StateRoot 'state.json'
+      $strictIdentities = @($realResult.Trace | Where-Object { $_ -like 'strict-codex:*' })
+      $expectedIdentities = if ($closedIdentity -ceq 'saved') {
+        @('strict-codex:current', 'strict-codex:saved')
+      } else { @('strict-codex:current') }
+      $strictPorts = @($realResult.Trace | Where-Object { $_ -like 'strict-listener:*' })
+      if ($realResult.ExitCode -eq 0 -or (Test-Path -LiteralPath $statePath) -or
+        $realResult.Trace -notcontains "stop-codex:$closedIdentity" -or
+        $realResult.Trace -notcontains 'state-write:4:19473:managed-cdp' -or
+        $realResult.Trace -notcontains 'start-cdp' -or
+        $realResult.Trace -notcontains 'start-official:current') {
+        throw "$scenario did not consume combined closed/new cleanup authority before relaunch."
+      }
+      Assert-Equal $strictIdentities $expectedIdentities `
+        "$scenario did not deduplicate and prove current plus closed package identities."
+      Assert-Equal $strictPorts @('strict-listener:19473', 'strict-listener:9335') `
+        "$scenario did not prove both the new and previously closed listener ports."
+      if ($operation -ceq 'resume' -and
+        -not (Test-Path -LiteralPath (Join-Path $combinedCleanup.StateRoot 'paused') -PathType Leaf)) {
+        throw "$scenario discarded Resume pause intent."
+      }
+    }
+  }
+
+  foreach ($definition in @(
+    @{
+      Scenario = 'combined-closed-new-start-saved-early-wait-cleanup-new-cim-error'
+      Expected = @('strict-codex:current', 'strict-cim-error')
+      Forbidden = @('strict-listener:19473', 'strict-codex:saved', 'strict-listener:9335')
+    },
+    @{
+      Scenario = 'combined-closed-new-start-saved-early-wait-cleanup-new-tcp-error'
+      Expected = @('strict-codex:current', 'strict-listener:19473', 'strict-tcp-error')
+      Forbidden = @('strict-codex:saved', 'strict-listener:9335')
+    },
+    @{
+      Scenario = 'combined-closed-new-start-saved-early-wait-cleanup-closed-cim-error'
+      Expected = @('strict-codex:current', 'strict-listener:19473', 'strict-codex:saved', 'strict-cim-error')
+      Forbidden = @('strict-listener:9335')
+    },
+    @{
+      Scenario = 'combined-closed-new-start-saved-early-wait-cleanup-closed-tcp-error'
+      Expected = @(
+        'strict-codex:current', 'strict-listener:19473', 'strict-codex:saved',
+        'strict-listener:9335', 'strict-tcp-error'
+      )
+      Forbidden = @()
+    }
+  )) {
+    $combinedUncertain = New-RealLifecycleCase -Name $definition.Scenario
+    $statePath = Join-Path $combinedUncertain.StateRoot 'state.json'
+    $realResult = Invoke-RealLifecycle -Case $combinedUncertain -ScriptName 'start-dream-skin.ps1' `
+      -Scenario $definition.Scenario -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart')
+    $retainedState = [IO.File]::ReadAllText($statePath, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop
+    if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'start-official' -or
+      $retainedState.schemaVersion -ne 4 -or $retainedState.port -ne 19473 -or
+      "$($retainedState.recoveryKind)" -cne 'managed-cdp') {
+      throw "$($definition.Scenario) consumed state or relaunched with incomplete combined cleanup proof."
+    }
+    Assert-TraceOrder -Trace $realResult.Trace -Expected $definition.Expected `
+      -Message "$($definition.Scenario) did not reach its intended combined provider boundary."
+    foreach ($token in $definition.Forbidden) {
+      if ($realResult.Trace -contains $token) {
+        throw "$($definition.Scenario) crossed the fail-closed boundary at $token."
+      }
+    }
+  }
+
+  foreach ($operation in @('start', 'resume')) {
+    foreach ($closedIdentity in @('current', 'saved')) {
+      foreach ($failure in @('prior-state', 'state-write', 'state-snapshot')) {
+        $scenario = "prelaunch-closed-$operation-$closedIdentity-$failure-fail"
+        $prelaunchFailure = New-RealLifecycleCase -Name $scenario
+        $statePath = Join-Path $prelaunchFailure.StateRoot 'state.json'
+        $priorStateBytes = [IO.File]::ReadAllBytes($statePath)
+        if ($operation -ceq 'resume') {
+          [IO.File]::WriteAllText((Join-Path $prelaunchFailure.StateRoot 'paused'), 'paused', $utf8NoBom)
+        }
+        $realResult = Invoke-RealLifecycle -Case $prelaunchFailure -ScriptName 'start-dream-skin.ps1' `
+          -Scenario $scenario -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart')
+        $strictIdentities = @($realResult.Trace | Where-Object { $_ -like 'strict-codex:*' })
+        $expectedStrictIdentities = if ($closedIdentity -ceq 'saved') {
+          @('strict-codex:saved', 'strict-codex:current')
+        } else { @('strict-codex:current') }
+        $failureTrace = switch ($failure) {
+          'prior-state' { 'watcher-stop' }
+          'state-write' { 'state-write:4:19473:managed-cdp' }
+          'state-snapshot' { 'state-snapshot-fail' }
+        }
+        $expectRelaunch = $failure -cne 'prior-state'
+        if ($realResult.ExitCode -eq 0 -or $realResult.Trace -notcontains "stop-codex:$closedIdentity" -or
+          $realResult.Trace -contains 'start-cdp' -or $realResult.Trace -notcontains $failureTrace -or
+          $realResult.Trace -notcontains 'strict-listener:9335' -or
+          $realResult.Trace -contains 'strict-listener:19473' -or
+          ($expectRelaunch -and $realResult.Trace -notcontains 'start-official:current') -or
+          (-not $expectRelaunch -and $realResult.Trace -contains 'start-official')) {
+          throw "$scenario mishandled prior watcher or pre-launch closed-session authority."
+        }
+        Assert-Equal $strictIdentities $expectedStrictIdentities `
+          "$scenario did not scan the exact closed identity and distinct current identity in order."
+        $expectedOrder = @("stop-codex:$closedIdentity", $failureTrace) + $expectedStrictIdentities +
+          @('strict-listener:9335')
+        if ($expectRelaunch) { $expectedOrder += 'start-official:current' }
+        Assert-TraceOrder -Trace $realResult.Trace -Expected $expectedOrder `
+          -Message "$scenario crossed its closed-session cleanup ordering boundary."
+        if ($failure -ceq 'state-snapshot') {
+          $retainedState = [IO.File]::ReadAllText($statePath, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop
+          if ($retainedState.schemaVersion -ne 4 -or $retainedState.port -ne 19473 -or
+            "$($retainedState.recoveryKind)" -cne 'managed-cdp') {
+            throw "$scenario deleted or damaged state published before snapshot failure."
+          }
+        } elseif ([Convert]::ToBase64String([IO.File]::ReadAllBytes($statePath)) -cne
+          [Convert]::ToBase64String($priorStateBytes)) {
+          throw "$scenario changed prior state before its pre-launch failure committed."
+        }
+        if ($operation -ceq 'resume' -and
+          -not (Test-Path -LiteralPath (Join-Path $prelaunchFailure.StateRoot 'paused') -PathType Leaf)) {
+          throw "$scenario discarded Resume pause intent."
+        }
+      }
+    }
+  }
+
+  foreach ($definition in @(
+    @{
+      Scenario = 'prelaunch-closed-start-saved-state-snapshot-fail-cleanup-closed-cim-error'
+      Expected = @('strict-codex:saved', 'strict-cim-error')
+      Forbidden = @('strict-codex:current', 'strict-listener:9335')
+    },
+    @{
+      Scenario = 'prelaunch-closed-start-saved-state-snapshot-fail-cleanup-current-cim-error'
+      Expected = @('strict-codex:saved', 'strict-codex:current', 'strict-cim-error')
+      Forbidden = @('strict-listener:9335')
+    },
+    @{
+      Scenario = 'prelaunch-closed-start-saved-state-snapshot-fail-cleanup-tcp-error'
+      Expected = @('strict-codex:saved', 'strict-codex:current', 'strict-listener:9335', 'strict-tcp-error')
+      Forbidden = @()
+    }
+  )) {
+    $prelaunchUncertain = New-RealLifecycleCase -Name $definition.Scenario
+    $statePath = Join-Path $prelaunchUncertain.StateRoot 'state.json'
+    $realResult = Invoke-RealLifecycle -Case $prelaunchUncertain -ScriptName 'start-dream-skin.ps1' `
+      -Scenario $definition.Scenario -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart')
+    $retainedState = [IO.File]::ReadAllText($statePath, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop
+    if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'start-official' -or
+      $retainedState.schemaVersion -ne 4 -or $retainedState.port -ne 19473 -or
+      "$($retainedState.recoveryKind)" -cne 'managed-cdp') {
+      throw "$($definition.Scenario) relaunched without strict closed-session cleanup proof."
+    }
+    Assert-TraceOrder -Trace $realResult.Trace -Expected $definition.Expected `
+      -Message "$($definition.Scenario) did not reach its intended provider uncertainty boundary."
+    foreach ($token in $definition.Forbidden) {
+      if ($realResult.Trace -contains $token) {
+        throw "$($definition.Scenario) crossed the fail-closed boundary at $token."
+      }
+    }
+  }
+
+  foreach ($operation in @('start', 'resume')) {
+    $earlySuccessName = "$operation-early-wait-cleanup-success"
+    $earlySuccess = New-RealLifecycleCase -Name $earlySuccessName
+    if ($operation -ceq 'resume') {
+      [IO.File]::WriteAllText((Join-Path $earlySuccess.StateRoot 'paused'), 'paused', $utf8NoBom)
+    }
+    $realResult = Invoke-RealLifecycle -Case $earlySuccess -ScriptName 'start-dream-skin.ps1' `
+      -Scenario $earlySuccessName -Arguments @('-NodePath', $nodePath, '-Port', '19473')
+    if ($realResult.ExitCode -eq 0 -or
+      (Test-Path -LiteralPath (Join-Path $earlySuccess.StateRoot 'state.json')) -or
+      $realResult.Trace -notcontains 'state-write:4:19473:managed-cdp' -or
+      $realResult.Trace -notcontains 'strict-cim-scan' -or
+      $realResult.Trace -notcontains 'listener-scan' -or
+      $realResult.Trace -notcontains 'start-official') {
+      throw "$operation early Browser/wait failure did not consume proven cleanup authority."
+    }
+    Assert-TraceOrder -Trace $realResult.Trace `
+      -Expected @('state-write:4:19473:managed-cdp', 'start-cdp', 'stop:True',
+        'strict-cim-scan', 'listener-scan', 'start-official') `
+      -Message "$operation early cleanup did not follow its durable recovery transaction."
+    if ($operation -ceq 'resume' -and
+      -not (Test-Path -LiteralPath (Join-Path $earlySuccess.StateRoot 'paused') -PathType Leaf)) {
+      throw 'Resume early cleanup discarded its prior pause intent.'
+    }
+
+    foreach ($failure in @('cleanup-force-fail', 'cleanup-cim-error', 'cleanup-tcp-error')) {
+      $scenario = "$operation-early-wait-$failure"
+      $earlyFailure = New-RealLifecycleCase -Name $scenario
+      if ($operation -ceq 'resume') {
+        [IO.File]::WriteAllText((Join-Path $earlyFailure.StateRoot 'paused'), 'paused', $utf8NoBom)
+      }
+      $realResult = Invoke-RealLifecycle -Case $earlyFailure -ScriptName 'start-dream-skin.ps1' `
+        -Scenario $scenario -Arguments @('-NodePath', $nodePath, '-Port', '19473')
+      $statePath = Join-Path $earlyFailure.StateRoot 'state.json'
+      if ($realResult.ExitCode -eq 0 -or -not (Test-Path -LiteralPath $statePath -PathType Leaf) -or
+        $realResult.Trace -notcontains 'state-write:4:19473:managed-cdp' -or
+        $realResult.Trace -contains 'start-official') {
+        throw "$scenario did not retain its exact CDP-only recovery record."
+      }
+      $recoveryState = [IO.File]::ReadAllText($statePath, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop
+      if ($recoveryState.schemaVersion -ne 4 -or $recoveryState.port -ne 19473 -or
+        "$($recoveryState.recoveryKind)" -cne 'managed-cdp') {
+        throw "$scenario retained unusable cleanup authority."
+      }
+      $failureTrace = switch ($failure) {
+        'cleanup-force-fail' { 'stop:True' }
+        'cleanup-cim-error' { 'strict-cim-error' }
+        'cleanup-tcp-error' { 'strict-tcp-error' }
+      }
+      if ($realResult.Trace -notcontains $failureTrace) {
+        throw "$scenario did not reach the intended fail-closed provider branch."
+      }
+    }
+
+    $priorFailureName = "$operation-prior-state-fail"
+    $priorFailure = New-RealLifecycleCase -Name $priorFailureName
+    $priorBytes = [IO.File]::ReadAllBytes((Join-Path $priorFailure.StateRoot 'state.json'))
+    $realResult = Invoke-RealLifecycle -Case $priorFailure -ScriptName 'start-dream-skin.ps1' `
+      -Scenario $priorFailureName -Arguments @('-NodePath', $nodePath)
+    if ($realResult.ExitCode -eq 0 -or $realResult.Trace -notcontains 'watcher-stop' -or
+      $realResult.Trace -contains 'state-write' -or $realResult.Trace -contains 'start-cdp' -or
+      [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $priorFailure.StateRoot 'state.json'))) -cne
+        [Convert]::ToBase64String($priorBytes)) {
+      throw "$operation prior-state validation failure crossed the debug-launch boundary."
+    }
+  }
+
+  $foregroundFailure = New-RealLifecycleCase -Name 'start-foreground-new-fail'
+  $realResult = Invoke-RealLifecycle -Case $foregroundFailure -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-foreground-new-fail' `
+    -Arguments @('-NodePath', $nodePath, '-Port', '19473', '-ForegroundInjector')
+  if ($realResult.ExitCode -eq 0 -or
+    (Test-Path -LiteralPath (Join-Path $foregroundFailure.StateRoot 'state.json')) -or
+    $realResult.Trace -notcontains 'foreground-watch' -or
+    $realResult.Trace -notcontains 'state-write:4:19473:managed-cdp' -or
+    $realResult.Trace -notcontains 'strict-cim-scan' -or
+    $realResult.Trace -notcontains 'listener-scan' -or
+    $realResult.Trace -notcontains 'start-official') {
+    throw 'New-CDP foreground watcher failure bypassed unified cleanup or left recovery state.'
+  }
+  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
+    'state-write:4:19473:managed-cdp', 'start-cdp', 'foreground-watch', 'stop:True',
+    'strict-cim-scan', 'listener-scan', 'start-official'
+  ) -Message 'Foreground watcher failure did not use the normal new-CDP cleanup transaction.'
+
+  $foregroundReplacement = New-RealLifecycleCase -Name 'start-foreground-state-replaced'
+  $foregroundReplacementState = Join-Path $foregroundReplacement.StateRoot 'state.json'
+  $realResult = Invoke-RealLifecycle -Case $foregroundReplacement -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-foreground-state-replaced' `
+    -Arguments @('-NodePath', $nodePath, '-Port', '19473', '-ForegroundInjector')
+  $replacementState = [IO.File]::ReadAllText($foregroundReplacementState, $utf8NoBom)
+  $lastLockEntry = [Array]::LastIndexOf($realResult.Trace, 'lock-enter')
+  $replacementIndex = [Array]::IndexOf($realResult.Trace, 'foreground-state-replaced')
+  if ($realResult.ExitCode -eq 0 -or $replacementState -cne '{"schemaVersion":3,"newTransaction":true}' -or
+    $replacementIndex -lt 0 -or $lastLockEntry -le $replacementIndex -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'lock-enter' }).Count -ne 2 -or
+    $realResult.Trace -contains 'stop:True' -or $realResult.Trace -contains 'strict-cim-scan' -or
+    $realResult.Trace -contains 'listener-scan' -or $realResult.Trace -contains 'start-official') {
+    throw 'Foreground failure used stale cleanup authority after concurrent state replacement.'
+  }
+
+  foreach ($definition in @(
+    @{
+      Scenario = 'combined-closed-new-foreground-resume-saved-state-replaced'
+      ExpectedState = '{"schemaVersion":3,"newTransaction":true}'
+      ExpectedBoundary = 'foreground-state-replaced'
+    },
+    @{
+      Scenario = 'combined-closed-new-foreground-resume-saved-lock-reentry-fail'
+      ExpectedState = $null
+      ExpectedBoundary = 'lock-reentry-error'
+    }
+  )) {
+    $foregroundClosedPaused = New-RealLifecycleCase -Name $definition.Scenario
+    $foregroundClosedPausedState = Join-Path $foregroundClosedPaused.StateRoot 'state.json'
+    $foregroundClosedPausedMarker = Join-Path $foregroundClosedPaused.StateRoot 'paused'
+    [IO.File]::WriteAllText($foregroundClosedPausedMarker, 'paused', $utf8NoBom)
+    $realResult = Invoke-RealLifecycle -Case $foregroundClosedPaused -ScriptName 'start-dream-skin.ps1' `
+      -Scenario $definition.Scenario `
+      -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart', '-ForegroundInjector')
+    $retainedForegroundState = [IO.File]::ReadAllText($foregroundClosedPausedState, $utf8NoBom)
+    if ($null -eq $definition.ExpectedState) {
+      $retainedForegroundRecovery = $retainedForegroundState | ConvertFrom-Json -ErrorAction Stop
+      $statePreserved = $retainedForegroundRecovery.schemaVersion -eq 4 -and
+        $retainedForegroundRecovery.port -eq 19473 -and
+        "$($retainedForegroundRecovery.recoveryKind)" -ceq 'managed-cdp'
+    } else {
+      $statePreserved = $retainedForegroundState -ceq $definition.ExpectedState
+    }
+    if ($realResult.ExitCode -eq 0 -or -not $statePreserved -or
+      $realResult.Trace -notcontains 'stop-codex:saved' -or
+      $realResult.Trace -notcontains 'state-write:4:19473:managed-cdp' -or
+      $realResult.Trace -notcontains 'start-cdp' -or
+      $realResult.Trace -notcontains 'pause-write:False' -or
+      $realResult.Trace -notcontains 'foreground-watch' -or
+      $realResult.Trace -notcontains $definition.ExpectedBoundary -or
+      @($realResult.Trace | Where-Object { $_ -ceq 'lock-enter' }).Count -ne 2 -or
+      @($realResult.Trace | Where-Object { $_ -like 'strict-codex:*' }).Count -ne 0 -or
+      @($realResult.Trace | Where-Object { $_ -like 'strict-listener:*' }).Count -ne 0 -or
+      $realResult.Trace -contains 'start-official' -or
+      $realResult.Trace -contains 'pause-write:True' -or
+      (Test-Path -LiteralPath $foregroundClosedPausedMarker)) {
+      throw "$($definition.Scenario) retained stale cleanup or pause authority outside the operation lock."
+    }
+  }
+
+  $foregroundBrowserScenario = 'combined-closed-new-foreground-resume-saved-browser-replaced'
+  $foregroundBrowserReplaced = New-RealLifecycleCase -Name $foregroundBrowserScenario
+  $foregroundBrowserState = Join-Path $foregroundBrowserReplaced.StateRoot 'state.json'
+  $foregroundBrowserMarker = Join-Path $foregroundBrowserReplaced.StateRoot 'paused'
+  [IO.File]::WriteAllText($foregroundBrowserMarker, 'paused', $utf8NoBom)
+  $realResult = Invoke-RealLifecycle -Case $foregroundBrowserReplaced -ScriptName 'start-dream-skin.ps1' `
+    -Scenario $foregroundBrowserScenario `
+    -Arguments @('-NodePath', $nodePath, '-RestartExisting', '-ForceRestart', '-ForegroundInjector')
+  $retainedBrowserRecovery = [IO.File]::ReadAllText(
+    $foregroundBrowserState, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop
+  $strictBrowserIdentities = @($realResult.Trace | Where-Object { $_ -like 'strict-codex:*' })
+  $strictBrowserPorts = @($realResult.Trace | Where-Object { $_ -like 'strict-listener:*' })
+  if ($realResult.ExitCode -eq 0 -or $retainedBrowserRecovery.schemaVersion -ne 4 -or
+    $retainedBrowserRecovery.port -ne 19473 -or
+    "$($retainedBrowserRecovery.recoveryKind)" -cne 'managed-cdp' -or
+    $realResult.Trace -notcontains 'stop-codex:saved' -or
+    $realResult.Trace -notcontains 'state-write:4:19473:managed-cdp' -or
+    $realResult.Trace -notcontains 'foreground-watch' -or
+    $realResult.Trace -notcontains 'foreground-browser-replaced' -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'lock-enter' }).Count -ne 2 -or
+    $realResult.Trace -contains 'stop-codex:current' -or
+    $realResult.Trace -contains 'start-official' -or
+    $realResult.Trace -contains 'pause-write:True' -or
+    (Test-Path -LiteralPath $foregroundBrowserMarker)) {
+    throw 'New-managed foreground Browser replacement retained stale cleanup or pause authority.'
+  }
+  Assert-Equal $strictBrowserIdentities @('strict-codex:current') `
+    'New-managed foreground Browser replacement crossed the current-process revalidation boundary.'
+  Assert-Equal $strictBrowserPorts @('strict-listener:19473') `
+    'New-managed foreground Browser replacement crossed the current-listener revalidation boundary.'
+
+  $foregroundSuccess = New-RealLifecycleCase -Name 'start-foreground-success'
+  $foregroundSuccessState = Join-Path $foregroundSuccess.StateRoot 'state.json'
+  $realResult = Invoke-RealLifecycle -Case $foregroundSuccess -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-foreground-success' `
+    -Arguments @('-NodePath', $nodePath, '-Port', '19473', '-ForegroundInjector')
+  $successState = [IO.File]::ReadAllText($foregroundSuccessState, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop
+  if ($realResult.ExitCode -ne 0 -or $successState.schemaVersion -ne 4 -or
+    "$($successState.recoveryKind)" -cne 'managed-cdp' -or $successState.port -ne 19473 -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'lock-enter' }).Count -ne 1 -or
+    $realResult.Trace -contains 'stop:True' -or $realResult.Trace -contains 'start-official') {
+    throw 'Successful foreground watcher did not retain its managed-CDP recovery authority.'
+  }
+
+  $foregroundExisting = New-RealLifecycleCase -Name 'start-foreground-existing-fail'
+  $foregroundExistingState = Join-Path $foregroundExisting.StateRoot 'state.json'
+  $foregroundExistingBytes = [IO.File]::ReadAllBytes($foregroundExistingState)
+  $realResult = Invoke-RealLifecycle -Case $foregroundExisting -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-foreground-existing-fail' `
+    -Arguments @('-NodePath', $nodePath, '-Port', '19473', '-ForegroundInjector')
+  $existingRemove = "remove-args:$realScripts\injector.mjs --remove --port 19473 --browser-id browser-123 --timeout-ms 5000"
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -notcontains $existingRemove -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'lock-enter' }).Count -ne 2 -or
+    $realResult.Trace -contains 'start-cdp' -or $realResult.Trace -contains 'stop:True' -or
+    $realResult.Trace -contains 'start-official' -or
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($foregroundExistingState)) -cne
+      [Convert]::ToBase64String($foregroundExistingBytes)) {
+    throw 'Foreground existing-CDP failure did not revalidate and remove with the same Browser identity.'
+  }
+
+  $foregroundIdentityReplaced = New-RealLifecycleCase -Name 'start-foreground-existing-identity-replaced'
+  $foregroundIdentityState = Join-Path $foregroundIdentityReplaced.StateRoot 'state.json'
+  $foregroundIdentityBytes = [IO.File]::ReadAllBytes($foregroundIdentityState)
+  $realResult = Invoke-RealLifecycle -Case $foregroundIdentityReplaced -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-foreground-existing-identity-replaced' `
+    -Arguments @('-NodePath', $nodePath, '-Port', '19473', '-ForegroundInjector')
+  if ($realResult.ExitCode -eq 0 -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'lock-enter' }).Count -ne 2 -or
+    $realResult.Trace -contains 'remove' -or $realResult.Trace -contains 'start-cdp' -or
+    $realResult.Trace -contains 'stop:True' -or $realResult.Trace -contains 'start-official' -or
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($foregroundIdentityState)) -cne
+      [Convert]::ToBase64String($foregroundIdentityBytes)) {
+    throw 'Foreground existing-CDP failure used cleanup authority after the Browser identity changed.'
+  }
+
+  $schema4DirectRetry = New-RealLifecycleCase -Name 'schema4-direct-retry'
+  $schema4DirectState = Join-Path $schema4DirectRetry.StateRoot 'state.json'
+  $schema4DirectBytes = [IO.File]::ReadAllBytes($schema4DirectState)
+  $realResult = Invoke-RealLifecycle -Case $schema4DirectRetry -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'schema4-direct-retry' -Arguments @('-NodePath', $nodePath)
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'codex-process' -or
+    $realResult.Trace -contains 'listener-scan' -or $realResult.Trace -contains 'start-cdp' -or
+    $realResult.Trace -contains 'state-write' -or
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($schema4DirectState)) -cne
+      [Convert]::ToBase64String($schema4DirectBytes)) {
+    throw 'Direct start reinterpreted retained schema-4 evidence instead of requiring Restore.'
+  }
+
+  foreach ($providerFailure in @('cim', 'tcp')) {
+    $scenario = "schema4-restore-$providerFailure-error"
+    $schema4RestoreFailure = New-RealLifecycleCase -Name $scenario
+    $configPath = Join-Path $schema4RestoreFailure.UserProfile '.codex\config.toml'
+    $configBytes = [IO.File]::ReadAllBytes($configPath)
+    $stateSnapshot = @(Get-StateSnapshot -Root $schema4RestoreFailure.StateRoot)
+    $realResult = Invoke-RealLifecycle -Case $schema4RestoreFailure `
+      -ScriptName 'restore-dream-skin.ps1' -Scenario $scenario -Arguments @('-RestoreBaseTheme')
+    if ($realResult.ExitCode -eq 0 -or $realResult.Trace -notcontains 'strict-cim-scan' -or
+      $realResult.Trace -contains 'restore-config' -or
+      [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne
+        [Convert]::ToBase64String($configBytes)) {
+      throw "$scenario did not fail closed before retained-state Restore mutation."
+    }
+    if ($providerFailure -ceq 'tcp' -and $realResult.Trace -notcontains 'listener-scan') {
+      throw 'Retained-state Restore did not reach the strict TCP provider failure.'
+    }
+    Assert-Equal (Get-StateSnapshot -Root $schema4RestoreFailure.StateRoot) $stateSnapshot `
+      "$scenario changed retained recovery evidence."
+  }
+
+  $schema4RestoreAbsent = New-RealLifecycleCase -Name 'schema4-restore-absent'
+  $realResult = Invoke-RealLifecycle -Case $schema4RestoreAbsent `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'schema4-restore-absent' `
+    -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -ne 0 -or
+    (Test-Path -LiteralPath (Join-Path $schema4RestoreAbsent.StateRoot 'state.json')) -or
+    [IO.File]::ReadAllText((Join-Path $schema4RestoreAbsent.UserProfile '.codex\config.toml')) -cne 'restored' -or
+    $realResult.Trace -notcontains 'strict-cim-scan' -or
+    $realResult.Trace -notcontains 'listener-scan') {
+    throw 'Retained schema-4 Restore could not consume strictly proven absent process/listener evidence.'
+  }
+
+  foreach ($scenario in @('schema4-restore-process-appears', 'schema4-restore-listener-appears')) {
+    $schema4RestoreRace = New-RealLifecycleCase -Name $scenario
+    $baseline = New-RealRestoreRollbackBaseline -Case $schema4RestoreRace
+    $realResult = Invoke-RealLifecycle -Case $schema4RestoreRace `
+      -ScriptName 'restore-dream-skin.ps1' -Scenario $scenario -Arguments @('-RestoreBaseTheme')
+    $expectedScan = if ($scenario -ceq 'schema4-restore-process-appears') {
+      'strict-cim-scan'
+    } else {
+      'listener-scan'
+    }
+    $strictScanCount = @($realResult.Trace | Where-Object { $_ -ceq $expectedScan }).Count
+    if ($realResult.ExitCode -eq 0 -or $strictScanCount -lt 2 -or
+      $realResult.Trace -contains 'ensure' -or
+      $realResult.Trace -contains 'restore-config') {
+      throw "$scenario crossed the retained-state transaction absence gate."
+    }
+    Assert-RealRestoreRolledBack -Case $schema4RestoreRace -Baseline $baseline `
+      -Message "$scenario changed config, backup, or retained recovery evidence."
+  }
+
+  $schema4CurrentRunning = New-RealLifecycleCase -Name 'schema4-current-running'
+  $currentRunningBaseline = New-RealRestoreRollbackBaseline -Case $schema4CurrentRunning
+  $realResult = Invoke-RealLifecycle -Case $schema4CurrentRunning `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'schema4-current-running' `
+    -Arguments @('-RestoreBaseTheme')
+  $strictCurrentScans = @($realResult.Trace | Where-Object { $_ -ceq 'strict-cim-scan' }).Count
+  if ($realResult.ExitCode -eq 0 -or $strictCurrentScans -lt 2 -or
+    $realResult.Trace -contains 'ensure' -or
+    $realResult.Trace -contains 'restore-config' -or $realResult.Trace -contains 'stop:False') {
+    throw 'Retained schema-4 Restore ignored a running current Codex package version.'
+  }
+  Assert-RealRestoreRolledBack -Case $schema4CurrentRunning -Baseline $currentRunningBaseline `
+    -Message 'Current-version activity changed config, backup, or retained recovery evidence.'
+
+  $schema4PortMismatch = New-RealLifecycleCase -Name 'schema4-explicit-port-mismatch'
+  $portMismatchBaseline = New-RealRestoreRollbackBaseline -Case $schema4PortMismatch
+  $realResult = Invoke-RealLifecycle -Case $schema4PortMismatch `
+    -ScriptName 'restore-dream-skin.ps1' -Scenario 'schema4-explicit-port-mismatch' `
+    -Arguments @('-RestoreBaseTheme', '-Port', '19474')
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'strict-cim-scan' -or
+    $realResult.Trace -contains 'listener-scan' -or $realResult.Trace -contains 'ensure' -or
+    $realResult.Trace -contains 'restore-config') {
+    throw 'Retained schema-4 Restore probed or mutated using an explicit mismatched port.'
+  }
+  Assert-RealRestoreRolledBack -Case $schema4PortMismatch -Baseline $portMismatchBaseline `
+    -Message 'Explicit port mismatch changed config, backup, or retained recovery evidence.'
+
+  $schema4AppxFailure = New-RealLifecycleCase -Name 'schema4-appx-provider-error'
+  $appxFailureBaseline = New-RealRestoreRollbackBaseline -Case $schema4AppxFailure
+  $realResult = Invoke-RealLifecycle -Case $schema4AppxFailure -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'schema4-appx-provider-error' -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -eq 0 -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'appx-scan' }).Count -ne 1 -or
+    $realResult.Trace -contains 'strict-cim-scan' -or $realResult.Trace -contains 'listener-scan' -or
+    $realResult.Trace -contains 'ensure' -or $realResult.Trace -contains 'restore-config') {
+    throw 'Schema-4 Restore suppressed or crossed a terminating Appx provider failure.'
+  }
+  Assert-RealRestoreRolledBack -Case $schema4AppxFailure -Baseline $appxFailureBaseline `
+    -Message 'Appx provider failure changed config, backup, or retained recovery evidence.'
+
+  $schema4AppxUpdate = New-RealLifecycleCase -Name 'schema4-appx-update-race'
+  $realResult = Invoke-RealLifecycle -Case $schema4AppxUpdate -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'schema4-appx-update-race' -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -ne 0 -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'appx-scan' }).Count -ne 1 -or
+    (Test-Path -LiteralPath (Join-Path $schema4AppxUpdate.StateRoot 'state.json')) -or
+    [IO.File]::ReadAllText((Join-Path $schema4AppxUpdate.UserProfile '.codex\config.toml')) -cne 'restored') {
+    throw 'Schema-4 Restore did not retain one exact Appx inventory across a package update race.'
+  }
+
+  $schema4DistinctCurrent = New-RealLifecycleCase -Name 'schema4-appx-distinct-current-running'
+  $distinctCurrentBaseline = New-RealRestoreRollbackBaseline -Case $schema4DistinctCurrent
+  $realResult = Invoke-RealLifecycle -Case $schema4DistinctCurrent -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'schema4-appx-distinct-current-running' -Arguments @('-RestoreBaseTheme')
+  if ($realResult.ExitCode -eq 0 -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'appx-scan' }).Count -ne 1 -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'strict-cim-scan' }).Count -lt 2 -or
+    $realResult.Trace -contains 'ensure' -or $realResult.Trace -contains 'restore-config') {
+    throw 'Schema-4 Restore ignored a distinct running current package from its Appx snapshot.'
+  }
+  Assert-RealRestoreRolledBack -Case $schema4DistinctCurrent -Baseline $distinctCurrentBaseline `
+    -Message 'Distinct current package activity changed retained recovery evidence.'
+
+  foreach ($race in @('replacement', 'same-bytes', 'reparse', 'post-proof', 'post-delete')) {
+    foreach ($operation in @('restore', 'uninstall')) {
+      $scenario = "schema4-state-race-$race-$operation"
+      $schema4StateRace = New-RealLifecycleCase -Name $scenario
+      $statePath = Join-Path $schema4StateRace.StateRoot 'state.json'
+      $configPath = Join-Path $schema4StateRace.UserProfile '.codex\config.toml'
+      $backupPath = Join-Path $schema4StateRace.StateRoot 'config.before-dream-skin.toml'
+      $pausePath = Join-Path $schema4StateRace.StateRoot 'paused'
+      [IO.File]::WriteAllText($pausePath, 'paused', $utf8NoBom)
+      $classifiedBytes = [IO.File]::ReadAllBytes($statePath)
+      $arguments = if ($operation -ceq 'restore') {
+        @('-RestoreBaseTheme')
+      } else {
+        @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
+      }
+      $realResult = Invoke-RealLifecycle -Case $schema4StateRace -ScriptName 'restore-dream-skin.ps1' `
+        -Scenario $scenario -Arguments $arguments
+      $expectedPhase = if ($race -in @('post-proof', 'post-delete')) { $race } else { 'before-proof' }
+      if ($realResult.ExitCode -eq 0 -or
+        $realResult.Trace -notcontains "schema4-state-race:$expectedPhase" -or
+        [IO.File]::ReadAllText($configPath) -cne 'original' -or
+        [IO.File]::ReadAllText($backupPath) -cne 'backup' -or
+        -not (Test-Path -LiteralPath $pausePath -PathType Leaf) -or
+        @(Get-ChildItem -LiteralPath $schema4StateRace.StateRoot -Filter 'state.stale-*.json' -File).Count -ne 0) {
+        throw "$scenario crossed the exact retained-state consumption boundary."
+      }
+      if ($race -ceq 'reparse') {
+        $item = Get-Item -LiteralPath $statePath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+          throw "$scenario did not preserve the replacement reparse point."
+        }
+      } elseif (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        throw "$scenario did not preserve replacement state evidence."
+      } elseif ($race -ceq 'same-bytes') {
+        $held = [DreamSkinConfigNative]::Snapshot((Join-Path $schema4StateRace.Root 'classified-state.json'), $true)
+        $replacement = [DreamSkinConfigNative]::Snapshot($statePath, $true)
+        if ($held.Identity -ceq $replacement.Identity -or
+          [Convert]::ToBase64String($replacement.Bytes) -cne [Convert]::ToBase64String($classifiedBytes)) {
+          throw "$scenario did not replace the classified identity with the same bytes."
+        }
+      }
+    }
+  }
+
+  foreach ($initialState in @('missing', 'schema3')) {
+    foreach ($phase in @('before-snapshot', 'after-snapshot', 'during-rollback')) {
+      foreach ($operation in @('restore', 'uninstall')) {
+        $scenario = "state-transition-$initialState-$phase-$operation"
+        $transition = New-RealLifecycleCase -Name $scenario
+        $statePath = Join-Path $transition.StateRoot 'state.json'
+        $pausePath = Join-Path $transition.StateRoot 'paused'
+        $configPath = Join-Path $transition.UserProfile '.codex\config.toml'
+        $backupPath = Join-Path $transition.StateRoot 'config.before-dream-skin.toml'
+        if ($initialState -ceq 'missing') {
+          Microsoft.PowerShell.Management\Remove-Item -LiteralPath $statePath -Force
+        } else {
+          $codex = New-RealLifecycleCodex
+          $initial = [ordered]@{
+            schemaVersion = 3; platform = 'windows'; port = 9335; injectorPid = 4242
+            injectorStartedAt = '2026-01-01T00:00:00.0000000Z'
+            injectorPath = (Join-Path $realScripts 'injector.mjs'); nodePath = $nodePath
+            codexExe = $codex.Executable; codexPackageRoot = $codex.PackageRoot
+            codexPackageFullName = $codex.PackageFullName; codexPackageFamilyName = $codex.PackageFamilyName
+            browserId = 'browser-123'
+          }
+          [IO.File]::WriteAllText($statePath, ($initial | ConvertTo-Json -Compress), $utf8NoBom)
+        }
+        [IO.File]::WriteAllText($pausePath, 'paused', $utf8NoBom)
+        $arguments = if ($operation -ceq 'restore') {
+          @('-RestoreBaseTheme')
+        } else {
+          @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
+        }
+        $realResult = Invoke-RealLifecycle -Case $transition -ScriptName 'restore-dream-skin.ps1' `
+          -Scenario $scenario -Arguments $arguments
+        $newState = [IO.File]::ReadAllText($statePath, $utf8NoBom) | ConvertFrom-Json -ErrorAction Stop
+        if ($realResult.ExitCode -eq 0 -or $newState.schemaVersion -ne 4 -or
+          "$($newState.recoveryKind)" -cne 'managed-cdp' -or $newState.newAuthority -ne $true -or
+          $realResult.Trace -notcontains "state-transition:$phase" -or
+          [IO.File]::ReadAllText($configPath) -cne 'original' -or
+          [IO.File]::ReadAllText($backupPath) -cne 'backup' -or
+          -not (Test-Path -LiteralPath $pausePath -PathType Leaf)) {
+          throw "$scenario consumed or overwrote newer schema-4 recovery authority."
+        }
+      }
+    }
+  }
+
+  $rollbackIdentityLost = New-RealLifecycleCase -Name 'start-rollback-identity-lost'
+  $realResult = Invoke-RealLifecycle -Case $rollbackIdentityLost -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-rollback-identity-lost' -Arguments @('-NodePath', $nodePath)
+  Assert-RealStartRollbackState -Case $rollbackIdentityLost -Result $realResult `
+    -Message 'Apply discarded retryable state after rollback lost its anchored Browser ID.'
+  if ($realResult.Trace -notcontains 'cdp-missing' -or $realResult.Trace -contains 'remove') {
+    throw 'Apply attempted unanchored renderer removal after rollback identity disappeared.'
+  }
+
+  $resumeIdentityLost = New-RealLifecycleCase -Name 'resume-rollback-identity-lost'
+  [IO.File]::WriteAllText((Join-Path $resumeIdentityLost.StateRoot 'paused'), 'paused', $utf8NoBom)
+  $realResult = Invoke-RealLifecycle -Case $resumeIdentityLost -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'resume-rollback-identity-lost' -Arguments @('-NodePath', $nodePath)
+  Assert-RealStartRollbackState -Case $resumeIdentityLost -Result $realResult -Paused `
+    -Message 'Resume discarded retryable state after rollback lost its anchored Browser ID.'
+  if ($realResult.Trace -notcontains 'cdp-missing' -or $realResult.Trace -contains 'remove') {
+    throw 'Resume did not reach the missing-identity rollback branch safely.'
+  }
+
+  $expectedRemove = "remove-args:$realScripts\injector.mjs --remove --port 9335 --browser-id browser-123 --timeout-ms 5000"
+  $applyRemoveFailure = New-RealLifecycleCase -Name 'start-rollback-remove-fail'
+  $realResult = Invoke-RealLifecycle -Case $applyRemoveFailure -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-rollback-remove-fail' -Arguments @('-NodePath', $nodePath)
+  Assert-RealStartRollbackState -Case $applyRemoveFailure -Result $realResult `
+    -Message 'Apply discarded retryable state after anchored removal failed.'
+  if ($realResult.Trace -notcontains $expectedRemove) {
+    throw 'Apply rollback did not execute exact Browser-anchored removal before retaining state.'
+  }
+
+  $rollbackRemoveFailure = New-RealLifecycleCase -Name 'resume-rollback-remove-fail'
+  [IO.File]::WriteAllText((Join-Path $rollbackRemoveFailure.StateRoot 'paused'), 'paused', $utf8NoBom)
+  $realResult = Invoke-RealLifecycle -Case $rollbackRemoveFailure -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'resume-rollback-remove-fail' -Arguments @('-NodePath', $nodePath)
+  Assert-RealStartRollbackState -Case $rollbackRemoveFailure -Result $realResult -Paused `
+    -Message 'Resume discarded retryable state or pause intent after anchored removal failed.'
+  if ($realResult.Trace -notcontains $expectedRemove) {
+    throw 'Resume rollback did not use the exact saved Browser ID for anchored removal.'
+  }
+
+  $rollbackCloseFailure = New-RealLifecycleCase -Name 'start-rollback-close-fail'
+  $realResult = Invoke-RealLifecycle -Case $rollbackCloseFailure -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-rollback-close-fail' -Arguments @('-NodePath', $nodePath)
+  Assert-RealStartRollbackState -Case $rollbackCloseFailure -Result $realResult `
+    -Message 'Apply discarded retryable state when its newly launched Codex could not close.'
+  if ($realResult.Trace -notcontains 'stop:True' -or $realResult.Trace -contains 'listener-scan') {
+    throw 'Apply treated a failed Codex close as eligible for listener closure proof.'
+  }
+
+  $rollbackListenerStuck = New-RealLifecycleCase -Name 'start-rollback-listener-stuck'
+  $realResult = Invoke-RealLifecycle -Case $rollbackListenerStuck -ScriptName 'start-dream-skin.ps1' `
+    -Scenario 'start-rollback-listener-stuck' -Arguments @('-NodePath', $nodePath)
+  Assert-RealStartRollbackState -Case $rollbackListenerStuck -Result $realResult `
+    -Message 'Apply discarded retryable state while the newly launched CDP listener remained open.'
+  if ($realResult.Trace -notcontains 'stop:True' -or $realResult.Trace -notcontains 'listener-scan') {
+    throw 'Apply rollback never checked that its newly launched CDP listener closed.'
+  }
+
+  foreach ($scenario in @('resume-rollback-close-fail', 'resume-rollback-listener-stuck')) {
+    $resumeCloseFailure = New-RealLifecycleCase -Name $scenario
+    [IO.File]::WriteAllText((Join-Path $resumeCloseFailure.StateRoot 'paused'), 'paused', $utf8NoBom)
+    $realResult = Invoke-RealLifecycle -Case $resumeCloseFailure -ScriptName 'start-dream-skin.ps1' `
+      -Scenario $scenario -Arguments @('-NodePath', $nodePath)
+    Assert-RealStartRollbackState -Case $resumeCloseFailure -Result $realResult -Paused `
+      -Message "$scenario discarded retryable Resume state before CDP closure proof."
+    if ($realResult.Trace -notcontains 'stop:True') {
+      throw 'Cold Resume rollback did not execute its Codex close branch.'
+    }
+    if ($scenario -like '*close-fail' -and $realResult.Trace -contains 'listener-scan') {
+      throw 'Cold Resume checked listener closure after Codex close already failed.'
+    }
+    if ($scenario -like '*listener-stuck' -and $realResult.Trace -notcontains 'listener-scan') {
+      throw 'Cold Resume rollback did not check listener closure.'
+    }
+  }
 
   $realPause = New-RealLifecycleCase -Name 'pause-order'
   $realResult = Invoke-RealLifecycle -Case $realPause -ScriptName 'pause-dream-skin.ps1' `
@@ -2046,6 +3592,172 @@ try {
   if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'marker') {
     throw 'Production pause wrote its marker after live removal failed.'
   }
+
+  foreach ($definition in @(
+    @{ Name = 'damaged-recovery-normalized-snapshot'; Arguments = @('-RestoreBaseTheme', '-RecoverDamagedState') },
+    @{ Name = 'damaged-recovery-restore-absent'; Arguments = @('-RestoreBaseTheme', '-RecoverDamagedState') },
+    @{ Name = 'damaged-recovery-uninstall-absent'; Arguments = @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch', '-RecoverDamagedState') }
+  )) {
+    $damagedRecovery = New-RealLifecycleCase -Name $definition.Name
+    $configPath = Join-Path $damagedRecovery.UserProfile '.codex\config.toml'
+    $statePath = Join-Path $damagedRecovery.StateRoot 'state.json'
+    $stateBytes = [IO.File]::ReadAllBytes($statePath)
+    $realResult = Invoke-RealLifecycle -Case $damagedRecovery -ScriptName 'restore-dream-skin.ps1' `
+      -Scenario $definition.Name -Arguments $definition.Arguments
+    $quarantines = @(Get-ChildItem -LiteralPath $damagedRecovery.StateRoot -Filter 'state.stale-*.json' -File)
+    if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($configPath) -cne 'restored' -or
+      (Test-Path -LiteralPath $statePath) -or $quarantines.Count -ne 1 -or
+      [Convert]::ToBase64String([IO.File]::ReadAllBytes($quarantines[0].FullName)) -cne
+        [Convert]::ToBase64String($stateBytes) -or
+      (Test-Path -LiteralPath (Join-Path $damagedRecovery.StateRoot 'config.before-dream-skin.toml')) -or
+      @($realResult.Trace | Where-Object { $_ -ceq 'watcher-scan' }).Count -ne 2 -or
+      $realResult.Trace -notcontains 'state-archive' -or $realResult.Trace -contains 'watcher-stop' -or
+      $realResult.Trace -contains 'stop-process') {
+      throw "$($definition.Name) did not prove watcher absence and quarantine exact malformed state."
+    }
+  }
+
+  foreach ($scenario in @(
+    'damaged-recovery-matching-watcher',
+    'damaged-recovery-mismatched-watcher',
+    'damaged-recovery-uninspectable-watcher',
+    'damaged-recovery-versioned-watcher',
+    'damaged-recovery-historical-watcher',
+    'damaged-recovery-uninspectable-codex',
+    'damaged-recovery-unmatched-codex',
+    'damaged-recovery-residual-listener',
+    'damaged-recovery-listener-probe-fail',
+    'damaged-recovery-tray-like',
+    'damaged-recovery-uninspectable-tray'
+  )) {
+    foreach ($operation in @('restore', 'uninstall')) {
+      $damagedBlocked = New-RealLifecycleCase -Name "$scenario-$operation"
+      $configPath = Join-Path $damagedBlocked.UserProfile '.codex\config.toml'
+      $configBytes = [IO.File]::ReadAllBytes($configPath)
+      $stateSnapshot = @(Get-StateSnapshot -Root $damagedBlocked.StateRoot)
+      $arguments = if ($operation -ceq 'restore') {
+        @('-RestoreBaseTheme', '-RecoverDamagedState')
+      } else {
+        @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch', '-RecoverDamagedState')
+      }
+      $realResult = Invoke-RealLifecycle -Case $damagedBlocked -ScriptName 'restore-dream-skin.ps1' `
+        -Scenario $scenario -Arguments $arguments
+      if ($realResult.ExitCode -eq 0 -or $realResult.Trace -notcontains 'watcher-scan' -or
+        $realResult.Trace -contains 'restore-config' -or $realResult.Trace -contains 'watcher-stop' -or
+        $realResult.Trace -contains 'stop-process' -or $realResult.Trace -contains 'state-archive' -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne
+          [Convert]::ToBase64String($configBytes)) {
+        throw "$scenario $operation crossed the fail-closed watcher boundary."
+      }
+      Assert-Equal (Get-StateSnapshot -Root $damagedBlocked.StateRoot) $stateSnapshot `
+        "$scenario $operation changed backup or malformed state evidence."
+    }
+  }
+
+  $damagedWatcherAppears = New-RealLifecycleCase -Name 'damaged-recovery-watcher-appears'
+  $configPath = Join-Path $damagedWatcherAppears.UserProfile '.codex\config.toml'
+  $configBytes = [IO.File]::ReadAllBytes($configPath)
+  $stateSnapshot = @(Get-StateSnapshot -Root $damagedWatcherAppears.StateRoot)
+  $realResult = Invoke-RealLifecycle -Case $damagedWatcherAppears -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'damaged-recovery-watcher-appears' -Arguments @('-RestoreBaseTheme', '-RecoverDamagedState')
+  $scanIndexes = @()
+  for ($index = 0; $index -lt $realResult.Trace.Count; $index++) {
+    if ($realResult.Trace[$index] -ceq 'watcher-scan') { $scanIndexes += $index }
+  }
+  $restoreIndex = [Array]::IndexOf($realResult.Trace, 'restore-config')
+  $rollbackIndex = [Array]::IndexOf($realResult.Trace, 'config-rollback')
+  if ($realResult.ExitCode -eq 0 -or $scanIndexes.Count -ne 2 -or
+    $restoreIndex -le $scanIndexes[0] -or $scanIndexes[1] -le $restoreIndex -or
+    $rollbackIndex -le $scanIndexes[1] -or $realResult.Trace -contains 'state-archive' -or
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne
+      [Convert]::ToBase64String($configBytes)) {
+    throw 'A watcher appearing after config restore was not detected and rolled back.'
+  }
+  Assert-Equal (Get-StateSnapshot -Root $damagedWatcherAppears.StateRoot) $stateSnapshot `
+    'Post-restore watcher detection did not preserve exact recovery evidence.'
+
+  $damagedOlderCodex = New-RealLifecycleCase -Name 'damaged-recovery-older-codex'
+  $realResult = Invoke-RealLifecycle -Case $damagedOlderCodex -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'damaged-recovery-older-codex' `
+    -Arguments @('-RestoreBaseTheme', '-RecoverDamagedState', '-CloseRunning')
+  if ($realResult.ExitCode -ne 0 -or $realResult.Trace -notcontains 'stop:False' -or
+    @($realResult.Trace | Where-Object { $_ -ceq 'codex-absence-scan' }).Count -ne 2 -or
+    $realResult.Trace -contains 'stop-process') {
+    throw 'Malformed recovery did not close and disprove the older registered Codex session safely.'
+  }
+
+  foreach ($race in @('replacement', 'same-bytes', 'reparse', 'post-proof')) {
+    foreach ($operation in @('restore', 'uninstall')) {
+      $phase = if ($race -ceq 'post-proof') { 'post-proof' } else { 'before' }
+      $scenario = "damaged-race-$phase-$race-$operation"
+      $damagedRace = New-RealLifecycleCase -Name $scenario
+      $configPath = Join-Path $damagedRace.UserProfile '.codex\config.toml'
+      $backupPath = Join-Path $damagedRace.StateRoot 'config.before-dream-skin.toml'
+      $statePath = Join-Path $damagedRace.StateRoot 'state.json'
+      $classifiedBytes = [IO.File]::ReadAllBytes($statePath)
+      $arguments = if ($operation -ceq 'restore') {
+        @('-RestoreBaseTheme', '-RecoverDamagedState')
+      } else {
+        @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch', '-RecoverDamagedState')
+      }
+      $realResult = Invoke-RealLifecycle -Case $damagedRace -ScriptName 'restore-dream-skin.ps1' `
+        -Scenario $scenario -Arguments $arguments
+      $quarantines = @(Get-ChildItem -LiteralPath $damagedRace.StateRoot -Filter 'state.stale-*.json' -File)
+      $expectedRaceTrace = if ($phase -ceq 'before') {
+        'state-race:before-quarantine'
+      } else { 'state-race:post-proof' }
+      if ($realResult.ExitCode -eq 0 -or [IO.File]::ReadAllText($configPath) -cne 'original' -or
+        [IO.File]::ReadAllText($backupPath) -cne 'backup' -or
+        $realResult.Trace -notcontains $expectedRaceTrace) {
+        throw "$scenario crossed the stable malformed-state quarantine boundary."
+      }
+      if ($race -ceq 'reparse') {
+        $item = Get-Item -LiteralPath $statePath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+          throw "$scenario did not preserve the replacement reparse point."
+        }
+      } else {
+        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+          throw "$scenario did not preserve the live replacement state."
+        }
+        if ($race -ceq 'same-bytes') {
+          $held = [DreamSkinConfigNative]::Snapshot((Join-Path $damagedRace.Root 'classified-state.json'), $true)
+          $replacement = [DreamSkinConfigNative]::Snapshot($statePath, $true)
+          if ($held.Identity -ceq $replacement.Identity -or
+            [Convert]::ToBase64String($replacement.Bytes) -cne [Convert]::ToBase64String($classifiedBytes)) {
+            throw "$scenario did not exercise same bytes on a different file identity."
+          }
+        }
+      }
+      if ($race -ceq 'post-proof') {
+        if ($quarantines.Count -ne 1 -or
+          [Convert]::ToBase64String([IO.File]::ReadAllBytes($quarantines[0].FullName)) -cne
+            [Convert]::ToBase64String($classifiedBytes)) {
+          throw "$scenario did not retain the exact classified quarantine beside the replacement."
+        }
+      } elseif ($quarantines.Count -ne 0 -or
+        -not (Test-Path -LiteralPath (Join-Path $damagedRace.Root 'classified-state.json') -PathType Leaf)) {
+        throw "$scenario consumed the original classified state after a pre-quarantine replacement."
+      }
+    }
+  }
+
+  $damagedSwitchReadable = New-RealLifecycleCase -Name 'damaged-switch-readable'
+  $baseline = New-RealRestoreRollbackBaseline -Case $damagedSwitchReadable
+  $realResult = Invoke-RealLifecycle -Case $damagedSwitchReadable -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'real-pause' -Arguments @('-RestoreBaseTheme', '-RecoverDamagedState')
+  if ($realResult.ExitCode -eq 0) { throw 'Malformed-state recovery accepted readable state.' }
+  Assert-RealRestoreRolledBack -Case $damagedSwitchReadable -Baseline $baseline `
+    -Message 'Readable-state recovery switch changed protected artifacts.'
+
+  $damagedSwitchMissing = New-RealLifecycleCase -Name 'damaged-switch-missing'
+  Microsoft.PowerShell.Management\Remove-Item -LiteralPath (Join-Path $damagedSwitchMissing.StateRoot 'state.json') -Force
+  $baseline = New-RealRestoreRollbackBaseline -Case $damagedSwitchMissing
+  $realResult = Invoke-RealLifecycle -Case $damagedSwitchMissing -ScriptName 'restore-dream-skin.ps1' `
+    -Scenario 'damaged-switch-missing' -Arguments @('-RestoreBaseTheme', '-RecoverDamagedState')
+  if ($realResult.ExitCode -eq 0) { throw 'Malformed-state recovery accepted missing state.' }
+  Assert-RealRestoreRolledBack -Case $damagedSwitchMissing -Baseline $baseline `
+    -Message 'Missing-state recovery switch changed protected artifacts.'
 
   $realRestoreUnauthorized = New-RealLifecycleCase -Name 'restore-unauthorized'
   $realConfig = Join-Path $realRestoreUnauthorized.UserProfile '.codex\config.toml'
@@ -2253,41 +3965,10 @@ try {
   Assert-Equal (Get-StateSnapshot -Root $directOrphanMarker.StateRoot) $directStateSnapshot `
     'Direct restore with an orphan live marker changed marker or archive bytes.'
 
-  $realStateFailure = New-RealLifecycleCase -Name 'restore-state-unlink-failure'
-  $realConfig = Join-Path $realStateFailure.UserProfile '.codex\config.toml'
-  $realBackup = Join-Path $realStateFailure.StateRoot 'config.before-dream-skin.toml'
-  $realArchive = Join-Path $realStateFailure.StateRoot 'config.restored.toml'
-  $realState = Join-Path $realStateFailure.StateRoot 'state.json'
-  $realPaused = Join-Path $realStateFailure.StateRoot 'paused'
-  $realBackupMarker = "$realBackup.appearance.json"
-  $realArchiveMarker = "$realArchive.appearance.json"
-  $realBaseline = New-RealRestoreRollbackBaseline -Case $realStateFailure
-  $realResult = Invoke-RealLifecycle -Case $realStateFailure -ScriptName 'restore-dream-skin.ps1' `
-    -Scenario 'real-restore-state-unlink-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
-  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realPaused" -or
-    $realResult.Trace -contains 'start-process') {
-    throw 'State cleanup failure did not retain retryable restore recovery data.'
-  }
-  Assert-RealRestoreRolledBack -Case $realStateFailure -Baseline $realBaseline `
-    -Message 'State cleanup failure did not restore every entry artifact exactly.'
-  Assert-TraceOrder -Trace $realResult.Trace -Expected @(
-    'restore-config', 'archive-backup', "remove:$realState", 'config-rollback'
-  ) -Message 'State cleanup failure did not roll config and published proof back before relaunch.'
-
-  $realResult = Invoke-RealLifecycle -Case $realStateFailure -ScriptName 'restore-dream-skin.ps1' `
-    -Scenario 'real-restore-uninstall-retry' -Arguments @('-RestoreBaseTheme', '-Uninstall', '-NoRelaunch')
-  if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($realConfig) -cne 'restored' -or
-    (Test-Path -LiteralPath $realBackup) -or (Test-Path -LiteralPath $realBackupMarker) -or
-    (Test-Path -LiteralPath $realState) -or (Test-Path -LiteralPath $realPaused) -or
-    -not (Test-Path -LiteralPath $realArchive) -or -not (Test-Path -LiteralPath $realArchiveMarker)) {
-    throw 'Uninstall could not retry and commit a restore after state cleanup failed.'
-  }
-
   $realPausedFailure = New-RealLifecycleCase -Name 'restore-paused-unlink-failure'
   $realConfig = Join-Path $realPausedFailure.UserProfile '.codex\config.toml'
   $realBackup = Join-Path $realPausedFailure.StateRoot 'config.before-dream-skin.toml'
   $realArchive = Join-Path $realPausedFailure.StateRoot 'config.restored.toml'
-  $realState = Join-Path $realPausedFailure.StateRoot 'state.json'
   $realPaused = Join-Path $realPausedFailure.StateRoot 'paused'
   $realBaseline = New-RealRestoreRollbackBaseline -Case $realPausedFailure
   $realResult = Invoke-RealLifecycle -Case $realPausedFailure -ScriptName 'restore-dream-skin.ps1' `
@@ -2299,18 +3980,18 @@ try {
   Assert-RealRestoreRolledBack -Case $realPausedFailure -Baseline $realBaseline `
     -Message 'Pause cleanup failure did not restore every entry artifact exactly.'
   Assert-TraceOrder -Trace $realResult.Trace -Expected @(
-    'restore-config', 'archive-backup', "remove:$realState", "remove:$realPaused", 'config-rollback'
+    'restore-config', 'archive-backup', "remove:$realPaused", 'config-rollback'
   ) -Message 'Pause cleanup failure did not roll config and published proof back before relaunch.'
 
   $realRestoreFailure = New-RealLifecycleCase -Name 'restore-archive-failure'
   $realConfig = Join-Path $realRestoreFailure.UserProfile '.codex\config.toml'
   $realBackup = Join-Path $realRestoreFailure.StateRoot 'config.before-dream-skin.toml'
   $realArchive = Join-Path $realRestoreFailure.StateRoot 'config.restored.toml'
-  $realState = Join-Path $realRestoreFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realRestoreFailure.StateRoot 'paused'
   $realBaseline = New-RealRestoreRollbackBaseline -Case $realRestoreFailure
   $realResult = Invoke-RealLifecycle -Case $realRestoreFailure -ScriptName 'restore-dream-skin.ps1' `
     -Scenario 'real-restore-archive-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
-  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realState" -or
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realPaused" -or
     $realResult.Trace -contains 'start-process') {
     throw 'Archive failure did not preserve a retryable backup without relaunching Codex.'
   }
@@ -2332,7 +4013,6 @@ try {
   $realBackupMarker = "$realBackup.appearance.json"
   $realArchive = Join-Path $realMarkerFailure.StateRoot 'config.restored.toml'
   $realArchiveMarker = "$realArchive.appearance.json"
-  $realState = Join-Path $realMarkerFailure.StateRoot 'state.json'
   $realPaused = Join-Path $realMarkerFailure.StateRoot 'paused'
   $realBaseline = New-RealRestoreRollbackBaseline -Case $realMarkerFailure
   $realResult = Invoke-RealLifecycle -Case $realMarkerFailure -ScriptName 'restore-dream-skin.ps1' `
@@ -2344,14 +4024,13 @@ try {
   Assert-RealRestoreRolledBack -Case $realMarkerFailure -Baseline $realBaseline `
     -Message 'Backup marker cleanup failure did not restore every entry artifact exactly.'
   Assert-TraceOrder -Trace $realResult.Trace -Expected @(
-    'restore-config', 'archive-backup', "remove:$realState", "remove:$realPaused",
-    "remove:$realBackupMarker", 'config-rollback'
+    'restore-config', 'archive-backup', "remove:$realPaused", "remove:$realBackupMarker",
+    'config-rollback'
   ) -Message 'Backup marker cleanup failure crossed or escaped the restore transaction.'
 
   $realBackupFailure = New-RealLifecycleCase -Name 'restore-backup-unlink-failure'
   $realBackup = Join-Path $realBackupFailure.StateRoot 'config.before-dream-skin.toml'
   $realBackupMarker = "$realBackup.appearance.json"
-  $realState = Join-Path $realBackupFailure.StateRoot 'state.json'
   $realPaused = Join-Path $realBackupFailure.StateRoot 'paused'
   $realBaseline = New-RealRestoreRollbackBaseline -Case $realBackupFailure
   $realMarkerBytes = [IO.File]::ReadAllBytes($realBackupMarker)
@@ -2366,16 +4045,16 @@ try {
   Assert-RealRestoreRolledBack -Case $realBackupFailure -Baseline $realBaseline `
     -Message 'Live-backup cleanup failure did not restore every entry artifact exactly.'
   Assert-TraceOrder -Trace $realResult.Trace -Expected @(
-    'restore-config', 'archive-backup', 'archive-marker', "remove:$realState", "remove:$realPaused",
-    "remove:$realBackupMarker", "remove:$realBackup", 'config-rollback'
+    'restore-config', 'archive-backup', 'archive-marker', "remove:$realPaused", "remove:$realBackupMarker",
+    "remove:$realBackup", 'config-rollback'
   ) -Message 'Live-backup cleanup failure crossed or escaped the restore transaction.'
 
   $realArchiveMarkerPublishFailure = New-RealLifecycleCase -Name 'restore-archive-marker-publish-failure'
-  $realState = Join-Path $realArchiveMarkerPublishFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realArchiveMarkerPublishFailure.StateRoot 'paused'
   $realBaseline = New-RealRestoreRollbackBaseline -Case $realArchiveMarkerPublishFailure
   $realResult = Invoke-RealLifecycle -Case $realArchiveMarkerPublishFailure -ScriptName 'restore-dream-skin.ps1' `
     -Scenario 'real-restore-archive-marker-publish-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
-  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realState" -or
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realPaused" -or
     $realResult.Trace -contains 'start-process') {
     throw 'Archive-marker publication failure crossed the restore cleanup or relaunch boundary.'
   }
@@ -2390,12 +4069,12 @@ try {
   $realBackupMarker = "$realBackup.appearance.json"
   $realArchive = Join-Path $realArchiveMarkerUnlinkFailure.StateRoot 'config.restored.toml'
   $realArchiveMarker = "$realArchive.appearance.json"
-  $realState = Join-Path $realArchiveMarkerUnlinkFailure.StateRoot 'state.json'
+  $realPaused = Join-Path $realArchiveMarkerUnlinkFailure.StateRoot 'paused'
   Remove-Item -LiteralPath $realBackupMarker -Force
   $realBaseline = New-RealRestoreRollbackBaseline -Case $realArchiveMarkerUnlinkFailure
   $realResult = Invoke-RealLifecycle -Case $realArchiveMarkerUnlinkFailure -ScriptName 'restore-dream-skin.ps1' `
     -Scenario 'real-restore-archive-marker-unlink-fail' -Arguments @('-RestoreBaseTheme', '-CloseRunning')
-  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realState" -or
+  if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains "remove:$realPaused" -or
     $realResult.Trace -contains 'start-process') {
     throw 'Archive-marker removal failure crossed the restore cleanup or relaunch boundary.'
   }

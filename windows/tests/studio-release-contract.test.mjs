@@ -27,6 +27,8 @@ assert.doesNotMatch(inno, /PrivilegesRequiredOverridesAllowed|deleteUserThemes|C
 const builder = read("windows/scripts/build-studio-release.ps1");
 const adapter = read("windows/scripts/studio-adapter.ps1");
 const common = read("windows/scripts/common-windows.ps1");
+const config = read("windows/scripts/config-utf8.ps1");
+const protocolTests = read("windows/tests/studio-protocol.tests.ps1");
 for (const contract of [
   "[ValidateSet('x64', 'arm64')]", "fetch-node-runtime.ps1", "--self-contained", "check-contents.mjs",
   "allowlist-windows.json", "WINDOWS_SIGN_CERT_THUMBPRINT", "Get-AuthenticodeSignature", "SHA256SUMS.txt",
@@ -67,6 +69,458 @@ contains(skipUninstall, legacyShortcutCleanup,
 assert.doesNotMatch(skipUninstall, /Invoke-DreamSkinLifecycleChild|Restore-DreamSkin/,
   "completed uninstall reruns config restore instead of cleanup only");
 const restoreScript = read("windows/scripts/restore-dream-skin.ps1");
+const startScript = read("windows/scripts/start-dream-skin.ps1");
+const recoveryWrite = startScript.indexOf("recoveryKind = 'managed-cdp'");
+const debugLaunch = startScript.indexOf("Start-Process -FilePath $codex.Executable -ArgumentList $arguments");
+assert.ok(recoveryWrite >= 0 && recoveryWrite < debugLaunch,
+  "Apply/Resume does not publish durable CDP-only recovery authority before launch");
+const recoveryRetryGuard = startScript.indexOf("$previousState.schemaVersion -eq 4");
+const ordinaryProcessProbe = startScript.indexOf("$currentProcesses = Get-DreamSkinCodexProcesses");
+assert.ok(recoveryRetryGuard >= 0 && recoveryRetryGuard < ordinaryProcessProbe,
+  "direct start reinterprets retained schema-4 recovery through fail-open legacy probes");
+contains(startScript, "Invoke-DreamSkinStartupCleanup",
+  "Apply/Resume startup failures do not share one cleanup gate");
+assert.equal((startScript.match(/Invoke-DreamSkinStartupCleanup/g) || []).length, 2,
+  "Apply/Resume has more than one startup cleanup implementation or call site");
+const foregroundStart = startScript.indexOf("if ($ForegroundInjector)");
+const foregroundEnd = startScript.indexOf("$injectorArgs =", foregroundStart);
+const foreground = startScript.slice(foregroundStart, foregroundEnd);
+contains(foreground, "throw 'The foreground injector exited during startup.'",
+  "foreground watcher failure bypasses the unified startup cleanup gate");
+assert.doesNotMatch(foreground, /\b(?:DeleteExpectedFile|Remove-Item -LiteralPath \$StatePath)\b/,
+  "foreground startup consumes recovery evidence before watcher success");
+assert.doesNotMatch(foreground, /exit \$foregroundExitCode/,
+  "foreground nonzero exit bypasses PowerShell catch semantics");
+contains(foreground, "--browser-id $foregroundCleanupCdpIdentity.BrowserId",
+  "foreground watcher does not use its captured Browser identity after outer authority is disarmed");
+const foregroundCandidateManaged = foreground.indexOf("$foregroundCleanupNewManagedCdp = $newManagedCdp");
+const foregroundCandidateIdentity = foreground.indexOf("$foregroundCleanupCdpIdentity = $cdpIdentity",
+  foregroundCandidateManaged);
+const foregroundCandidateSnapshot = foreground.indexOf("$foregroundCleanupSnapshot = $publishedStateSnapshot",
+  foregroundCandidateIdentity);
+const foregroundCandidateClosed = foreground.indexOf("$foregroundCleanupClosedCodex = $closedCodex",
+  foregroundCandidateSnapshot);
+const foregroundCandidateClosedPort = foreground.indexOf("$foregroundCleanupClosedCodexPort = $closedCodexPort",
+  foregroundCandidateClosed);
+const foregroundCandidatePauseWasSet = foreground.indexOf("$foregroundCleanupPauseWasSet = $pauseWasSet",
+  foregroundCandidateClosedPort);
+const foregroundCandidatePauseCleared = foreground.indexOf("$foregroundCleanupPauseCleared = $pauseCleared",
+  foregroundCandidatePauseWasSet);
+const foregroundDisarmManaged = foreground.indexOf("$newManagedCdp = $false", foregroundCandidatePauseCleared);
+const foregroundDisarmIdentity = foreground.indexOf("$cdpIdentity = $null", foregroundDisarmManaged);
+const foregroundDisarmSnapshot = foreground.indexOf("$publishedStateSnapshot = $null", foregroundDisarmIdentity);
+const foregroundDisarmClosed = foreground.indexOf("$closedCodex = $null", foregroundDisarmSnapshot);
+const foregroundDisarmClosedPort = foreground.indexOf("$closedCodexPort = $null", foregroundDisarmClosed);
+const foregroundDisarmPauseWasSet = foreground.indexOf("$pauseWasSet = $false", foregroundDisarmClosedPort);
+const foregroundDisarmPauseCleared = foreground.indexOf("$pauseCleared = $false", foregroundDisarmPauseWasSet);
+const foregroundLockRelease = foreground.indexOf("Exit-DreamSkinOperationLock -Mutex $operationLock",
+  foregroundDisarmPauseCleared);
+const foregroundFailure = foreground.indexOf("if ($LASTEXITCODE -ne 0)", foregroundLockRelease);
+const foregroundLockReentry = foreground.indexOf("$operationLock = Enter-DreamSkinOperationLock", foregroundFailure);
+const foregroundEvidenceProof = foreground.indexOf(
+  "Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $foregroundCleanupSnapshot", foregroundLockReentry);
+const foregroundCurrentProcessProbe = foreground.indexOf(
+  "$foregroundCurrentProcesses = @(Get-DreamSkinCodexProcessesStrict -Codex $codex)", foregroundEvidenceProof);
+const foregroundCurrentProcessProof = foreground.indexOf(
+  "$foregroundCurrentProcesses.Count -eq 0", foregroundCurrentProcessProbe);
+const foregroundCurrentListenerProbe = foreground.indexOf(
+  "$foregroundCurrentListeners = @(Get-DreamSkinPortListenersStrict -Port $Port)", foregroundCurrentProcessProof);
+const foregroundCurrentListenerProof = foreground.indexOf(
+  "$foregroundCurrentListeners.Count -eq 0", foregroundCurrentListenerProbe);
+const foregroundIdentityRecheck = foreground.indexOf(
+  "$foregroundIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $Port -Codex $codex",
+  foregroundCurrentListenerProof);
+const foregroundIdentityMatch = foreground.indexOf(
+  "$foregroundIdentity.BrowserId -cne $foregroundCleanupCdpIdentity.BrowserId", foregroundIdentityRecheck);
+const foregroundClosedMatch = foreground.indexOf(
+  "$foregroundClosedMatchesCurrent = Test-DreamSkinPathEqual", foregroundIdentityMatch);
+const foregroundClosedIdentityProof = foreground.indexOf(
+  "Get-DreamSkinCodexProcessesStrict -Codex $foregroundCleanupClosedCodex", foregroundClosedMatch);
+const foregroundClosedPortMatch = foreground.indexOf(
+  "$foregroundClosedPortMatchesCurrent = [int]$foregroundCleanupClosedCodexPort -eq $Port",
+  foregroundClosedIdentityProof);
+const foregroundClosedPortProof = foreground.indexOf(
+  "Get-DreamSkinPortListenersStrict -Port ([int]$foregroundCleanupClosedCodexPort)",
+  foregroundClosedPortMatch);
+const foregroundRearmManaged = foreground.indexOf(
+  "$newManagedCdp = $foregroundCleanupNewManagedCdp", foregroundClosedPortProof);
+const foregroundRearmIdentity = foreground.indexOf(
+  "$cdpIdentity = $foregroundCleanupCdpIdentity", foregroundRearmManaged);
+const foregroundRearmSnapshot = foreground.indexOf(
+  "$publishedStateSnapshot = $foregroundCleanupSnapshot", foregroundRearmIdentity);
+const foregroundRearmClosed = foreground.indexOf(
+  "$closedCodex = $foregroundCleanupClosedCodex", foregroundRearmSnapshot);
+const foregroundRearmClosedPort = foreground.indexOf(
+  "$closedCodexPort = $foregroundCleanupClosedCodexPort", foregroundRearmClosed);
+const foregroundRearmPauseWasSet = foreground.indexOf(
+  "$pauseWasSet = $foregroundCleanupPauseWasSet", foregroundRearmClosedPort);
+const foregroundRearmPauseCleared = foreground.indexOf(
+  "$pauseCleared = $foregroundCleanupPauseCleared", foregroundRearmPauseWasSet);
+const foregroundThrow = foreground.indexOf(
+  "throw 'The foreground injector exited during startup.'", foregroundRearmPauseCleared);
+assert.ok(foregroundCandidateManaged >= 0 && foregroundCandidateIdentity > foregroundCandidateManaged &&
+  foregroundCandidateSnapshot > foregroundCandidateIdentity &&
+  foregroundCandidateClosed > foregroundCandidateSnapshot &&
+  foregroundCandidateClosedPort > foregroundCandidateClosed &&
+  foregroundCandidatePauseWasSet > foregroundCandidateClosedPort &&
+  foregroundCandidatePauseCleared > foregroundCandidatePauseWasSet &&
+  foregroundDisarmManaged > foregroundCandidatePauseCleared &&
+  foregroundDisarmIdentity > foregroundDisarmManaged && foregroundDisarmSnapshot > foregroundDisarmIdentity &&
+  foregroundDisarmClosed > foregroundDisarmSnapshot && foregroundDisarmClosedPort > foregroundDisarmClosed &&
+  foregroundDisarmPauseWasSet > foregroundDisarmClosedPort &&
+  foregroundDisarmPauseCleared > foregroundDisarmPauseWasSet &&
+  foregroundLockRelease > foregroundDisarmPauseCleared && foregroundFailure > foregroundLockRelease &&
+  foregroundLockReentry > foregroundFailure && foregroundEvidenceProof > foregroundLockReentry &&
+  foregroundCurrentProcessProbe > foregroundEvidenceProof &&
+  foregroundCurrentProcessProof > foregroundCurrentProcessProbe &&
+  foregroundCurrentListenerProbe > foregroundCurrentProcessProof &&
+  foregroundCurrentListenerProof > foregroundCurrentListenerProbe &&
+  foregroundIdentityRecheck > foregroundCurrentListenerProof &&
+  foregroundIdentityMatch > foregroundIdentityRecheck &&
+  foregroundClosedMatch > foregroundIdentityMatch &&
+  foregroundClosedIdentityProof > foregroundClosedMatch &&
+  foregroundClosedPortMatch > foregroundClosedIdentityProof &&
+  foregroundClosedPortProof > foregroundClosedPortMatch &&
+  foregroundRearmManaged > foregroundClosedPortProof && foregroundRearmIdentity > foregroundRearmManaged &&
+  foregroundRearmSnapshot > foregroundRearmIdentity && foregroundRearmClosed > foregroundRearmSnapshot &&
+  foregroundRearmClosedPort > foregroundRearmClosed &&
+  foregroundRearmPauseWasSet > foregroundRearmClosedPort &&
+  foregroundRearmPauseCleared > foregroundRearmPauseWasSet &&
+  foregroundThrow > foregroundRearmPauseCleared,
+  "new-managed foreground reentry does not strictly revalidate current Browser, process, and listener authority");
+const strictProcessesStart = common.indexOf("function Get-DreamSkinCodexProcessesStrict");
+const strictProcessesEnd = common.indexOf("\nfunction ", strictProcessesStart + 1);
+const strictProcesses = common.slice(strictProcessesStart, strictProcessesEnd < 0 ? undefined : strictProcessesEnd);
+for (const contract of ["Get-CimInstance Win32_Process", "-ErrorAction Stop", "Get-DreamSkinProcessExecutablePath"]) {
+  contains(strictProcesses, contract, `strict Codex absence probe is incomplete: ${contract}`);
+}
+const strictListenersStart = common.indexOf("function Get-DreamSkinPortListenersStrict");
+const strictListenersEnd = common.indexOf("\nfunction ", strictListenersStart + 1);
+const strictListeners = common.slice(strictListenersStart, strictListenersEnd < 0 ? undefined : strictListenersEnd);
+for (const contract of [
+  "Get-NetTCPConnection -State Listen -ErrorAction Stop",
+  "Where-Object { [int]$_.LocalPort -eq $Port }",
+]) {
+  contains(strictListeners, contract, `strict listener absence probe is incomplete: ${contract}`);
+}
+assert.doesNotMatch(strictListeners, /Get-NetTCPConnection[^\r\n]*-LocalPort/,
+  "strict listener absence mistakes an empty LocalPort query for provider failure");
+const recordedInjectorStopStart = common.indexOf("function Stop-DreamSkinRecordedInjector");
+const recordedInjectorStopEnd = common.indexOf("\nfunction ", recordedInjectorStopStart + 1);
+const recordedInjectorStop = common.slice(recordedInjectorStopStart,
+  recordedInjectorStopEnd < 0 ? undefined : recordedInjectorStopEnd);
+contains(recordedInjectorStop,
+  'Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop',
+  "recorded watcher cleanup treats CIM provider failure as process absence");
+assert.doesNotMatch(recordedInjectorStop, /Get-CimInstance[^\r\n]*-ErrorAction SilentlyContinue/,
+  "recorded watcher cleanup suppresses CIM provider failure");
+const startupRollbackStart = startScript.indexOf("function Invoke-DreamSkinStartupCleanup");
+const startupRollbackEnd = startScript.indexOf("\n}", startupRollbackStart) + 2;
+const startupRollback = startScript.slice(startupRollbackStart, startupRollbackEnd);
+contains(startupRollback, "[AllowNull()][object]$ClosedCodex",
+  "pre-launch closed Codex identity is not carried into unified cleanup");
+contains(startupRollback, "[AllowNull()][Nullable[int]]$ClosedCodexPort",
+  "pre-launch closed Codex port is not carried into unified cleanup");
+contains(startupRollback, "[bool]$PriorInjectorCleanupProven",
+  "unified cleanup does not receive prior recorded-watcher cleanup authority");
+contains(startupRollback, "$injectorStopped = $PriorInjectorCleanupProven",
+  "unified cleanup assumes prior recorded-watcher cleanup succeeded");
+contains(startupRollback, "$cleanupProven = $false",
+  "Apply/Resume rollback has no positive renderer-or-session cleanup proof");
+contains(startupRollback, "$cleanupProven = $true",
+  "Apply/Resume rollback never records successful renderer-or-session cleanup");
+contains(startupRollback,
+  "if ($null -eq $rollbackIdentity -or $rollbackIdentity.BrowserId -cne $CdpIdentity.BrowserId)",
+  "Apply/Resume rollback treats a missing or mismatched Browser ID as successful cleanup");
+contains(startupRollback, "Get-DreamSkinPortListenersStrict -Port $Port",
+  "new-CDP rollback does not prove that its listener closed");
+contains(startupRollback, "(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0",
+  "new-CDP rollback does not prove that Codex closed");
+contains(startupRollback,
+  "$cleanupComplete = $injectorStopped -and $cleanupProven",
+  "Apply/Resume rollback discards state without both watcher and live-cleanup proof");
+contains(startupRollback, "[DreamSkinConfigNative]::DeleteExpectedFile",
+  "successful Apply/Resume cleanup does not strictly consume its exact recovery state");
+const strictStateConsumption = startupRollback.indexOf("[DreamSkinConfigNative]::DeleteExpectedFile");
+const cleanupReturn = startupRollback.indexOf("return $cleanupComplete", strictStateConsumption);
+assert.ok(strictStateConsumption >= 0 && cleanupReturn > strictStateConsumption,
+  "Apply/Resume reports cleanup complete before strict recovery-state consumption");
+const rollbackRemove = startupRollback.indexOf("--remove --port $Port --browser-id $CdpIdentity.BrowserId");
+const rollbackRemoveExit = startupRollback.indexOf("$LASTEXITCODE -ne 0", rollbackRemove);
+const existingCleanupProof = startupRollback.indexOf("$cleanupProven = $true", rollbackRemoveExit);
+const rollbackStopCodex = startupRollback.indexOf("Stop-DreamSkinCodex -Codex $Codex -AllowForce");
+const rollbackNoProcesses = startupRollback.indexOf("(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0",
+  rollbackStopCodex);
+const rollbackPortClosed = startupRollback.indexOf("Get-DreamSkinPortListenersStrict -Port $Port",
+  rollbackNoProcesses);
+const launchedCleanupProof = startupRollback.indexOf("$cleanupProven = $true", rollbackPortClosed);
+assert.ok(rollbackRemove >= 0 && rollbackRemoveExit > rollbackRemove && existingCleanupProof > rollbackRemoveExit,
+  "existing-CDP rollback marks cleanup before anchored removal succeeds");
+assert.ok(rollbackStopCodex >= 0 && rollbackNoProcesses > rollbackStopCodex &&
+  rollbackPortClosed > rollbackNoProcesses && launchedCleanupProof > rollbackPortClosed,
+  "new-CDP rollback marks cleanup before Codex and its listener are confirmed closed");
+const closedCleanupStart = startupRollback.indexOf(
+  "if ($injectorStopped -and $null -ne $ClosedCodex)");
+const closedNoProcesses = startupRollback.indexOf(
+  "(Get-DreamSkinCodexProcessesStrict -Codex $ClosedCodex).Count -ne 0", closedCleanupStart);
+const closedCurrentDiffers = startupRollback.indexOf(
+  "Test-DreamSkinPathEqual -Left $ClosedCodex.Executable -Right $Codex.Executable", closedNoProcesses);
+const closedCurrentNoProcesses = startupRollback.indexOf(
+  "(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0", closedCurrentDiffers);
+const closedPortAbsent = startupRollback.indexOf(
+  "Get-DreamSkinPortListenersStrict -Port ([int]$ClosedCodexPort)", closedCurrentNoProcesses);
+const closedCleanupProof = startupRollback.indexOf("$cleanupProven = $true", closedPortAbsent);
+assert.ok(closedCleanupStart >= 0 && closedNoProcesses > closedCleanupStart &&
+  closedCurrentDiffers > closedNoProcesses && closedCurrentNoProcesses > closedCurrentDiffers &&
+  closedPortAbsent > closedCurrentNoProcesses && closedCleanupProof > closedPortAbsent,
+  "pre-launch closed Codex cleanup does not strictly prove closed/current identities and port absence");
+contains(startupRollback, "$closedMatchesCurrent = Test-DreamSkinPathEqual",
+  "combined closed/new cleanup cannot deduplicate the current package identity");
+contains(startupRollback, "$closedPortMatchesCurrent = [int]$ClosedCodexPort -eq $Port",
+  "combined closed/new cleanup cannot deduplicate the active port proof");
+contains(startupRollback, "$cleanupProven = $cleanupProven -and $closedCleanupProven",
+  "combined closed/new cleanup replaces rather than conjoins independent authority proofs");
+contains(startupRollback, "($NewManagedCdp -or $null -eq $ClosedCodex)",
+  "pre-launch closed cleanup can delete state published before snapshot failure");
+const authorizedStop = startScript.indexOf("Stop-DreamSkinCodex -Codex $codexToStop");
+const closedIdentityCapture = startScript.indexOf("$closedCodex = $codexToStop", authorizedStop);
+const closedPortCapture = startScript.indexOf("$closedCodexPort = $Port", closedIdentityCapture);
+const resetToCurrent = startScript.indexOf("$codex = $currentCodex", authorizedStop);
+const startupTransaction = startScript.indexOf("try {", closedIdentityCapture);
+const firstPostCloseBoundary = startScript.indexOf("Ensure-DreamSkinManagedDirectory", authorizedStop);
+assert.ok(authorizedStop >= 0 && closedIdentityCapture > authorizedStop && closedPortCapture > closedIdentityCapture &&
+  resetToCurrent > closedPortCapture,
+  "successful restart authorization does not retain the exact closed package identity and port before resetting to current");
+assert.ok(startupTransaction > resetToCurrent && startupTransaction < firstPostCloseBoundary,
+  "the first post-close pre-launch failure bypasses unified cleanup");
+contains(startScript, "-ClosedCodex $closedCodex", "unified startup cleanup call omits the closed package identity");
+contains(startScript, "-ClosedCodexPort $closedCodexPort", "unified startup cleanup call omits the closed session port");
+contains(startScript, "-PriorInjectorCleanupProven $priorInjectorCleanupProven",
+  "unified startup cleanup call omits prior recorded-watcher cleanup authority");
+contains(startScript, "$priorInjectorCleanupProven = [bool]$recordedInjectorStopped",
+  "Start does not retain the result of prior recorded-watcher cleanup");
+contains(startScript, "if (($newManagedCdp -or $null -ne $closedCodex) -and $cleanupProven)",
+  "official Codex relaunch ignores proven pre-launch closed-session cleanup");
+for (const contract of [
+  "foreach ($operation in @('start', 'resume'))",
+  "foreach ($closedIdentity in @('current', 'saved'))",
+  "foreach ($failure in @('prior-state', 'state-write', 'state-snapshot'))",
+  '$scenario = "prelaunch-closed-$operation-$closedIdentity-$failure-fail"',
+  "'prelaunch-closed-start-saved-state-snapshot-fail-cleanup-closed-cim-error'",
+  "'prelaunch-closed-start-saved-state-snapshot-fail-cleanup-current-cim-error'",
+  "'prelaunch-closed-start-saved-state-snapshot-fail-cleanup-tcp-error'",
+]) contains(protocolTests, contract, `matching-host pre-launch closed-session fixture missing: ${contract}`);
+for (const contract of [
+  "'prior-watcher-provider-error-state-snapshot-fail'",
+  "$env:DREAM_SKIN_TEST_SCENARIO -notlike 'prior-watcher-provider-error-*'",
+  "recorded-injector-cim-provider-error",
+]) contains(protocolTests, contract, `matching-host production recorded-watcher fixture missing: ${contract}`);
+for (const contract of [
+  "foreach ($closedIdentity in @('current', 'saved'))",
+  '$scenario = "combined-closed-new-$operation-$closedIdentity-early-wait-success"',
+  "'combined-closed-new-start-saved-early-wait-cleanup-new-cim-error'",
+  "'combined-closed-new-start-saved-early-wait-cleanup-new-tcp-error'",
+  "'combined-closed-new-start-saved-early-wait-cleanup-closed-cim-error'",
+  "'combined-closed-new-start-saved-early-wait-cleanup-closed-tcp-error'",
+]) contains(protocolTests, contract, `matching-host combined closed/new cleanup fixture missing: ${contract}`);
+contains(adapter, "$status.StateDamaged",
+  "adapter does not distinguish malformed state from readable stale state");
+contains(adapter, "$childArguments += '-RecoverDamagedState'",
+  "adapter cannot dispatch its advertised malformed-state recovery path");
+contains(restoreScript, "[switch]$RecoverDamagedState",
+  "restore child has no private malformed-state recovery mode");
+assert.match(restoreScript,
+  /Archive-DreamSkinStateFile -Path \$StatePath\s+`?\s*-ExpectedSnapshot \$stateArtifactSnapshot/,
+  "malformed state quarantine is not bound to its classified identity and bytes");
+const damagedSnapshot = restoreScript.indexOf(
+  "$stateArtifactSnapshot = Get-DreamSkinStableFileSnapshot -Path $StatePath -AllowMissing");
+const damagedParse = restoreScript.indexOf("Read-DreamSkinState -Path $StatePath -Bytes $stateArtifactSnapshot.Bytes");
+assert.ok(damagedSnapshot >= 0 && damagedParse > damagedSnapshot,
+  "state classification does not parse the one stable no-reparse snapshot");
+assert.equal((restoreScript.match(/Get-DreamSkinStableFileSnapshot -Path \$StatePath/g) || []).length, 1,
+  "Restore takes more than one state snapshot after classification");
+contains(restoreScript, "$managedCdpRecovery = $null -ne $state -and $state.schemaVersion -eq 4",
+  "ordinary Restore does not recognize retained schema-4 cleanup evidence");
+assert.equal((restoreScript.match(/Get-DreamSkinRegisteredCodexInstalls/g) || []).length, 1,
+  "Restore does not derive saved and current Codex identities from one Appx inventory snapshot");
+assert.doesNotMatch(restoreScript, /(?<!Resolve-)Get-DreamSkinCodexInstall(?:FromState)?\b/,
+  "Restore re-enumerates or suppresses failure while resolving saved/current Codex identities");
+const appxInventory = restoreScript.indexOf(
+  "$registeredCodexInstalls = @(Get-DreamSkinRegisteredCodexInstalls)");
+const currentFromInventory = restoreScript.indexOf("$registeredCodexInstalls[0]", appxInventory);
+const savedFromInventory = restoreScript.indexOf(
+  "Resolve-DreamSkinCodexInstallFromState -State $state -RegisteredInstalls $registeredCodexInstalls",
+  currentFromInventory);
+assert.ok(appxInventory >= 0 && currentFromInventory > appxInventory && savedFromInventory > currentFromInventory,
+  "Restore does not use one terminating Appx snapshot for both current and saved identities");
+const managedRecoveryDetection = restoreScript.indexOf("$managedCdpRecovery = $null -ne $state");
+const managedRecoveryPortBinding = restoreScript.indexOf(
+  "$managedCdpRecovery -and $PortExplicit -and [int]$state.port -ne $Port");
+const firstManagedRecoveryProcessScan = restoreScript.indexOf(
+  "Get-DreamSkinCodexProcessesStrict -Codex $savedCodex");
+assert.ok(managedRecoveryDetection >= 0 && managedRecoveryPortBinding > managedRecoveryDetection &&
+  firstManagedRecoveryProcessScan > managedRecoveryPortBinding,
+  "schema-4 Restore does not reject an explicit port that differs from retained recovery authority before probing");
+contains(restoreScript, "Get-DreamSkinCodexProcessesStrict -Codex $savedCodex",
+  "schema-4 Restore does not fail closed on CIM enumeration");
+contains(restoreScript, "Get-DreamSkinPortListenersStrict -Port $Port",
+  "schema-4 Restore does not fail closed on listener enumeration");
+const transactionStart = restoreScript.indexOf("try {", restoreScript.indexOf("$transactionCommitted = $false"));
+const transactionSavedProcessScan = restoreScript.indexOf(
+  "Get-DreamSkinCodexProcessesStrict -Codex $savedCodex", firstManagedRecoveryProcessScan + 1);
+const transactionCurrentProcessScan = restoreScript.indexOf(
+  "Get-DreamSkinCodexProcessesStrict -Codex $currentCodex", transactionSavedProcessScan);
+const transactionListenerScan = restoreScript.indexOf(
+  "Get-DreamSkinPortListenersStrict -Port $Port", transactionSavedProcessScan);
+const firstManagedMutation = restoreScript.indexOf("Ensure-DreamSkinManagedDirectory", transactionStart);
+const managedStateProof = restoreScript.indexOf(
+  "Assert-DreamSkinStableFileSnapshotUnchanged -Snapshot $stateArtifactSnapshot", transactionStart);
+assert.ok(transactionStart >= 0 && managedStateProof > transactionStart &&
+  transactionSavedProcessScan > managedStateProof &&
+  transactionCurrentProcessScan > transactionSavedProcessScan &&
+  transactionListenerScan > transactionCurrentProcessScan && firstManagedMutation > transactionListenerScan,
+  "schema-4 Restore does not reprove its exact state and strict process/listener absence before mutation");
+assert.doesNotMatch(restoreScript, /Get-DreamSkinRecoveryArtifactSnapshot -Path \$StatePath/,
+  "Restore captures state.json through classification-dependent pathname rollback");
+assert.doesNotMatch(restoreScript, /Remove-DreamSkinRecoveryArtifact -Path \$StatePath/,
+  "Restore deletes state.json through a classification-dependent pathname operation");
+const initialMissingStateGuard = restoreScript.indexOf(
+  "if (-not $RecoverDamagedState -and -not $stateArtifactSnapshot.Exists)");
+const initialMissingStateHold = restoreScript.indexOf(
+  "$statePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)", initialMissingStateGuard);
+assert.ok(initialMissingStateGuard > damagedParse && initialMissingStateHold > initialMissingStateGuard &&
+  initialMissingStateHold < appxInventory,
+  "initially missing state.json is not guarded before later lifecycle discovery or mutation");
+const exactStateDelete = restoreScript.indexOf("[DreamSkinConfigNative]::DeleteExpectedFile(", firstManagedMutation);
+const exactStateDeleteIdentity = restoreScript.indexOf(
+  "$StatePath, $stateArtifactSnapshot.Identity, $stateArtifactSnapshot.Bytes", exactStateDelete);
+const exactStateGuard = restoreScript.indexOf(
+  "$statePathGuard = [DreamSkinConfigNative]::HoldMissingPath($StatePath)", exactStateDeleteIdentity);
+const exactStateGuardComplete = restoreScript.indexOf("$statePathGuard.Complete()", exactStateGuard);
+const exactStateCommit = restoreScript.indexOf("$transactionCommitted = $true", exactStateGuardComplete);
+assert.ok(exactStateDelete > firstManagedMutation && exactStateDeleteIdentity > exactStateDelete &&
+  exactStateGuard > exactStateDeleteIdentity && exactStateGuardComplete > exactStateGuard &&
+  exactStateCommit > exactStateGuardComplete,
+  "initially existing readable state is not consumed exactly under one commit path guard");
+for (const scenario of [
+  "schema4-restore-process-appears",
+  "schema4-restore-listener-appears",
+  "schema4-current-running",
+  "schema4-explicit-port-mismatch",
+  "schema4-appx-provider-error",
+  "schema4-appx-update-race",
+  "schema4-appx-distinct-current-running",
+]) contains(protocolTests, scenario, `matching-host retained-state fixture missing: ${scenario}`);
+for (const contract of [
+  "foreach ($race in @('replacement', 'same-bytes', 'reparse', 'post-proof', 'post-delete'))",
+  "foreach ($operation in @('restore', 'uninstall'))",
+  '$scenario = "schema4-state-race-$race-$operation"',
+]) contains(protocolTests, contract, `matching-host schema-4 state race matrix missing: ${contract}`);
+for (const contract of [
+  "foreach ($initialState in @('missing', 'schema3'))",
+  "foreach ($phase in @('before-snapshot', 'after-snapshot', 'during-rollback'))",
+  "foreach ($operation in @('restore', 'uninstall'))",
+  '$scenario = "state-transition-$initialState-$phase-$operation"',
+]) contains(protocolTests, contract, `matching-host state classification transition matrix missing: ${contract}`);
+assert.doesNotMatch(protocolTests, /real-restore-state-unlink-fail|remove:\$realState/,
+  "matching-host rollback fixtures still assume pathname-based state cleanup");
+const watcherAbsenceStart = common.indexOf("function Assert-DreamSkinNoManagedWatcherProcess");
+const watcherAbsenceEnd = common.indexOf("\nfunction ", watcherAbsenceStart + 1);
+const watcherAbsence = common.slice(watcherAbsenceStart, watcherAbsenceEnd < 0 ? undefined : watcherAbsenceEnd);
+assert.ok(watcherAbsenceStart >= 0, "shared malformed-state watcher absence proof is missing");
+for (const contract of [
+  "Name = 'node.exe'", "-ErrorAction Stop", "CodexDreamSkinStudio\\versions",
+  "engine\\runtime\\node.exe", "engine\\scripts\\injector.mjs",
+  "windows\\scripts\\injector.mjs", "--watch",
+]) contains(watcherAbsence, contract, `watcher absence proof is incomplete: ${contract}`);
+assert.doesNotMatch(watcherAbsence, /\bStop-(?:Process|DreamSkinRecordedInjector)\b/,
+  "malformed-state absence proof kills a process it cannot authorize");
+for (const [name, expected] of [
+  ["versionedNodeSuffix", "engine\\runtime\\node.exe"],
+  ["versionedInjectorSuffix", "engine\\scripts\\injector.mjs"],
+  ["historicalInjectorSuffix", "windows\\scripts\\injector.mjs"],
+]) {
+  contains(watcherAbsence, `$${name} = '${expected}'`, `${name} is not a single-separator Windows path`);
+  assert.ok(!watcherAbsence.includes(`$${name} = '${expected.replaceAll("\\", "\\\\")}'`),
+    `${name} contains literal doubled path separators`);
+}
+const archiveStateStart = common.indexOf("function Archive-DreamSkinStateFile");
+const archiveStateEnd = common.indexOf("\nfunction ", archiveStateStart + 1);
+const archiveState = common.slice(archiveStateStart, archiveStateEnd < 0 ? undefined : archiveStateEnd);
+const normalizedArchiveSource = archiveState.indexOf(
+  "$normalizedPath = [DreamSkinConfigNative]::NormalizePath($Path)");
+const normalizedArchiveSnapshot = archiveState.indexOf(
+  "$normalizedSnapshotPath = [DreamSkinConfigNative]::NormalizePath(\"$($ExpectedSnapshot.FullPath)\")");
+const normalizedArchiveCompare = archiveState.indexOf(
+  "$normalizedPath.Equals($normalizedSnapshotPath, [System.StringComparison]::OrdinalIgnoreCase)");
+assert.ok(normalizedArchiveSource >= 0 && normalizedArchiveSnapshot > normalizedArchiveSource &&
+  normalizedArchiveCompare > normalizedArchiveSnapshot,
+  "state quarantine compares native snapshot and input paths without normalizing both extended-path forms");
+contains(archiveState, "[DreamSkinConfigNative]::QuarantineExpectedFile",
+  "state quarantine does not rename the classified handle by identity and bytes");
+contains(config, "public static void QuarantineExpectedFile",
+  "native stable-handle quarantine boundary is missing");
+for (const contract of [
+  "expectedIdentity", "expectedBytes", "RenameRelative(file, parent",
+  "ResolvedPath(file, fullPath)", "Identity(Inspect(file, fullArchivePath))",
+]) {
+  contains(config, contract, `native state quarantine is incomplete: ${contract}`);
+}
+const codexAbsenceStart = common.indexOf("function Assert-DreamSkinNoRegisteredCodexProcessOrListener");
+const codexAbsenceEnd = common.indexOf("\nfunction ", codexAbsenceStart + 1);
+const codexAbsence = common.slice(codexAbsenceStart, codexAbsenceEnd < 0 ? undefined : codexAbsenceEnd);
+assert.ok(codexAbsenceStart >= 0, "malformed recovery has no registered Codex/process/listener absence proof");
+for (const contract of [
+  "Name = 'ChatGPT.exe'", "Get-DreamSkinProcessExecutablePath",
+  "Get-NetTCPConnection -State Listen -ErrorAction Stop",
+  "Where-Object { [int]$_.LocalPort -eq $Port }",
+]) {
+  contains(codexAbsence, contract, `registered Codex absence proof is incomplete: ${contract}`);
+}
+assert.doesNotMatch(codexAbsence, /Test-DreamSkinPortAvailable/,
+  "damaged-state listener proof reuses a fail-open availability probe");
+assert.doesNotMatch(codexAbsence, /\bStop-(?:Process|DreamSkinCodex)\b/,
+  "registered Codex absence proof kills a process instead of observing it");
+const trayAbsenceStart = common.indexOf("function Assert-DreamSkinNoManagedTrayProcess");
+const trayAbsenceEnd = common.indexOf("\nfunction ", trayAbsenceStart + 1);
+const trayAbsence = common.slice(trayAbsenceStart, trayAbsenceEnd < 0 ? undefined : trayAbsenceEnd);
+assert.ok(trayAbsenceStart >= 0, "malformed recovery has no managed tray absence proof");
+for (const contract of [
+  "Name = 'powershell.exe' OR Name = 'pwsh.exe'", "tray-dream-skin.ps1",
+  "CodexDreamSkinStudio\\versions", "windows\\scripts\\tray-dream-skin.ps1",
+]) contains(trayAbsence, contract, `managed tray absence proof is incomplete: ${contract}`);
+assert.doesNotMatch(trayAbsence, /\bStop-Process\b/,
+  "malformed-state tray proof kills a process instead of observing it");
+const damagedRecoveryStart = restoreScript.indexOf("if ($RecoverDamagedState)");
+const firstWatcherAbsence = restoreScript.indexOf("Assert-DreamSkinNoManagedWatcherProcess", damagedRecoveryStart);
+const configRestore = restoreScript.indexOf("Restore-DreamSkinBaseTheme -ConfigPath $config", firstWatcherAbsence);
+const secondWatcherAbsence = restoreScript.indexOf("Assert-DreamSkinNoManagedWatcherProcess", firstWatcherAbsence + 1);
+const configArchive = restoreScript.indexOf("Publish-DreamSkinConfigBackupArchive", configRestore);
+const damagedStateQuarantine = restoreScript.indexOf("Archive-DreamSkinStateFile -Path $StatePath", configArchive);
+const damagedPathGuard = restoreScript.indexOf("HoldMissingPath($StatePath)", damagedStateQuarantine);
+const damagedCommit = restoreScript.indexOf("$transactionCommitted = $true", damagedStateQuarantine);
+assert.ok(damagedRecoveryStart >= 0 && firstWatcherAbsence > damagedRecoveryStart &&
+  configRestore > firstWatcherAbsence && secondWatcherAbsence > configRestore &&
+  configArchive > secondWatcherAbsence && damagedStateQuarantine > configArchive &&
+  damagedPathGuard > damagedStateQuarantine && damagedCommit > damagedPathGuard,
+  "malformed recovery does not prove watcher absence around config restore and quarantine state before commit");
+const firstCodexAbsence = restoreScript.indexOf("Assert-DreamSkinNoRegisteredCodexProcessOrListener",
+  firstWatcherAbsence);
+const secondCodexAbsence = restoreScript.indexOf("Assert-DreamSkinNoRegisteredCodexProcessOrListener",
+  firstCodexAbsence + 1);
+assert.ok(firstCodexAbsence > firstWatcherAbsence && firstCodexAbsence < configRestore &&
+  secondCodexAbsence > configRestore && secondCodexAbsence < configArchive,
+  "malformed recovery does not disprove every registered Codex process/listener around config restore");
+const firstTrayAbsence = restoreScript.indexOf("Assert-DreamSkinNoManagedTrayProcess", firstWatcherAbsence);
+const secondTrayAbsence = restoreScript.indexOf("Assert-DreamSkinNoManagedTrayProcess", firstTrayAbsence + 1);
+assert.ok(firstTrayAbsence > firstWatcherAbsence && firstTrayAbsence < configRestore &&
+  secondTrayAbsence > configRestore && secondTrayAbsence < configArchive,
+  "malformed recovery does not disprove managed tray processes around config restore");
+contains(restoreScript, "if (-not $RecoverDamagedState) { Stop-DreamSkinTrayProcess }",
+  "malformed recovery still kills an unproven tray-like PowerShell process");
+assert.doesNotMatch(restoreScript,
+  /\$artifactSnapshots\s*=\s*@\(\s*\$stateArtifactSnapshot/,
+  "malformed recovery sends its stable state snapshot through generic artifact rollback");
 const ordinaryUninstallStart = restoreScript.indexOf("if ($Uninstall)");
 const ordinaryUninstall = restoreScript.slice(ordinaryUninstallStart);
 contains(ordinaryUninstall, legacyShortcutCleanup,
@@ -209,10 +663,54 @@ for (const contract of [
 ]) contains(engineClient, contract, `bounded production engine runner missing: ${contract}`);
 assert.doesNotMatch(app, /DeleteUserThemes/);
 
-const config = read("windows/scripts/config-utf8.ps1");
 const installScript = read("windows/scripts/install-dream-skin.ps1");
 const windowsTests = read("windows/tests/run-tests.ps1");
 const studioProtocolTests = read("windows/tests/studio-protocol.tests.ps1");
+for (const regression of [
+  "start-rollback-identity-lost", "resume-rollback-remove-fail",
+  "start-rollback-close-fail", "start-rollback-listener-stuck",
+  "start-rollback-remove-fail", "resume-rollback-identity-lost",
+  "resume-rollback-close-fail", "resume-rollback-listener-stuck",
+]) contains(studioProtocolTests, regression, `Apply/Resume rollback regression missing: ${regression}`);
+for (const contract of [
+  "foreach ($operation in @('start', 'resume'))",
+  '$earlySuccessName = "$operation-early-wait-cleanup-success"',
+  '$scenario = "$operation-early-wait-$failure"',
+  '$priorFailureName = "$operation-prior-state-fail"',
+  "foreach ($failure in @('cleanup-force-fail', 'cleanup-cim-error', 'cleanup-tcp-error'))",
+  "start-foreground-new-fail",
+  "start-foreground-state-replaced", "start-foreground-success",
+  "start-foreground-existing-fail", "start-foreground-existing-identity-replaced",
+  "combined-closed-new-foreground-resume-saved-state-replaced",
+  "combined-closed-new-foreground-resume-saved-lock-reentry-fail",
+  "combined-closed-new-foreground-resume-saved-browser-replaced",
+  "foreground-browser-replaced",
+  "pause-write:True", "lock-reentry-error",
+  "schema4-direct-retry", "schema4-restore-cim-error",
+  "schema4-restore-tcp-error", "schema4-restore-absent",
+]) contains(studioProtocolTests, contract, `early Apply/Resume matching-host matrix missing: ${contract}`);
+for (const regression of [
+  "damaged-recovery-restore-absent", "damaged-recovery-uninstall-absent",
+  "damaged-recovery-matching-watcher", "damaged-recovery-mismatched-watcher",
+  "damaged-recovery-uninspectable-watcher", "damaged-recovery-watcher-appears",
+  "damaged-recovery-versioned-watcher", "damaged-recovery-historical-watcher",
+  "damaged-recovery-older-codex", "damaged-recovery-uninspectable-codex",
+  "damaged-recovery-unmatched-codex",
+  "damaged-recovery-residual-listener", "damaged-recovery-tray-like",
+  "damaged-recovery-listener-probe-fail", "damaged-recovery-uninspectable-tray",
+]) contains(studioProtocolTests, regression, `malformed-state lifecycle regression missing: ${regression}`);
+contains(studioProtocolTests, "damaged-recovery-normalized-snapshot",
+  "matching-host normalized stable-snapshot quarantine fixture missing");
+for (const contract of [
+  "foreach ($race in @('replacement', 'same-bytes', 'reparse', 'post-proof'))",
+  "foreach ($operation in @('restore', 'uninstall'))",
+  '$scenario = "damaged-race-$phase-$race-$operation"',
+]) contains(studioProtocolTests, contract, `malformed-state race matrix missing: ${contract}`);
+for (const regression of [
+  "deep-fresh-wrong-runtime", "deep-official-wrong-runtime",
+  "deep-paused-wrong-runtime", "deep-active-wrong-runtime", "deep-missing-runtime",
+  "restore-missing-runtime", "uninstall-missing-runtime",
+]) contains(studioProtocolTests, regression, `deep runtime regression missing: ${regression}`);
 const matchingHostTests = windowsTests + studioProtocolTests;
 const studioProgramTests = read("windows/studio-tests/Program.cs");
 for (const regression of [
@@ -443,7 +941,6 @@ for (const contract of [
   "$missingConfigGuard.AssertUnchanged()",
   "$missingConfigGuard.Complete()",
 ]) contains(restoreScript, contract, `missing-config restore contract missing: ${contract}`);
-const stateCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path $StatePath");
 const pauseCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path (Join-Path $StateRoot 'paused')");
 const archiveCommit = restoreScript.indexOf("Publish-DreamSkinConfigBackupArchive");
 const markerCleanupToken = "Remove-DreamSkinRecoveryArtifact -Path $backupMarkerPath";
@@ -451,17 +948,47 @@ const markerCommit = restoreScript.indexOf(markerCleanupToken, pauseCommit);
 const backupCommit = restoreScript.indexOf("Remove-DreamSkinRecoveryArtifact -Path $backup",
   markerCommit + markerCleanupToken.length);
 const missingGuardComplete = restoreScript.indexOf("$missingConfigGuard.Complete()", backupCommit);
-const committed = restoreScript.indexOf("$transactionCommitted = $true", backupCommit);
+const exactStateDeleteCommit = restoreScript.indexOf("[DreamSkinConfigNative]::DeleteExpectedFile(", missingGuardComplete);
+const statePathGuardComplete = restoreScript.indexOf("$statePathGuard.Complete()", exactStateDeleteCommit);
+const committed = restoreScript.indexOf("$transactionCommitted = $true", statePathGuardComplete);
 const relaunch = restoreScript.indexOf("Start-Process -FilePath $relaunchCodex.Executable", committed);
-assert.ok(archiveCommit >= 0 && stateCommit > archiveCommit && pauseCommit > stateCommit &&
+assert.ok(archiveCommit >= 0 && pauseCommit > archiveCommit &&
   markerCommit > pauseCommit && backupCommit > markerCommit && missingGuardComplete > backupCommit &&
-  committed > missingGuardComplete && relaunch > committed,
+  exactStateDeleteCommit > missingGuardComplete && statePathGuardComplete > exactStateDeleteCommit &&
+  committed > statePathGuardComplete && relaunch > committed,
 "restore does not publish proof, stage cleanup, remove live recovery artifacts, commit, then relaunch");
 
 contains(adapter, "$Operation = 'status'", "missing or unknown operation is not normalized to Protocol v1 status");
 contains(adapter, "$restoreRecoveryAvailable", "node-free Restore lacks an artifact-backed recovery gate");
 contains(adapter, "CODEX_NOT_INSTALLED", "Restore cannot pass a recoverable missing-Codex status");
 const studioWindows = read("windows/scripts/studio-windows.ps1");
+contains(studioWindows, "StateDamaged = $stateDamaged",
+  "malformed-state classification is not available to the adapter");
+const studioStatusStart = studioWindows.indexOf("function Get-DreamSkinStudioStatus");
+const studioStatusEnd = studioWindows.indexOf("\n}", studioStatusStart) + 2;
+const studioStatus = studioWindows.slice(studioStatusStart, studioStatusEnd);
+const retainedManagedRecovery = studioStatus.indexOf(
+  "$managedCdpRecovery = $null -ne $savedState -and $savedState.schemaVersion -eq 4");
+const retainedRecoverySession = studioStatus.indexOf(
+  "if ($stateDamaged -or $managedCdpRecovery)", retainedManagedRecovery);
+const ordinaryPausedSession = studioStatus.indexOf("if ($pausedMarker)", retainedRecoverySession);
+assert.ok(retainedManagedRecovery >= 0 && retainedRecoverySession > retainedManagedRecovery &&
+  ordinaryPausedSession > retainedRecoverySession,
+  "retained managed-CDP recovery is projected as an ordinary paused Resume session");
+const unconditionalRuntime = studioStatus.indexOf(
+  "Get-DreamSkinNodeRuntime -NodePath (Join-Path $EngineRoot 'runtime\\node.exe') -ExpectedVersion '22.23.1'");
+const statusStateRoot = studioStatus.indexOf("$stateRoot = Join-Path $env:LOCALAPPDATA");
+assert.ok(unconditionalRuntime >= 0 && unconditionalRuntime < statusStateRoot,
+  "deep status validates the private runtime only for a later session branch");
+assert.equal((studioStatus.match(/Get-DreamSkinNodeRuntime/g) || []).length, 1,
+  "deep status has conditional or duplicate private-runtime validation");
+const lifecycleStatusStart = adapter.indexOf("function Get-DreamSkinLifecycleStatus");
+const lifecycleStatusEnd = adapter.indexOf("\n}", lifecycleStatusStart) + 2;
+const lifecycleStatus = adapter.slice(lifecycleStatusStart, lifecycleStatusEnd);
+contains(lifecycleStatus, "$Operation -notin @('restore', 'uninstall')",
+  "Restore/Uninstall lifecycle status still requests deep Node validation");
+contains(lifecycleStatus, "Get-DreamSkinStudioStatus -Deep:$deep",
+  "lifecycle status does not apply the operation-specific deep validation policy");
 contains(studioWindows, "Get-DreamSkinSafeThemeDisplayName", "theme names are not sanitized at the protocol boundary");
 contains(studioWindows, "[char]0x2028", "Unicode line separators are not redacted from theme display names");
 contains(studioWindows, "Get-DreamSkinStudioRecoveryState", "status and adapter do not share recovery classification");
@@ -486,6 +1013,8 @@ for (const regression of [
   "missing-config-uninstall-stopped-first", "missing-config-uninstall-stopped-retry",
   "missing-config-uninstall-running-unauthorized", "missing-config-uninstall-running-authorized",
 ]) contains(studioProtocolTests, regression, `missing-config lifecycle regression missing: ${regression}`);
+contains(studioProtocolTests, "retained-schema4-paused-status-resume",
+  "sequential retained schema-4 status-to-Resume refusal fixture missing");
 
 for (const contract of [
   'x:Name="RefreshButton"', 'Click="RefreshButton_Click"',
@@ -523,8 +1052,12 @@ contains(builder, "$setupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersion
   "matching-host builder does not inspect setup PE metadata");
 contains(builder, "$setupVersionInfo.ProductVersion -cne $Version", "setup ProductVersion is not verified");
 contains(builder, "$setupVersionInfo.FileVersion -cne \"$Version.0\"", "setup FileVersion is not verified");
-assert.ok(builder.indexOf("$setupVersionInfo =", builder.indexOf("$setupPath =")) <
-  builder.indexOf("Sign-And-Verify -Path $setupPath"), "setup metadata is checked only after signing/publication");
+const pinnedSetupIndex = builder.indexOf("[DreamSkinReleaseFilePin]::Open($setupPath, $false)");
+const pinnedSetupSignatureIndex = builder.indexOf("Assert-FileSignature -Path $setupPath", pinnedSetupIndex);
+const pinnedSetupVersionIndex = builder.indexOf("$setupVersionInfo =", pinnedSetupSignatureIndex);
+assert.ok(pinnedSetupIndex >= 0 && pinnedSetupSignatureIndex > pinnedSetupIndex &&
+  pinnedSetupVersionIndex > pinnedSetupSignatureIndex,
+"setup signature and metadata are not checked while pathname replacement is denied");
 
 const status = read("windows/scripts/status-dream-skin.ps1");
 const protocol = read("windows/studio/EngineProtocol.cs");
@@ -545,5 +1078,155 @@ const liveRemoveRecoveries = [...adapter.matchAll(/-Code 'LIVE_REMOVE_FAILED'[\s
 assert.equal(liveRemoveRecoveries.length, 2, "both live-remove failure paths must be explicit");
 assert.deepEqual(liveRemoveRecoveries, ["'restore','diagnostics','cancel'", "'restore','diagnostics','cancel'"],
   "live-remove failure advertises an unusable retry");
+
+const fetchRuntime = read("windows/scripts/fetch-node-runtime.ps1");
+const scanner = read("studio/release/check-contents.mjs");
+const releaseSecurityFailures = [];
+const releaseSecurityContract = (name, check) => {
+  try {
+    check();
+  } catch (error) {
+    releaseSecurityFailures.push(`${name}: ${error.message}`);
+  }
+};
+
+releaseSecurityContract("C1 stage-to-ISCC identity", () => {
+  contains(inno, "#include StageFilesManifest", "Inno does not consume the explicit held file manifest");
+  assert.doesNotMatch(inno, /Source:\s*"\{#StageRoot\}\\\\\*"/,
+    "Inno still recursively reopens a wildcard stage");
+  for (const contract of [
+    "DreamSkinReleaseTreePin", "Write-InnoFileManifest", "manifestPin", "innoSourcePin", "scannerPin",
+    "$stagePins.AssertUnchanged($StageRoot)",
+    "stage-after-scan", "stage-adapter-replacement-denied", "manifest-before-iscc",
+  ]) contains(builder, contract, `stage identity contract missing: ${contract}`);
+  const pinStage = builder.indexOf("[DreamSkinReleaseTreePin]::Open($StageRoot)");
+  const scanStage = builder.indexOf("--root $StageRoot", pinStage);
+  const compileSetup = builder.indexOf("& $InnoSetup $innoArguments", scanStage);
+  const recheckStage = builder.indexOf("$stagePins.AssertUnchanged($StageRoot)", compileSetup);
+  assert.ok(pinStage >= 0 && scanStage > pinStage && compileSetup > scanStage && recheckStage > compileSetup,
+    "stage pins do not span scanner, ISCC, and the post-ISCC identity/hash proof");
+  for (const regression of [
+    "stage-adapter-replacement-denied", "stage replacement race replaced prior release",
+    "manifest-replacement-denied", "manifest replacement race replaced prior release",
+  ]) {
+    contains(releaseTests, regression, `stage replacement regression missing: ${regression}`);
+  }
+});
+
+releaseSecurityContract("C1 setup publication identity", () => {
+  for (const contract of [
+    "DreamSkinReleaseFilePin", "$setupPin", "$movableSetupPin", "$finalSetupPin",
+    "setup-after-signature", "setup-replacement-denied", "Assert-ReleaseMetadata",
+  ]) contains(builder, contract, `setup identity contract missing: ${contract}`);
+  const setupPin = builder.indexOf("[DreamSkinReleaseFilePin]::Open($setupPath, $false)");
+  const setupSignature = builder.indexOf("Assert-FileSignature -Path $setupPath", setupPin);
+  const setupHash = builder.indexOf("$setupPin.Sha256", setupSignature);
+  const setupMetadata = builder.indexOf("Assert-ReleaseMetadata", setupHash);
+  const publishMove = builder.indexOf("[IO.Directory]::Move($PublishRoot, $ReleaseRoot)", setupMetadata);
+  const finalPin = builder.indexOf("[DreamSkinReleaseFilePin]::Open($finalSetupPath, $false)", publishMove);
+  const finalMetadata = builder.indexOf("Assert-ReleaseMetadata", finalPin);
+  assert.ok(setupPin >= 0 && setupSignature > setupPin && setupHash > setupSignature &&
+    setupMetadata > setupHash && publishMove > setupMetadata && finalPin > publishMove &&
+    finalMetadata > finalPin,
+  "one proven setup object does not span signature, hash, metadata, and final publication checks");
+  for (const regression of ["setup-replacement-denied", "setup replacement race replaced prior release"]) {
+    contains(releaseTests, regression, `setup replacement regression missing: ${regression}`);
+  }
+});
+
+releaseSecurityContract("C2 one-open Node archive", () => {
+  contains(fetchRuntime, "$archiveStream = [IO.File]::Open", "Node archive is not opened once as a stream");
+  contains(fetchRuntime, "[IO.FileShare]::Read", "Node archive stream does not deny write/delete sharing");
+  contains(fetchRuntime, "[IO.Compression.ZipArchive]::new($archiveStream",
+    "Node extraction does not consume the hashed stream");
+  contains(fetchRuntime, "$entry.Open()", "Node payload is not extracted from ZipArchive entries");
+  assert.doesNotMatch(fetchRuntime, /Get-FileHash[^\r\n]*\$runtimeArchivePath|Expand-Archive/,
+    "Node verification and extraction still reopen the archive pathname");
+  contains(windowsTests, 'foreach ($mode in @(\'offline\', \'download\'))',
+    "Node replacement regression does not exercise both archive branches");
+  contains(windowsTests, 'node-$mode-replace-after-hash',
+    "Node replacement regression does not retain a deterministic post-hash scenario");
+});
+
+releaseSecurityContract("I1 aggregate release isolation", () => {
+  assert.doesNotMatch(windowsTests,
+    /&\s*\(Join-Path \$PSScriptRoot 'studio-release\.tests\.ps1'\)/,
+    "the aggregate gate still invokes the release-producing test");
+  for (const regression of [
+    "protected production release changed", "forced-post-test-release-failure",
+    "post-test outer builder failure changed production release",
+  ]) contains(releaseTests, regression, `aggregate isolation regression missing: ${regression}`);
+});
+
+releaseSecurityContract("I2 actual builder setup install", () => {
+  contains(builder, "TestOnlyToken", "builder has no strictly gated isolated test AppId");
+  contains(releaseTests, "$BuilderTestArguments", "release test does not invoke the test-gated real builder");
+  contains(releaseTests, "Invoke-TestProcess $Setup", "release test does not install the builder-produced setup");
+  assert.doesNotMatch(releaseTests, /\$TestSetup\b|Isolated Inno test installer compilation failed|& \$InnoSetup \$compileArguments/,
+    "release test still recompiles and installs a different setup");
+  contains(releaseTests, "production setup payload mismatch",
+    "actual production setup payload is not hashed and scanned after install");
+  contains(builder, "payload-fault-omit-engine-adapter", "builder has no gated payload omission seam");
+  contains(releaseTests, "payload-fault-omit-engine-adapter", "release test does not exercise the omitted-payload negative case");
+  contains(releaseTests, "faulty builder-produced setup", "release test does not install the faulty builder setup");
+});
+
+releaseSecurityContract("I3 immutable same-version target", () => {
+  contains(inno, "function IsDirectoryEmpty", "Inno cannot distinguish a nonempty same-version target");
+  contains(inno, "function InitializeSetup", "Inno does not reject a nonempty same-version target before writes");
+  contains(inno, "same-version target directory is not empty", "same-version refusal is not explicit");
+  contains(inno, "Abort", "same-version refusal does not terminate setup with a failure code");
+  for (const regression of [
+    "same-version reinstall changed original tree", "running same-version reinstall changed original tree",
+    "running-private-node same-version reinstall changed original tree",
+  ]) contains(releaseTests, regression, `same-version collision regression missing: ${regression}`);
+});
+
+releaseSecurityContract("I4 Windows floor", () => {
+  assert.match(inno, /^MinVersion=10\.0\.17763$/m,
+    "Inno does not enforce the WPF Windows 10 build 17763 floor");
+});
+
+releaseSecurityContract("I5 exact asset stage", () => {
+  assert.doesNotMatch(builder, /Join-Path \$SnapshotWindowsRoot 'assets\\\\\*'/,
+    "builder still stages assets through a wildcard");
+  for (const asset of ["dream-reference.jpg", "dream-skin.css", "renderer-inject.js", "theme.json"]) {
+    contains(builder, `'${asset}'`, `explicit staged asset missing: ${asset}`);
+  }
+  for (const regression of ["extra .env asset entered release", "staged asset set is not exact"]) {
+    contains(releaseTests, regression, `asset allowlist regression missing: ${regression}`);
+  }
+});
+
+releaseSecurityContract("I6 mixed Windows user paths", () => {
+  contains(scanner, String.raw`const WINDOWS_USER_PATH_RE = /[A-Za-z]:[\\/]Users[\\/]`,
+    "scanner has no drive/user regex accepting both separators");
+  assert.match(scanner, /WINDOWS_USER_PATH_RE\s*=\s*\/[^\n]+\/i;/,
+    "Windows drive/user scan is not case-insensitive");
+  for (const fixture of ["windows-user-path-latin1", "windows-user-path-utf16le"]) {
+    contains(read("macos/tests/studio-release.test.sh"), fixture,
+      `shared scanner fixture missing: ${fixture}`);
+  }
+});
+
+releaseSecurityContract("I7 release metadata truth", () => {
+  contains(builder, "sourceTree = $IndexTree", "release manifest omits the immutable index tree");
+  contains(builder, "function Assert-ReleaseMetadata", "builder has no strict metadata verifier");
+  assert.ok((builder.match(/Assert-ReleaseMetadata/g) || []).length >= 3,
+    "metadata is not verified before and after publication");
+  for (const contract of [
+    "schemaVersion,version,architecture,signing,file,sha256,sourceTree",
+    "exactly one checksum entry", "fresh setup SHA-256",
+  ]) contains(builder, contract, `strict metadata contract missing: ${contract}`);
+  for (const regression of [
+    "manifest-schemaVersion-mutation", "manifest-version-mutation", "manifest-architecture-mutation",
+    "manifest-signing-mutation", "manifest-file-mutation", "manifest-sha256-mutation",
+    "manifest-sourceTree-mutation", "manifest-extra-key-mutation", "checksum-hash-mutation",
+    "checksum-file-mutation", "checksum-extra-entry-mutation", "setup-byte-mutation",
+  ]) contains(releaseTests, regression, `metadata mutation regression missing: ${regression}`);
+});
+
+assert.deepEqual(releaseSecurityFailures, [],
+  `Windows release/security contracts failed:\n${releaseSecurityFailures.join("\n")}`);
 
 console.log("PASS: Windows Studio release contracts verified.");

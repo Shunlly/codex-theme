@@ -42,7 +42,6 @@ Assert-StudioQuickStartContract (Join-Path $Root '..\README.en.md') '## Quick st
 Assert-StudioQuickStartContract (Join-Path $Root '..\docs\platforms.md') '## Studio 日常路径' '## 高级恢复' @('当前仓库不声称已有通过生产信任验收的 Studio 二进制发布', '生产发布完成后', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
 Assert-StudioQuickStartContract (Join-Path $Root 'SKILL.md') '## Ordinary-user workflow (Studio)' '## Advanced recovery' @('No trusted Studio binary is currently claimed as published or accepted', 'Authenticode', 'SmartScreen', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', 'authorize a single restart', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
 & (Join-Path $PSScriptRoot 'studio-protocol.tests.ps1')
-& (Join-Path $PSScriptRoot 'studio-release.tests.ps1')
 . (Join-Path $Root 'scripts\common-windows.ps1')
 . (Join-Path $Root 'scripts\theme-windows.ps1')
 
@@ -1678,6 +1677,38 @@ public static class Program {
     -not (Test-Path -LiteralPath (Join-Path $runtimeDestination 'NOTICE.node.txt') -PathType Leaf)) {
     throw 'Verified private Node runtime did not preserve its license and notice.'
   }
+
+  $nodeRaceToken = [guid]::NewGuid().ToString('N')
+  $previousNodeRaceToken = $env:DREAM_SKIN_NODE_FETCH_TEST_TOKEN
+  try {
+    $env:DREAM_SKIN_NODE_FETCH_TEST_TOKEN = $nodeRaceToken
+    foreach ($mode in @('offline', 'download')) {
+      $scenario = "node-$mode-replace-after-hash"
+      $replacementArchive = Join-Path $temporaryRoot "$scenario-replacement.zip"
+      Copy-Item -LiteralPath $archivePath -Destination $replacementArchive
+      [IO.File]::AppendAllText($replacementArchive, 'replacement', $utf8NoBom)
+      $raceDestination = Join-Path $temporaryRoot "runtime\$scenario"
+      $raceArguments = @{
+        Architecture = 'x64'
+        Destination = $raceDestination
+        ManifestPath = $runtimeLockPath
+        TestOnlyToken = $nodeRaceToken
+        TestOnlyReplaceAfterHashWith = $replacementArchive
+      }
+      if ($mode -eq 'offline') { $raceArguments.ArchivePath = $archivePath }
+      else { $raceArguments.TestOnlyDownloadArchivePath = $archivePath }
+      $raceRejected = $false
+      try { & $fetchNodeRuntime @raceArguments } catch {
+        $raceRejected = $_.Exception.Message -match 'Node archive replacement was denied after hashing'
+      }
+      if (-not $raceRejected -or (Test-Path -LiteralPath $raceDestination)) {
+        throw "$scenario did not deny replacement or published a runtime."
+      }
+    }
+  } finally {
+    $env:DREAM_SKIN_NODE_FETCH_TEST_TOKEN = $previousNodeRaceToken
+  }
+
   $tamperedLock = Get-Content -LiteralPath $runtimeLockPath -Raw | ConvertFrom-Json
   foreach ($representativeHash in @(
     ('0' + (('a' * 63) -join '')),

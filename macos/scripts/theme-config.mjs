@@ -1,10 +1,10 @@
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-const [mode, configPath, backupPath, archiveIdentity] = process.argv.slice(2);
+const [mode, configPath, backupPath, archiveIdentity, ...extraArgs] = process.argv.slice(2);
 // Backup these keys so Restore can put them back. Do NOT force dark —
 // Dream Skin CSS auto-adapts to light/dark via data-dream-shell.
 const settings = new Map([
@@ -256,14 +256,37 @@ async function atomicWrite(
   modeBits,
   expectedBytes = null,
   expectedStat = null,
-  chmodAfterRename = true,
+  expectedTarget = configPath,
 ) {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await fs.writeFile(temporary, value, { mode: modeBits, flag: "wx" });
-    if (expectedBytes) await assertConfigUnchanged(expectedBytes, expectedStat);
+    if (expectedBytes) await assertConfigUnchanged(expectedBytes, expectedStat, expectedTarget);
+    await fs.chmod(temporary, modeBits);
+    const temporaryStat = await fs.lstat(temporary, { bigint: true });
     await fs.rename(temporary, file);
-    if (chmodAfterRename) await fs.chmod(file, modeBits);
+    const published = await fs.lstat(file, { bigint: true });
+    if (published.dev !== temporaryStat.dev || published.ino !== temporaryStat.ino) {
+      throw new Error("Atomic write publication identity changed.");
+    }
+    return published;
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+export async function atomicCreate(file, value, modeBits, beforePublish = async () => {}) {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, value, { mode: modeBits, flag: "wx" });
+    const temporaryStat = await fs.lstat(temporary, { bigint: true });
+    await beforePublish();
+    await fs.link(temporary, file);
+    const published = await fs.lstat(file, { bigint: true });
+    if (published.dev !== temporaryStat.dev || published.ino !== temporaryStat.ino) {
+      throw new Error("Atomic publication identity changed; recovery data was preserved.");
+    }
+    return published;
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => {});
   }
@@ -334,6 +357,501 @@ async function readStableRegularFile(file, invalidMessage, expectedIdentity = nu
     return opened.bytes;
   } finally {
     await opened.handle.close();
+  }
+}
+
+function statIdentity(stat) {
+  return `${stat.dev}:${stat.ino}`;
+}
+
+async function describeUpgradePath(target) {
+  let linked;
+  try {
+    linked = await fs.lstat(target, { bigint: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return { state: "absent" };
+    throw error;
+  }
+  if (linked.isSymbolicLink() || (!linked.isFile() && !linked.isDirectory())) {
+    throw new Error(`Unsafe upgrade transaction path: ${target}`);
+  }
+  const hash = createHash("sha256");
+  async function add(current, relative) {
+    const before = await fs.lstat(current, { bigint: true });
+    if (before.isSymbolicLink() || (!before.isFile() && !before.isDirectory())) {
+      throw new Error(`Unsafe upgrade transaction entry: ${current}`);
+    }
+    hash.update(before.isDirectory() ? "d\0" : "f\0");
+    hash.update(relative);
+    hash.update("\0");
+    if (before.isFile()) {
+      const opened = await openStableRegularFile(
+        current,
+        `Upgrade transaction entry changed while it was read: ${current}`,
+        statIdentity(before),
+      );
+      try {
+        hash.update(opened.bytes);
+      } finally {
+        await opened.handle.close();
+      }
+    } else {
+      const names = await fs.readdir(current);
+      names.sort();
+      for (const name of names) await add(path.join(current, name), `${relative}/${name}`);
+    }
+    const after = await fs.lstat(current, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeNs !== after.mtimeNs) {
+      throw new Error(`Upgrade transaction entry changed while it was read: ${current}`);
+    }
+  }
+  await add(target, ".");
+  const after = await fs.lstat(target, { bigint: true });
+  if (linked.dev !== after.dev || linked.ino !== after.ino
+    || linked.size !== after.size || linked.mtimeNs !== after.mtimeNs) {
+    throw new Error(`Upgrade transaction path changed while it was read: ${target}`);
+  }
+  return { state: "present", identity: statIdentity(after), digest: hash.digest("hex") };
+}
+
+function sameUpgradeDescription(actual, expected) {
+  return actual?.state === expected?.state
+    && (actual.state === "absent"
+      || (actual.identity === expected.identity && actual.digest === expected.digest));
+}
+
+export async function consumeUpgradeTree(
+  rootPath,
+  expectedIdentity,
+  beforeRemoval = async () => {},
+) {
+  const expected = await describeUpgradePath(rootPath);
+  if (expected.state !== "present" || expected.identity !== expectedIdentity) {
+    throw new Error("Upgrade cleanup tree identity changed; recovery data was preserved.");
+  }
+  const quarantineRoot = await fs.mkdtemp(`${rootPath}.consume.`);
+  const quarantineRootIdentity = statIdentity(await fs.lstat(quarantineRoot, { bigint: true }));
+  const quarantinePath = path.join(quarantineRoot, "tree");
+  await fs.rename(rootPath, quarantinePath);
+  if ((await describeUpgradePath(rootPath)).state !== "absent"
+    || !sameUpgradeDescription(await describeUpgradePath(quarantinePath), expected)
+    || (await describeUpgradePath(quarantineRoot)).identity !== quarantineRootIdentity) {
+    throw new Error("Upgrade cleanup tree changed during quarantine; recovery data was preserved.");
+  }
+  await beforeRemoval(quarantinePath);
+  if (!sameUpgradeDescription(await describeUpgradePath(quarantinePath), expected)
+    || (await describeUpgradePath(quarantineRoot)).identity !== quarantineRootIdentity) {
+    throw new Error("Upgrade cleanup tree changed before removal; recovery data was preserved.");
+  }
+  await fs.rm(quarantinePath, { recursive: true });
+  if ((await describeUpgradePath(quarantinePath)).state !== "absent") {
+    throw new Error("Upgrade cleanup tree was not removed.");
+  }
+  await fs.rmdir(quarantineRoot);
+}
+
+function identityToken(identity) {
+  return identity.replace(":", "_");
+}
+
+function expectedReceiptIdentity(groupPath) {
+  const parts = path.basename(groupPath).split(".");
+  if (parts.length !== 5 || parts[1] !== "expected") {
+    throw new Error("Expected upgrade receipt path is invalid.");
+  }
+  return {
+    groupIdentity: parts[2].replace("_", ":"),
+    receiptIdentity: parts[3].replace("_", ":"),
+    receiptDigest: parts[4],
+  };
+}
+
+export async function finalizeUpgradeReceipt(
+  snapshotRoot,
+  rootIdentity,
+  groupPath,
+  kind,
+  sourcePairs,
+  emit = false,
+) {
+  const root = await describeUpgradePath(snapshotRoot);
+  if (root.state !== "present" || root.identity !== rootIdentity) {
+    throw new Error("Upgrade snapshot root identity changed; recovery data was preserved.");
+  }
+  const group = await describeUpgradePath(groupPath);
+  if (group.state !== "present") throw new Error("Upgrade receipt group is unavailable.");
+  const entries = {};
+  const sourcePaths = new Map();
+  for (let index = 0; index < sourcePairs.length; index += 2) {
+    if (!sourcePairs[index] || sourcePairs[index + 1] === undefined) {
+      throw new Error("Upgrade receipt source arguments are incomplete.");
+    }
+    sourcePaths.set(sourcePairs[index], sourcePairs[index + 1]);
+  }
+  for (const name of (await fs.readdir(groupPath)).filter((value) => value.endsWith(".state")).sort()) {
+    const markerPath = path.join(groupPath, name);
+    const markerBytes = await readStableRegularFile(markerPath, "Upgrade receipt marker is unsafe.");
+    const lines = decodeStrictUtf8(markerBytes, "Upgrade receipt marker").split(/\r?\n/);
+    if (!['present', 'absent'].includes(lines[0]) || lines.length < 3) {
+      throw new Error("Upgrade receipt marker is invalid.");
+    }
+    const snapshot = lines[0] === "present"
+      ? await describeUpgradePath(path.join(groupPath, name.slice(0, -6)))
+      : { state: "absent" };
+    const sourcePath = sourcePaths.get(name);
+    if (sourcePath === undefined) throw new Error("Upgrade receipt source path is missing.");
+    const source = await describeUpgradePath(sourcePath);
+    if (snapshot.state !== lines[0] || source.state !== snapshot.state
+      || (source.state === "present" && (source.identity !== lines[1] || source.digest !== snapshot.digest))) {
+      throw new Error("Upgrade snapshot does not match its stable source.");
+    }
+    entries[name] = {
+      source,
+      marker: await describeUpgradePath(markerPath),
+      snapshot,
+    };
+  }
+  if (!Object.keys(entries).length) throw new Error("Upgrade receipt group is empty.");
+  const receiptPath = path.join(groupPath, "COMPLETE.json");
+  const receipt = { schemaVersion: 1, rootIdentity, groupIdentity: group.identity, entries };
+  await atomicCreate(receiptPath, `${JSON.stringify(receipt)}\n`, 0o600);
+  const published = await describeUpgradePath(receiptPath);
+  const rootAfter = await describeUpgradePath(snapshotRoot);
+  if (rootAfter.identity !== rootIdentity) {
+    throw new Error("Upgrade snapshot root changed during receipt publication.");
+  }
+  let finalGroup = groupPath;
+  if (kind === "expected") {
+    finalGroup = path.join(
+      snapshotRoot,
+      `.expected.${identityToken(group.identity)}.${identityToken(published.identity)}.${published.digest}`,
+    );
+    await fs.rename(groupPath, finalGroup);
+  } else if (kind !== "original") {
+    throw new Error("Unknown upgrade receipt kind.");
+  }
+  const finalGroupDescription = await describeUpgradePath(finalGroup);
+  const finalReceiptDescription = await describeUpgradePath(path.join(finalGroup, "COMPLETE.json"));
+  if (finalGroupDescription.identity !== group.identity
+    || !sameUpgradeDescription(finalReceiptDescription, published)) {
+    throw new Error("Upgrade receipt changed during final publication.");
+  }
+  for (const [name, sourcePath] of sourcePaths) {
+    if (!sameUpgradeDescription(await describeUpgradePath(sourcePath), entries[name].source)) {
+      throw new Error("Upgrade receipt source changed during publication.");
+    }
+  }
+  const finalRoot = await describeUpgradePath(snapshotRoot);
+  if (finalRoot.identity !== rootIdentity) throw new Error("Upgrade snapshot root changed during publication.");
+  if (emit) process.stdout.write(`${group.identity}|${published.identity}|${published.digest}|${path.basename(finalGroup)}\n`);
+  return {
+    groupIdentity: group.identity,
+    receiptIdentity: published.identity,
+    receiptDigest: published.digest,
+    finalGroup,
+  };
+}
+
+export async function captureUpgradeExpected(snapshotRoot, rootIdentity, entries) {
+  const root = await describeUpgradePath(snapshotRoot);
+  if (root.state !== "present" || root.identity !== rootIdentity) {
+    throw new Error("Upgrade snapshot root identity changed; recovery data was preserved.");
+  }
+  const groupPath = await fs.mkdtemp(path.join(snapshotRoot, ".expected."));
+  const pairs = [];
+  for (const { name, target, expectedState, expectedIdentity } of entries) {
+    const source = await describeUpgradePath(target);
+    if ((expectedState && source.state !== expectedState)
+      || (expectedIdentity && source.identity !== expectedIdentity)) {
+      throw new Error(`Upgrade transaction source changed: ${target}`);
+    }
+    if (source.state === "present") {
+      await fs.cp(target, path.join(groupPath, name), {
+        recursive: (await fs.lstat(target)).isDirectory(),
+        preserveTimestamps: true,
+        errorOnExist: true,
+        force: false,
+      });
+      if (!sameUpgradeDescription(await describeUpgradePath(target), source)
+        || (await describeUpgradePath(path.join(groupPath, name))).digest !== source.digest) {
+        throw new Error("Upgrade source changed during receipt capture.");
+      }
+    }
+    await atomicCreate(
+      path.join(groupPath, `${name}.state`),
+      `${source.state}\n${source.identity ?? ""}\nunused\n`,
+      0o600,
+    );
+    pairs.push(`${name}.state`, target);
+  }
+  return await finalizeUpgradeReceipt(snapshotRoot, rootIdentity, groupPath, "expected", pairs);
+}
+
+async function verifyUpgradeReceipt(
+  snapshotRoot,
+  rootIdentity,
+  groupPath,
+  expectedGroupIdentity,
+  expectedReceiptIdentity,
+  expectedReceiptDigest,
+  requestedEntry = null,
+  candidatePath = null,
+  matchMode = null,
+  emit = false,
+) {
+  const root = await describeUpgradePath(snapshotRoot);
+  const group = await describeUpgradePath(groupPath);
+  const receiptPath = path.join(groupPath, "COMPLETE.json");
+  const published = await describeUpgradePath(receiptPath);
+  if (root.state !== "present" || root.identity !== rootIdentity
+    || group.state !== "present" || group.identity !== expectedGroupIdentity
+    || published.state !== "present" || published.identity !== expectedReceiptIdentity
+    || published.digest !== expectedReceiptDigest) {
+    throw new Error("Upgrade receipt identity or bytes changed; recovery data was preserved.");
+  }
+  const bytes = await readStableRegularFile(receiptPath, "Upgrade receipt is unsafe.", published.identity);
+  const receipt = JSON.parse(decodeStrictUtf8(bytes, "Upgrade receipt"));
+  if (receipt?.schemaVersion !== 1 || receipt.rootIdentity !== rootIdentity
+    || receipt.groupIdentity !== expectedGroupIdentity || !receipt.entries) {
+    throw new Error("Upgrade receipt schema is invalid.");
+  }
+  for (const [name, expected] of Object.entries(receipt.entries)) {
+    const marker = await describeUpgradePath(path.join(groupPath, name));
+    const snapshot = expected.snapshot.state === "present"
+      ? await describeUpgradePath(path.join(groupPath, name.slice(0, -6)))
+      : { state: "absent" };
+    if (!sameUpgradeDescription(marker, expected.marker)
+      || !sameUpgradeDescription(snapshot, expected.snapshot)) {
+      throw new Error("Upgrade receipt entry changed; recovery data was preserved.");
+    }
+  }
+  const rootAfter = await describeUpgradePath(snapshotRoot);
+  if (rootAfter.identity !== rootIdentity) throw new Error("Upgrade snapshot root changed during verification.");
+  if (requestedEntry) {
+    const entry = receipt.entries[requestedEntry];
+    if (!entry) throw new Error("Upgrade receipt entry is missing.");
+    if (candidatePath) {
+      const candidate = await describeUpgradePath(candidatePath);
+      const matches = matchMode === "identity"
+        ? sameUpgradeDescription(candidate, entry.source)
+        : matchMode === "bytes" && candidate.state === entry.source.state
+          && (candidate.state === "absent" || candidate.digest === entry.source.digest);
+      if (!matches) throw new Error("Upgrade candidate does not match its receipt.");
+    }
+    if (emit) process.stdout.write([
+      entry.source.state,
+      entry.source.identity ?? "",
+      entry.source.digest ?? "",
+      entry.snapshot.identity ?? "",
+      entry.snapshot.digest ?? "",
+    ].join("|") + "\n");
+  }
+  return receipt;
+}
+
+async function publishUpgradePath(sourcePath, sourceExpected, destinationPath, publishedExpected) {
+  if (sourceExpected.state === "absent") {
+    if (publishedExpected.state !== "absent"
+      || !sameUpgradeDescription(await describeUpgradePath(destinationPath), publishedExpected)) {
+      throw new Error("Upgrade publication receipt is inconsistent.");
+    }
+    return { state: "absent" };
+  }
+  const source = await describeUpgradePath(sourcePath);
+  if (!sameUpgradeDescription(source, sourceExpected)) {
+    throw new Error("Upgrade publication source changed; recovery data was preserved.");
+  }
+  const sourceStat = await fs.lstat(sourcePath, { bigint: true });
+  if (sourceStat.isFile()) {
+    const opened = await openStableRegularFile(
+      sourcePath,
+      "Upgrade publication source changed; recovery data was preserved.",
+      sourceExpected.identity,
+    );
+    try {
+      await atomicCreate(destinationPath, opened.bytes, Number(opened.stat.mode & 0o777n));
+    } finally {
+      await opened.handle.close();
+    }
+  } else {
+    await fs.mkdir(destinationPath, { mode: Number(sourceStat.mode & 0o777n) });
+    for (const name of (await fs.readdir(sourcePath)).sort()) {
+      const child = path.join(sourcePath, name);
+      await fs.cp(child, path.join(destinationPath, name), {
+        recursive: (await fs.lstat(child)).isDirectory(),
+        preserveTimestamps: true,
+        errorOnExist: true,
+        force: false,
+      });
+    }
+  }
+  const published = await describeUpgradePath(destinationPath);
+  if (published.state !== publishedExpected.state || published.digest !== publishedExpected.digest
+    || !sameUpgradeDescription(await describeUpgradePath(sourcePath), sourceExpected)) {
+    throw new Error("Published upgrade entry does not match its receipt; recovery data was preserved.");
+  }
+  return published;
+}
+
+async function replaceUpgradeEntry({
+  livePath,
+  currentExpected,
+  sourcePath,
+  sourceExpected,
+  publishedExpected,
+  quarantinePath,
+}) {
+  if (!sameUpgradeDescription(await describeUpgradePath(livePath), currentExpected)) {
+    throw new Error("Upgrade live path does not match its receipt.");
+  }
+  if (!sameUpgradeDescription(await describeUpgradePath(sourcePath), sourceExpected)) {
+    throw new Error("Upgrade source path does not match its receipt.");
+  }
+  if ((await describeUpgradePath(quarantinePath)).state !== "absent") {
+    throw new Error("Upgrade quarantine path is occupied.");
+  }
+  let quarantined = false;
+  try {
+    if (currentExpected.state === "present") {
+      await fs.rename(livePath, quarantinePath);
+      quarantined = true;
+      if (!sameUpgradeDescription(await describeUpgradePath(quarantinePath), currentExpected)
+        || (await describeUpgradePath(livePath)).state !== "absent") {
+        throw new Error("Upgrade entry changed during quarantine.");
+      }
+    }
+    return await publishUpgradePath(sourcePath, sourceExpected, livePath, publishedExpected);
+  } catch (error) {
+    if (quarantined && (await describeUpgradePath(livePath)).state === "absent") {
+      await publishUpgradePath(quarantinePath, currentExpected, livePath, currentExpected);
+    }
+    throw error;
+  }
+}
+
+export async function replaceUpgradeReceiptEntry({
+  snapshotRoot,
+  rootIdentity,
+  originalGroup,
+  originalGroupIdentity,
+  originalReceiptIdentity,
+  originalReceiptDigest,
+  expectedGroup,
+  entryName,
+  livePath,
+  stagedPath = null,
+  heldPath,
+  quarantinePath,
+  direction,
+}) {
+  const expectedIdentity = expectedReceiptIdentity(expectedGroup);
+  const original = await verifyUpgradeReceipt(
+    snapshotRoot, rootIdentity, originalGroup, originalGroupIdentity,
+    originalReceiptIdentity, originalReceiptDigest,
+  );
+  const expected = await verifyUpgradeReceipt(
+    snapshotRoot, rootIdentity, expectedGroup, expectedIdentity.groupIdentity,
+    expectedIdentity.receiptIdentity, expectedIdentity.receiptDigest,
+  );
+  const originalEntry = original.entries[entryName];
+  const expectedEntry = expected.entries[entryName];
+  if (!originalEntry || !expectedEntry) throw new Error("Upgrade receipt entry is missing.");
+  let currentExpected = originalEntry.source;
+  let sourcePath = stagedPath;
+  let sourceExpected = expectedEntry.source;
+  let publishedExpected = expectedEntry.source;
+  if (direction === "restore") {
+    currentExpected = expectedEntry.source;
+    publishedExpected = originalEntry.source;
+    if ((await describeUpgradePath(heldPath)).state === "present") {
+      sourcePath = heldPath;
+      sourceExpected = originalEntry.source;
+    } else {
+      sourcePath = path.join(originalGroup, entryName.slice(0, -6));
+      sourceExpected = originalEntry.snapshot;
+    }
+  } else if (direction !== "publish") {
+    throw new Error("Unknown upgrade replacement direction.");
+  }
+  const published = await replaceUpgradeEntry({
+    livePath,
+    currentExpected,
+    sourcePath,
+    sourceExpected,
+    publishedExpected,
+    quarantinePath,
+  });
+  if (direction === "publish") {
+    await captureUpgradeExpected(snapshotRoot, rootIdentity, [{
+      name: entryName.slice(0, -6),
+      target: livePath,
+      expectedState: published.state,
+      expectedIdentity: published.identity,
+    }]);
+  }
+  await verifyUpgradeReceipt(
+    snapshotRoot, rootIdentity, originalGroup, originalGroupIdentity,
+    originalReceiptIdentity, originalReceiptDigest,
+  );
+  await verifyUpgradeReceipt(
+    snapshotRoot, rootIdentity, expectedGroup, expectedIdentity.groupIdentity,
+    expectedIdentity.receiptIdentity, expectedIdentity.receiptDigest,
+  );
+}
+
+async function holdUpgradeReceiptEntry(
+  snapshotRoot,
+  rootIdentity,
+  groupPath,
+  groupIdentity,
+  receiptIdentity,
+  receiptDigest,
+  entryName,
+  livePath,
+  heldPath,
+) {
+  const receipt = await verifyUpgradeReceipt(
+    snapshotRoot,
+    rootIdentity,
+    groupPath,
+    groupIdentity,
+    receiptIdentity,
+    receiptDigest,
+    entryName,
+    livePath,
+    "identity",
+  );
+  const expected = receipt.entries[entryName].source;
+  if (expected.state !== "present") throw new Error("Only present receipt entries can be held.");
+  if ((await describeUpgradePath(heldPath)).state !== "absent") {
+    throw new Error("Upgrade held path is already occupied.");
+  }
+  await fs.rename(livePath, heldPath);
+  try {
+    if (!sameUpgradeDescription(await describeUpgradePath(heldPath), expected)
+      || (await describeUpgradePath(livePath)).state !== "absent") {
+      throw new Error("Upgrade entry changed while it was moved into held storage.");
+    }
+    await verifyUpgradeReceipt(
+      snapshotRoot,
+      rootIdentity,
+      groupPath,
+      groupIdentity,
+      receiptIdentity,
+      receiptDigest,
+    );
+    await captureUpgradeExpected(snapshotRoot, rootIdentity, [{
+      name: entryName.slice(0, -6),
+      target: livePath,
+      expectedState: "absent",
+    }]);
+  } catch (error) {
+    if ((await describeUpgradePath(livePath)).state === "absent"
+      && sameUpgradeDescription(await describeUpgradePath(heldPath), expected)) {
+      await fs.rename(heldPath, livePath);
+    }
+    throw error;
   }
 }
 
@@ -418,7 +936,7 @@ export async function archiveBackup(
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    await atomicWrite(destinationPath, bytes, 0o600, null, null, false);
+    await atomicWrite(destinationPath, bytes, 0o600, null, null, destinationPath);
     const archived = await readStableRegularFile(
       destinationPath,
       "The restored theme backup archive could not be verified.",
@@ -470,8 +988,8 @@ export async function retireBackup(
   }
 }
 
-async function acquireConfigLock() {
-  const lockPath = `${configPath}.dream-skin.lock`;
+async function acquireConfigLock(target = configPath) {
+  const lockPath = `${target}.dream-skin.lock`;
   const deadline = Date.now() + 5000;
   while (true) {
     let created = false;
@@ -522,8 +1040,8 @@ async function acquireConfigLock() {
   }
 }
 
-async function assertConfigUnchanged(expectedBytes, expectedStat = null) {
-  const currentStat = await fs.lstat(configPath);
+async function assertConfigUnchanged(expectedBytes, expectedStat = null, target = configPath) {
+  const currentStat = await fs.lstat(target);
   if (
     currentStat.isSymbolicLink()
     || !currentStat.isFile()
@@ -531,7 +1049,7 @@ async function assertConfigUnchanged(expectedBytes, expectedStat = null) {
   ) {
     throw new Error("Codex config file identity changed during this operation; nothing was overwritten.");
   }
-  const currentBytes = await fs.readFile(configPath);
+  const currentBytes = await fs.readFile(target);
   if (!currentBytes.equals(expectedBytes)) {
     throw new Error("Codex config changed during this operation; nothing was overwritten.");
   }
@@ -560,6 +1078,8 @@ async function main() {
   const preferredNewline = content.includes("\r\n") ? "\r\n" : "\n";
 
   if (mode === "install") {
+    let configExpectedIdentity = statIdentity(originalStat);
+    let backupExpectedIdentity = null;
     if (!section) {
       content = `${content.trimEnd()}${preferredNewline}${preferredNewline}[desktop]${preferredNewline}`;
       section = desktopSection(content);
@@ -567,12 +1087,17 @@ async function main() {
     let existingBackup = null;
     let backupExists = false;
     try {
-      const backupBytes = await readStableRegularFile(
+      const openedBackup = await openStableRegularFile(
         backupPath,
         "Theme backup must be a regular file, not a symbolic link.",
       );
-      existingBackup = JSON.parse(decodeStrictUtf8(backupBytes, "Theme backup"));
-      backupExists = true;
+      try {
+        existingBackup = JSON.parse(decodeStrictUtf8(openedBackup.bytes, "Theme backup"));
+        backupExpectedIdentity = statIdentity(openedBackup.stat);
+        backupExists = true;
+      } finally {
+        await openedBackup.handle.close();
+      }
     } catch (error) {
       if (error.code !== "ENOENT") throw new Error(`Could not read the theme backup: ${error.message}`);
     }
@@ -593,7 +1118,13 @@ async function main() {
       };
       await fs.mkdir(path.dirname(backupPath), { recursive: true, mode: 0o700 });
       await assertConfigUnchanged(originalBytes, originalStat);
-      await atomicWrite(backupPath, `${JSON.stringify(backup, null, 2)}\n`, 0o600);
+      const publishedBackup = await atomicCreate(
+        backupPath,
+        `${JSON.stringify(backup, null, 2)}\n`,
+        0o600,
+        () => assertConfigUnchanged(originalBytes, originalStat),
+      );
+      backupExpectedIdentity = statIdentity(publishedBackup);
     }
 
     // Only apply non-null settings. null means "backup only / leave user's appearance alone".
@@ -608,7 +1139,25 @@ async function main() {
       const updated = content.slice(0, section.bodyStart) + body + content.slice(section.bodyEnd);
       assertEditableToml(updated);
       await assertConfigUnchanged(originalBytes, originalStat);
-      await atomicWrite(configPath, updated, originalStat.mode & 0o777, originalBytes, originalStat);
+      const publishedConfig = await atomicWrite(
+        configPath,
+        updated,
+        originalStat.mode & 0o777,
+        originalBytes,
+        originalStat,
+      );
+      configExpectedIdentity = statIdentity(publishedConfig);
+    }
+    const upgradeRoot = process.env.DREAM_SKIN_UPGRADE_SNAPSHOT_ROOT || null;
+    const upgradeRootIdentity = process.env.DREAM_SKIN_UPGRADE_SNAPSHOT_IDENTITY || null;
+    if (upgradeRoot || upgradeRootIdentity) {
+      if (!upgradeRoot || !upgradeRootIdentity) {
+        throw new Error("Upgrade receipt environment is incomplete.");
+      }
+      await captureUpgradeExpected(upgradeRoot, upgradeRootIdentity, [
+        { name: "config", target: configPath, expectedState: "present", expectedIdentity: configExpectedIdentity },
+        { name: "live-backup", target: backupPath, expectedState: "present", expectedIdentity: backupExpectedIdentity },
+      ]);
     }
     console.log("Saved base-theme backup; left Codex appearanceTheme unchanged (skin auto-adapts light/dark).");
     return;
@@ -649,11 +1198,104 @@ async function main() {
 }
 
 async function runCli() {
-  if (!["install", "restore", "archive", "retire"].includes(mode) || !configPath || !backupPath
+  if (!["install", "restore", "archive", "retire", "upgrade-consume-tree", "upgrade-receipt-capture", "upgrade-receipt-finalize", "upgrade-receipt-verify", "upgrade-receipt-hold", "upgrade-receipt-replace", "upgrade-receipt-restore", "upgrade-receipt-restore-config"].includes(mode) || !configPath || !backupPath
     || (["archive", "retire"].includes(mode) && !archiveIdentity)) {
     throw new Error("Usage: theme-config.mjs <install|restore> <config-path> <backup-path> | <archive|retire> <live-path> <archive-path> <expected-identity>");
   }
-  if (mode === "archive") {
+  if (mode === "upgrade-consume-tree") {
+    await consumeUpgradeTree(configPath, backupPath);
+  } else if (["upgrade-receipt-replace", "upgrade-receipt-restore", "upgrade-receipt-restore-config"].includes(mode)) {
+    if (!archiveIdentity || extraArgs.length !== 8) throw new Error("Upgrade replacement arguments are incomplete.");
+    const [
+      originalGroupIdentity, originalReceiptIdentity, originalReceiptDigest,
+      expectedGroup, entryName, firstPath, secondPath, quarantinePath,
+    ] = extraArgs;
+    const direction = mode === "upgrade-receipt-replace" ? "publish" : "restore";
+    const livePath = direction === "publish" ? secondPath : firstPath;
+    const candidatePath = direction === "publish" ? firstPath : secondPath;
+    const operation = () => replaceUpgradeReceiptEntry({
+      snapshotRoot: configPath,
+      rootIdentity: backupPath,
+      originalGroup: archiveIdentity,
+      originalGroupIdentity,
+      originalReceiptIdentity,
+      originalReceiptDigest,
+      expectedGroup,
+      entryName,
+      livePath,
+      stagedPath: direction === "publish" ? candidatePath : null,
+      heldPath: direction === "restore" ? candidatePath : quarantinePath,
+      quarantinePath,
+      direction,
+    });
+    if (mode === "upgrade-receipt-restore-config") {
+      const releaseLock = await acquireConfigLock(livePath);
+      try {
+        await operation();
+      } finally {
+        await releaseLock();
+      }
+    } else {
+      await operation();
+    }
+  } else if (mode === "upgrade-receipt-capture") {
+    if (!archiveIdentity || !extraArgs[0] || !["present", "absent"].includes(extraArgs[1])
+      || extraArgs.length > 3) {
+      throw new Error("Upgrade receipt capture arguments are incomplete.");
+    }
+    const receipt = await captureUpgradeExpected(configPath, backupPath, [{
+      name: archiveIdentity,
+      target: extraArgs[0],
+      expectedState: extraArgs[1],
+      expectedIdentity: extraArgs[2] || null,
+    }]);
+    process.stdout.write(`${path.basename(receipt.finalGroup)}\n`);
+  } else if (mode === "upgrade-receipt-hold") {
+    if (!archiveIdentity || extraArgs.length !== 6) {
+      throw new Error("Upgrade receipt hold arguments are incomplete.");
+    }
+    await holdUpgradeReceiptEntry(
+      configPath,
+      backupPath,
+      archiveIdentity,
+      ...extraArgs,
+    );
+  } else if (mode === "upgrade-receipt-finalize") {
+    if (!archiveIdentity || !["original", "expected"].includes(extraArgs[0])) {
+      throw new Error("Upgrade receipt finalize arguments are incomplete.");
+    }
+    await finalizeUpgradeReceipt(configPath, backupPath, archiveIdentity, extraArgs[0], extraArgs.slice(1), true);
+  } else if (mode === "upgrade-receipt-verify") {
+    if (!archiveIdentity) throw new Error("Upgrade receipt verify arguments are incomplete.");
+    let [groupIdentity, receiptIdentity, receiptDigest] = extraArgs;
+    let requestedEntry = extraArgs[3] || null;
+    let candidatePath = extraArgs[4] || null;
+    let matchMode = extraArgs[5] || null;
+    if (groupIdentity === "auto") {
+      requestedEntry = extraArgs[1] || null;
+      candidatePath = extraArgs[2] || null;
+      matchMode = extraArgs[3] || null;
+      const expectedIdentity = expectedReceiptIdentity(archiveIdentity);
+      groupIdentity = expectedIdentity.groupIdentity;
+      receiptIdentity = expectedIdentity.receiptIdentity;
+      receiptDigest = expectedIdentity.receiptDigest;
+    }
+    if (!groupIdentity || !receiptIdentity || !receiptDigest) {
+      throw new Error("Upgrade receipt identity is incomplete.");
+    }
+    await verifyUpgradeReceipt(
+      configPath,
+      backupPath,
+      archiveIdentity,
+      groupIdentity,
+      receiptIdentity,
+      receiptDigest,
+      requestedEntry,
+      candidatePath,
+      matchMode,
+      true,
+    );
+  } else if (mode === "archive") {
     await archiveBackup(configPath, backupPath, archiveIdentity);
   } else if (mode === "retire") {
     await retireBackup(configPath, backupPath, archiveIdentity);

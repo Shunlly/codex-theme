@@ -245,6 +245,15 @@ function script:New-DreamSkinStudioError {
 function Get-DreamSkinStudioStatus {
   param([switch]$Deep)
 
+  $node = $null
+  $runtimeInvalid = $false
+  if ($Deep) {
+    try {
+      $node = Get-DreamSkinNodeRuntime -NodePath (Join-Path $EngineRoot 'runtime\node.exe') -ExpectedVersion '22.23.1'
+    } catch {
+      $runtimeInvalid = $true
+    }
+  }
   $stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
   $recovery = Get-DreamSkinStudioRecoveryState -StateRoot $stateRoot
   $install = if (Test-DreamSkinStudioInstalled -StateRoot $stateRoot -LiveBackup $recovery.LiveBackup) {
@@ -261,6 +270,8 @@ function Get-DreamSkinStudioStatus {
       $stateDamaged = $true
     }
   }
+  $managedCdpRecovery = $null -ne $savedState -and $savedState.schemaVersion -eq 4 -and
+    "$($savedState.recoveryKind)" -ceq 'managed-cdp'
 
   $codexState = 'not-installed'
   $codex = $null
@@ -312,9 +323,8 @@ function Get-DreamSkinStudioStatus {
   $session = 'official'
   $themeName = $null
   $verified = $null
-  $runtimeInvalid = $false
   try { $pausedMarker = Test-DreamSkinPaused -StateRoot $stateRoot } catch { $pausedMarker = $false }
-  if ($stateDamaged) {
+  if ($stateDamaged -or $managedCdpRecovery) {
     $session = 'stale'
   } elseif ($null -ne $savedState) {
     if ($pausedMarker) {
@@ -338,23 +348,18 @@ function Get-DreamSkinStudioStatus {
 
   if ($Deep -and $session -eq 'active') {
     $verified = $false
-    try {
-      $port = [int]$savedState.port
-      $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $port -Codex $codex
-      if ($null -ne $cdpIdentity -and $cdpIdentity.BrowserId -is [string] -and
-        "$($cdpIdentity.BrowserId)" -ceq "$($savedState.browserId)") {
-        try {
-          $node = Get-DreamSkinNodeRuntime -NodePath (Join-Path $EngineRoot 'runtime\node.exe') -ExpectedVersion '22.23.1'
-        } catch {
-          $runtimeInvalid = $true
-        }
-        if (-not $runtimeInvalid) {
+    if (-not $runtimeInvalid) {
+      try {
+        $port = [int]$savedState.port
+        $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $port -Codex $codex
+        if ($null -ne $cdpIdentity -and $cdpIdentity.BrowserId -is [string] -and
+          "$($cdpIdentity.BrowserId)" -ceq "$($savedState.browserId)") {
           & $node.Path (Join-Path $PSScriptRoot 'injector.mjs') --verify --port "$port" `
             --browser-id "$($cdpIdentity.BrowserId)" --timeout-ms 5000 *> $null
           $verified = $LASTEXITCODE -eq 0
         }
-      }
-    } catch {}
+      } catch {}
+    }
   } elseif ($Deep -and $session -eq 'paused') {
     $verified = $false
   }
@@ -402,5 +407,6 @@ function Get-DreamSkinStudioStatus {
     Ok = $null -eq $error
     State = $studioState
     Error = $error
+    StateDamaged = $stateDamaged
   }
 }
