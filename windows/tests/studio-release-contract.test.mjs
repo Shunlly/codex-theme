@@ -700,6 +700,9 @@ for (const contract of [
 assert.doesNotMatch(app, /DeleteUserThemes/);
 
 const installScript = read("windows/scripts/install-dream-skin.ps1");
+const windowsTestBytes = fs.readFileSync(path.join(repo, "windows/tests/run-tests.ps1"));
+assert.deepEqual([...windowsTestBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf],
+  "windows/tests/run-tests.ps1 contains non-ASCII source and is invoked by Windows PowerShell 5.1, so it must begin with the UTF-8 BOM bytes EF BB BF");
 const windowsTests = read("windows/tests/run-tests.ps1");
 const studioProtocolTests = read("windows/tests/studio-protocol.tests.ps1");
 for (const regression of [
