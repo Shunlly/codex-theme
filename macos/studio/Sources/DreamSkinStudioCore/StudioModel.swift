@@ -110,7 +110,7 @@ public final class StudioModel: ObservableObject {
         guard !hasLaunched else { return }
         hasLaunched = true
         await refresh(.preflight)
-        guard envelope?.state.session == .official else { return }
+        guard envelope?.ok == true, envelope?.state.session == .official else { return }
         if canRequest(.install) {
             await perform(.install)
         } else if canRequest(.apply) {
@@ -219,8 +219,9 @@ public final class StudioModel: ObservableObject {
         }
         guard operation != .preflight, operation != .status else { return true }
         do {
-            envelope = try await invoke(.status)
-            return true
+            let status = try await invoke(.status)
+            envelope = status
+            return status.ok
         } catch {
             let clientError = normalized(error)
             self.clientError = clientError

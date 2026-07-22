@@ -429,6 +429,57 @@ final class StudioModelTests: CoreTestCase {
     @Test
 #endif
     @MainActor
+    func testLaunchDoesNotInstallAfterFailedOfficialPreflight() async {
+        let preflight = makeEnvelope(
+            operation: .preflight,
+            ok: false,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            errorCode: "OPERATION_FAILED",
+            availableActions: ["install"]
+        )
+        let engine = ScriptedEngine([.envelope(preflight)])
+        let model = StudioModel(engine: engine)
+
+        await model.launch()
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight)])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testLaunchDoesNotApplyAfterFailedInstallStatus() async {
+        let preflight = makeEnvelope(
+            operation: .preflight,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            availableActions: ["install"]
+        )
+        let installed = makeEnvelope(operation: .install, session: "official", verified: nil)
+        let failedStatus = makeEnvelope(
+            operation: .status,
+            ok: false,
+            session: "official",
+            verified: nil,
+            errorCode: "OPERATION_FAILED",
+            availableActions: ["apply"]
+        )
+        let engine = ScriptedEngine([.envelope(preflight), .envelope(installed), .envelope(failedStatus)])
+        let model = StudioModel(engine: engine)
+
+        await model.launch()
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight), call(.install), call(.status)])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
     func testFailedAutomaticInstallDoesNotApply() async {
         let preflight = makeEnvelope(
             operation: .preflight,
