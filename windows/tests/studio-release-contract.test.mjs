@@ -7,7 +7,20 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const read = (relative) => fs.readFileSync(path.join(repo, relative), "utf8");
 const contains = (text, expected, message) => assert.ok(text.includes(expected), message);
 
-assert.equal(read("windows/VERSION").trim(), "1.3.1");
+const windowsVersion = read("windows/VERSION").trim();
+assert.equal(windowsVersion, "1.3.1");
+assert.match(windowsVersion, /^\d+\.\d+\.\d+$/);
+const studioRuntime = read("windows/scripts/studio-windows.ps1");
+const runtimeVersionPattern = `\\A${windowsVersion.replaceAll(".", "\\.")}(?:\\r\\n|\\n)?\\z`;
+contains(studioRuntime, runtimeVersionPattern,
+  "Windows runtime readiness grammar does not match windows/VERSION");
+
+const testReleaseWorkflow = read(".github/workflows/test-release.yml");
+const windowsBuilderInvocation = testReleaseWorkflow.split(/\r?\n/).find((line) =>
+  line.includes("windows/scripts/build-studio-release.ps1") && line.includes("-Architecture x64"));
+assert.ok(windowsBuilderInvocation, "Windows test-release builder invocation is missing");
+assert.doesNotMatch(windowsBuilderInvocation, /(?:^|\s)-SkipTests(?:\s|$)/,
+  "Windows test release skips the native Windows test gate");
 
 const inno = read("windows/build/dream-skin-studio.iss");
 contains(inno, "AppId=com.feiaway.codex-dream-skin-studio", "fixed AppId missing");
@@ -1028,6 +1041,16 @@ contains(studioWindows, "$codexProcessRunning = $null -ne $runningCodex",
   "first-run status discards the observed running Codex process");
 contains(studioWindows, "$requiresRestart = $codexProcessRunning -and $session -eq 'official'",
   "first-run status does not preserve close authorization");
+contains(studioWindows, "} elseif ($recovery.Completed) {",
+  "completed recovery does not have its own action projection");
+contains(studioWindows, "$availableActions = @('install', 'restore', 'uninstall')",
+  "completed recovery does not advertise Restore opt-out proof");
+contains(studioWindows, "} elseif ($recovery.NeverApplied) {",
+  "never-applied recovery is not distinguished from completed recovery");
+contains(adapter, "-AvailableActions @($status.State.availableActions)",
+  "already-completed Uninstall discards recovery action classification");
+contains(adapter, "-AvailableActions @($postStatus.State.availableActions)",
+  "successful Uninstall discards completed recovery actions");
 contains(adapter, "$status.State.codex -eq 'running' -or $status.State.requiresRestart",
   "Restore/Uninstall authorization does not combine observed running state with restart projection");
 for (const regression of [
@@ -1038,6 +1061,10 @@ for (const regression of [
 ]) contains(studioProtocolTests, regression, `missing-config lifecycle regression missing: ${regression}`);
 contains(studioProtocolTests, "retained-schema4-paused-status-resume",
   "sequential retained schema-4 status-to-Resume refusal fixture missing");
+contains(studioProtocolTests, "completed-recovery-status-actions",
+  "completed recovery status action regression missing");
+contains(studioProtocolTests, "never-applied-status-actions",
+  "never-applied status action regression missing");
 
 for (const contract of [
   'x:Name="RefreshButton"', 'Click="RefreshButton_Click"',
@@ -1050,6 +1077,8 @@ for (const contract of [
 for (const contract of [
   "AutomaticOperation(string? session, IReadOnlyCollection<string> actions)",
   'session is "paused" or "active"',
+  'actions.Contains("install") && !actions.Contains("restore")',
+  "PrimaryOperation(string? session, IReadOnlyCollection<string> actions)",
   "DispatchWithInstallFollowUpAsync(EngineOperation operation)",
 ]) contains(window, contract, `automatic default-theme orchestration missing: ${contract}`);
 
@@ -1063,12 +1092,17 @@ contains(initialize, "DispatchWithInstallFollowUpAsync(automaticOperation)",
 const followUpStart = window.indexOf("private async Task<bool> DispatchWithInstallFollowUpAsync");
 const followUpEnd = window.indexOf("private async Task<bool> DispatchAsync", followUpStart);
 const followUp = window.slice(followUpStart, followUpEnd);
+contains(followUp, "var preInstallSession = _envelope?.State.Session;",
+  "Install follow-up does not capture the pre-Install session");
 contains(followUp, "if (!await DispatchAsync(operation)) return false;",
   "failed install still advances to Apply");
-contains(followUp, "operation == EngineOperation.Install && CanRun(EngineOperation.Apply)",
-  "successful install does not gate Apply on refreshed availability");
+contains(followUp, "ShouldApplyAfterInstall(operation, preInstallSession, CanRun(EngineOperation.Apply))",
+  "successful install does not require official pre-Install intent and refreshed Apply availability");
 contains(followUp, "return await DispatchAsync(EngineOperation.Apply);",
   "successful install does not advance through the normal Apply dispatcher");
+contains(window,
+  "internal static bool ShouldApplyAfterInstall(EngineOperation operation, string? preInstallSession, bool applyAvailable)",
+  "pre-Install session policy is not executable in the Windows Studio tests");
 assert.ok((window.match(/DispatchWithInstallFollowUpAsync\(PrimaryOperation\(\)\)/g) || []).length >= 2,
   "main button and tray primary action do not share install-follow-up dispatch");
 const uninstallStart = window.indexOf("UninstallButton_Click");

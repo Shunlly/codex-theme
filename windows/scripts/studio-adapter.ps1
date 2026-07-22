@@ -234,7 +234,7 @@ try {
     Remove-DreamSkinManagedLegacyShortcuts
     if ($DeleteUserThemes) { Remove-DreamSkinUserThemeData -StateRoot $stateRoot }
     $uninstalledState = New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official' `
-      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @('install')
+      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @($status.State.availableActions)
     Write-DreamSkinStudioEnvelope -Operation $Operation -Ok $true -State $uninstalledState -Error $null
     exit 0
   }
@@ -364,7 +364,7 @@ try {
 
   if ($Operation -eq 'uninstall') {
     $postStatus.State = New-DreamSkinStudioState -Install 'not-installed' -Codex 'stopped' -Session 'official' `
-      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @('install')
+      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @($postStatus.State.availableActions)
   }
 
   Write-DreamSkinStudioEnvelope -Operation $Operation -Ok $true -State $postStatus.State -Error $null

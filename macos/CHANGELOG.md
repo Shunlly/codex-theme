@@ -4,7 +4,9 @@
 
 - Studio automatically installs and applies the bundled default theme on first launch.
 - Windows interactive setup launches Studio by default.
-- Existing restart consent, Pause, Complete Restore, and uninstall safety remain unchanged.
+- Pause fails without writing paused state when a running Codex renderer cannot prove live skin removal.
+- Paused upgrades stay paused, while Complete Restore and uninstall remain off after Studio reopens until Install is chosen manually.
+- Windows readiness matches the exact 1.3.1 engine version, and test releases run the native Windows gate before publication.
 
 ## 1.3.0 — 2026-07-18
 

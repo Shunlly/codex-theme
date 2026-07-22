@@ -111,7 +111,7 @@ public final class StudioModel: ObservableObject {
         hasLaunched = true
         await refresh(.preflight)
         guard envelope?.ok == true, envelope?.state.session == .official else { return }
-        if canRequest(.install) {
+        if canRequest(.install), !canRequest(.restore) {
             await perform(.install)
         } else if canRequest(.apply) {
             await perform(.apply)
@@ -176,6 +176,7 @@ public final class StudioModel: ObservableObject {
         forceAuthorized: Bool = false,
         deleteUserThemes: Bool = false
     ) async {
+        let preInstallSession = envelope?.state.session
         guard beginOperation() else { return }
         let succeeded = await performActive(
             operation,
@@ -184,7 +185,7 @@ public final class StudioModel: ObservableObject {
             deleteUserThemes: deleteUserThemes
         )
         endOperation()
-        if succeeded, operation == .install, canRequest(.apply) {
+        if succeeded, operation == .install, preInstallSession == .official, canRequest(.apply) {
             await perform(.apply)
         }
     }

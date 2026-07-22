@@ -762,6 +762,15 @@ run_adapter status
   if (value.state.install !== "not-installed") process.exit(1);
   if (value.state.availableActions.join(",") !== "install,restore,uninstall") process.exit(1);
 ' "$ADAPTER_JSON"
+/bin/rm -rf "$INSTALL_ROOT"
+run_adapter status
+[ "$ADAPTER_EXIT" -eq 0 ] || { printf 'completed-uninstall status failed without the installed engine.\n' >&2; exit 1; }
+"$NODE" -e '
+  const value = JSON.parse(process.argv[1]);
+  if (value.state.install !== "not-installed" ||
+      value.state.availableActions.join(",") !== "install,restore,uninstall") process.exit(1);
+' "$ADAPTER_JSON" || { printf 'completed-uninstall status lost restore opt-out actions.\n' >&2; exit 1; }
+/usr/bin/rsync -a "$ROOT/" "$INSTALL_ROOT/"
 /bin/rm -f "$INSTALL_ROOT/scripts/verify-dream-skin-macos.sh"
 run_adapter status
 [ "$ADAPTER_EXIT" -eq 0 ] || { printf 'restored partial-engine status failed.\n' >&2; exit 1; }
@@ -911,6 +920,12 @@ else
       -e 's/"verified":false/"verified":true/' \
       "__STATUS__" > "__STATUS__.next"
     /bin/mv "__STATUS__.next" "__STATUS__"
+  elif [ "$name" = "pause-dream-skin-macos.sh" ]; then
+    /usr/bin/sed \
+      -e 's/"session":"active"/"session":"paused"/' \
+      -e 's/"verified":true/"verified":false/' \
+      "__STATUS__" > "__STATUS__.next"
+    /bin/mv "__STATUS__.next" "__STATUS__"
   fi
 fi
 STUB
@@ -926,6 +941,18 @@ make_failure_stub() {
 #!/bin/bash
 printf '%s\n' '__MESSAGE__' >&2
 exit 1
+STUB
+  /bin/chmod 755 "$temporary"
+  /bin/mv "$temporary" "$path"
+}
+
+make_zero_exit_stub() {
+  local path="$1"
+  local temporary="$path.next"
+  /usr/bin/sed "s|__MARKER__|$MARKER|g" > "$temporary" <<'STUB'
+#!/bin/bash
+/usr/bin/printf '%s %s\n' "$(/usr/bin/basename "$0")" "$*" >> "__MARKER__"
+exit 0
 STUB
   /bin/chmod 755 "$temporary"
   /bin/mv "$temporary" "$path"
@@ -994,6 +1021,15 @@ run_fixture_adapter pause --restart-authorized --force-authorized
 ! /usr/bin/grep -q -- '--force-stop-authorized' "$MARKER"
 /usr/bin/grep -Fx 'DREAM_SKIN_PROGRESS=pausing' "$ADAPTER_STDERR_FILE" >/dev/null
 ! /usr/bin/grep -Fq 'DREAM_SKIN_PROGRESS ' "$ADAPTER_STDERR_FILE"
+
+write_status ready running active false true
+make_zero_exit_stub "$INSTALLED/scripts/pause-dream-skin-macos.sh"
+: > "$MARKER"
+run_fixture_adapter pause
+assert_error LIVE_REMOVE_FAILED
+assert_recovery restore retry
+/usr/bin/grep -Fx 'pause-dream-skin-macos.sh ' "$MARKER" >/dev/null
+make_stub "$INSTALLED/scripts/pause-dream-skin-macos.sh"
 
 make_failure_stub "$INSTALLED/scripts/pause-dream-skin-macos.sh" \
   'Could not remove the live skin from Codex; pause state was not written.'

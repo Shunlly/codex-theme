@@ -78,7 +78,7 @@ function script:Test-DreamSkinStudioVersion {
     $bytes = [IO.File]::ReadAllBytes($versionPath)
     $value = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
     if ($value.Length -gt 0 -and $value[0] -eq [char]0xFEFF) { $value = $value.Substring(1) }
-    return [regex]::IsMatch($value, '\A1\.3\.0(?:\r\n|\n)?\z')
+    return [regex]::IsMatch($value, '\A1\.3\.1(?:\r\n|\n)?\z')
   } catch {
     return $false
   }
@@ -379,7 +379,9 @@ function Get-DreamSkinStudioStatus {
         }
       }
     }
-  } elseif ($recovery.Completed -or $recovery.NeverApplied) {
+  } elseif ($recovery.Completed) {
+    $availableActions = @('install', 'restore', 'uninstall')
+  } elseif ($recovery.NeverApplied) {
     $availableActions = @('install', 'uninstall')
   } elseif ($session -eq 'stale' -and $recovery.LiveBackup) {
     $availableActions = @('restore', 'uninstall')

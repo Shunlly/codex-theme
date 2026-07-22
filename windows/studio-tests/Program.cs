@@ -228,6 +228,16 @@ Assert(MainWindow.AutomaticOperation("paused", new[] { "apply", "resume" }) is n
   "Paused startup resumed automatically.");
 Assert(MainWindow.AutomaticOperation("active", new[] { "apply", "pause", "restore" }) is null,
   "Active startup reapplied unnecessarily.");
+Assert(MainWindow.AutomaticOperation("official", new[] { "install", "restore", "uninstall" }) is null,
+  "Completed Restore was automatically reversed.");
+Assert(MainWindow.AutomaticOperation("official", new[] { "install", "restore", "uninstall" }) is null,
+  "Completed Uninstall was automatically reversed.");
+Assert(MainWindow.PrimaryOperation("official", new[] { "install", "restore", "uninstall" }) == EngineOperation.Install,
+  "Manual Install was unavailable after completed recovery.");
+Assert(MainWindow.ShouldApplyAfterInstall(EngineOperation.Install, "official", applyAvailable: true),
+  "Official Install did not advance to Apply.");
+Assert(!MainWindow.ShouldApplyAfterInstall(EngineOperation.Install, "paused", applyAvailable: true),
+  "Paused Install advanced to Apply.");
 var handoffReservation = new HandoffReservation();
 Assert(handoffReservation.TryBegin(busy: false, confirming: false), "Idle handoff could not reserve the owner.");
 Assert(!MainWindow.AllowsDispatch(busy: false, confirming: false, handoffReservation.IsActive),

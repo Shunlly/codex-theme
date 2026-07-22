@@ -43,7 +43,7 @@ jobs:
           node windows/tests/studio-release-contract.test.mjs
       - name: Build unsigned installer
         shell: powershell
-        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File windows/scripts/build-studio-release.ps1 -Architecture x64 -SkipSign -SkipTests
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File windows/scripts/build-studio-release.ps1 -Architecture x64 -SkipSign
       - name: Collect Windows artifacts
         shell: powershell
         run: |

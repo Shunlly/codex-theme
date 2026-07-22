@@ -84,18 +84,27 @@ public partial class MainWindow : Window
 
   private EngineOperation PrimaryOperation()
   {
-    if (_envelope?.State.AvailableActions.Contains("install") == true) return EngineOperation.Install;
-    if (_envelope?.State.Session == "paused" && _envelope.State.AvailableActions.Contains("resume")) return EngineOperation.Resume;
+    if (_envelope is not null) return PrimaryOperation(_envelope.State.Session, _envelope.State.AvailableActions);
+    return EngineOperation.Apply;
+  }
+
+  internal static EngineOperation PrimaryOperation(string? session, IReadOnlyCollection<string> actions)
+  {
+    if (actions.Contains("install")) return EngineOperation.Install;
+    if (session == "paused" && actions.Contains("resume")) return EngineOperation.Resume;
     return EngineOperation.Apply;
   }
 
   internal static EngineOperation? AutomaticOperation(string? session, IReadOnlyCollection<string> actions)
   {
     if (session is "paused" or "active") return null;
-    if (actions.Contains("install")) return EngineOperation.Install;
+    if (actions.Contains("install") && !actions.Contains("restore")) return EngineOperation.Install;
     if (actions.Contains("apply")) return EngineOperation.Apply;
     return null;
   }
+
+  internal static bool ShouldApplyAfterInstall(EngineOperation operation, string? preInstallSession, bool applyAvailable) =>
+    operation == EngineOperation.Install && preInstallSession == "official" && applyAvailable;
 
   private bool CanRun(EngineOperation operation)
   {
@@ -152,8 +161,9 @@ public partial class MainWindow : Window
 
   private async Task<bool> DispatchWithInstallFollowUpAsync(EngineOperation operation)
   {
+    var preInstallSession = _envelope?.State.Session;
     if (!await DispatchAsync(operation)) return false;
-    if (operation == EngineOperation.Install && CanRun(EngineOperation.Apply))
+    if (ShouldApplyAfterInstall(operation, preInstallSession, CanRun(EngineOperation.Apply)))
       return await DispatchAsync(EngineOperation.Apply);
     return true;
   }

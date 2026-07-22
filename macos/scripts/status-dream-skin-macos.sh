@@ -438,6 +438,10 @@ if [ "$STUDIO_JSON" = "true" ]; then
     ACTIONS='["install","restore","uninstall"]'
   elif [ "$LIVE_BACKUP_VALID" = "true" ]; then
     ACTIONS='["restore","uninstall"]'
+  elif [ "$RESTORE_PROOF_VALID" = "true" ] \
+    && [ "$ENGINE_PRESENT" != "true" ] \
+    && [ "$STUDIO_SESSION" = "official" ]; then
+    ACTIONS='["install","restore","uninstall"]'
   elif [ "$ENGINE_PRESENT" = "true" ] && [ "$STUDIO_SESSION" = "stale" ] \
     && [ "$RESTORE_PROOF_VALID" = "true" ]; then
     ACTIONS='["restore","uninstall"]'

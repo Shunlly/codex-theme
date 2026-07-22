@@ -399,6 +399,81 @@ final class StudioModelTests: CoreTestCase {
     @Test
 #endif
     @MainActor
+    func testLaunchSkipsAutomaticInstallAfterCompletedRestore() async {
+        let completedRestore = makeEnvelope(
+            operation: .preflight,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            availableActions: ["install", "restore", "uninstall"]
+        )
+        let engine = ScriptedEngine([.envelope(completedRestore)])
+        let model = StudioModel(engine: engine)
+
+        await model.launch()
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight)])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testLaunchSkipsAutomaticInstallAfterCompletedUninstall() async {
+        let completedUninstall = makeEnvelope(
+            operation: .preflight,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            availableActions: ["install", "restore", "uninstall"]
+        )
+        let engine = ScriptedEngine([.envelope(completedUninstall)])
+        let model = StudioModel(engine: engine)
+
+        await model.launch()
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight)])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testManualInstallRemainsAvailableAfterCompletedRestore() async {
+        let completedRestore = makeEnvelope(
+            operation: .status,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            availableActions: ["install", "restore", "uninstall"]
+        )
+        let installed = makeEnvelope(operation: .install, session: "official", verified: nil)
+        let ready = makeEnvelope(
+            operation: .status,
+            session: "official",
+            verified: nil,
+            availableActions: ["apply", "restore", "uninstall"]
+        )
+        let applied = makeEnvelope(operation: .apply)
+        let verified = makeEnvelope(operation: .status)
+        let engine = ScriptedEngine([
+            .envelope(completedRestore), .envelope(installed), .envelope(ready),
+            .envelope(applied), .envelope(verified),
+        ])
+        let model = StudioModel(engine: engine)
+
+        await model.refresh(.status)
+        await model.request(.install)
+
+        XCTAssertEqual(await engine.recordedCalls(), [
+            call(.status), call(.install), call(.status), call(.apply), call(.status),
+        ])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
     func testLaunchAppliesReadyThemeButSkipsPausedAndActiveSessions() async {
         let readyEngine = ScriptedEngine([
             .envelope(makeEnvelope(operation: .preflight, session: "official", verified: nil, availableActions: ["apply"])),
@@ -504,6 +579,34 @@ final class StudioModelTests: CoreTestCase {
 
         XCTAssertEqual(await engine.recordedCalls(), [call(.preflight), call(.install)])
         XCTAssertFalse(model.isVerified)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testPausedInstallDoesNotApply() async {
+        let paused = makeEnvelope(
+            operation: .status,
+            install: "not-installed",
+            session: "paused",
+            verified: false,
+            availableActions: ["install", "restore", "uninstall"]
+        )
+        let installed = makeEnvelope(operation: .install, session: "paused", verified: false)
+        let refreshed = makeEnvelope(
+            operation: .status,
+            session: "paused",
+            verified: false,
+            availableActions: ["apply", "resume", "restore", "verify", "uninstall"]
+        )
+        let engine = ScriptedEngine([.envelope(paused), .envelope(installed), .envelope(refreshed)])
+        let model = StudioModel(engine: engine)
+
+        await model.refresh(.status)
+        await model.request(.install)
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.status), call(.install), call(.status)])
     }
 
 #if !canImport(XCTest)

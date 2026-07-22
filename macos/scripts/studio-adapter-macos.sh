@@ -343,5 +343,9 @@ case "$OPERATION" in
     [ "$(json_field state.verified)" = "true" ] \
       || emit_error VERIFY_FAILED "Theme verification failed." '["retry","restore","diagnostics","cancel"]'
     ;;
+  pause)
+    [ "$(json_field state.session)" = "paused" ] \
+      || emit_error LIVE_REMOVE_FAILED "The live theme could not be removed safely." '["restore","diagnostics","cancel"]'
+    ;;
 esac
 printf '%s\n' "$STATUS_JSON"

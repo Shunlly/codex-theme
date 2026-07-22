@@ -103,10 +103,10 @@ require_macos_runtime() { :; }
 ensure_state_root() { /bin/mkdir -p "$STATE_ROOT"; }
 state_field() { "$NODE" -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))[process.argv[2]] ?? ""))' "$STATE_PATH" "$1"; }
 browser_id_is_valid() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,200}$ ]]; }
-codex_is_running() { return 1; }
-verified_cdp_browser_id() { return 1; }
+codex_is_running() { [ "${PAUSE_CODEX_RUNNING:-false}" = true ]; }
+verified_cdp_browser_id() { [ ! -e "$STATE_ROOT/endpoint-lost" ] || return 1; printf 'Browser-A\n'; }
 release_codex_launchd_job() { :; }
-stop_recorded_injector() { :; }
+stop_recorded_injector() { : > "$STATE_ROOT/endpoint-lost"; }
 STUB
 /usr/bin/env HOME="$HOME" NODE="$NODE" "$PAUSE_ROOT/scripts/pause-dream-skin-macos.sh" >/dev/null
 "$NODE" -e '
@@ -116,6 +116,25 @@ STUB
   if (state.browserId !== "Browser-A") throw new Error(`pause changed browserId to ${state.browserId}`);
   if (state.session !== "paused") throw new Error(`pause left session as ${state.session}`);
 ' "$STATE_ROOT/state.json"
+
+/usr/bin/printf '{"port":9341,"session":"active","injectorPid":4242,"browserId":"Browser-A"}\n' \
+  > "$STATE_ROOT/state.json"
+/bin/rm -f "$STATE_ROOT/endpoint-lost" "$TMP/pause-remove"
+/usr/bin/printf 'require("node:fs").writeFileSync(process.env.PAUSE_REMOVE_MARKER, "remove");\n' \
+  > "$PAUSE_ROOT/scripts/injector.mjs"
+PAUSE_STATE_BEFORE="$(/usr/bin/shasum -a 256 "$STATE_ROOT/state.json")"
+set +e
+/usr/bin/env HOME="$HOME" NODE="$NODE" PAUSE_CODEX_RUNNING=true \
+  PAUSE_REMOVE_MARKER="$TMP/pause-remove" "$PAUSE_ROOT/scripts/pause-dream-skin-macos.sh" \
+  > "$TMP/pause-endpoint-loss.out" 2> "$TMP/pause-endpoint-loss.err"
+PAUSE_ENDPOINT_LOSS_EXIT="$?"
+set -e
+[ "$PAUSE_ENDPOINT_LOSS_EXIT" -ne 0 ] || { printf 'Pause accepted endpoint loss while Codex remained running.\n' >&2; exit 1; }
+/usr/bin/grep -F 'Could not remove the live skin from Codex; pause state was not written.' \
+  "$TMP/pause-endpoint-loss.err" >/dev/null
+[ "$PAUSE_STATE_BEFORE" = "$(/usr/bin/shasum -a 256 "$STATE_ROOT/state.json")" ] \
+  || { printf 'Pause endpoint loss replaced recoverable lifecycle state.\n' >&2; exit 1; }
+[ ! -e "$TMP/pause-remove" ] || { printf 'Pause invoked live removal without a verified endpoint.\n' >&2; exit 1; }
 
 /usr/bin/printf 'setTimeout(() => {}, 30000);\n' > "$TMP/fake-injector.mjs"
 "$NODE" "$TMP/fake-injector.mjs" --watch --port 19341 --browser-id Browser-A --theme-dir "$STATE_ROOT/theme" &

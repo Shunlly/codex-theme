@@ -1882,6 +1882,22 @@ try {
       -Verified $null -AvailableActions $definition.Actions -ErrorCode $definition.Error -RecoveryActions $definition.Recovery
   }
 
+  $neverAppliedStatus = New-CaseRoot -Name 'never-applied-status-actions' -NoState
+  Remove-Item -LiteralPath (Join-Path $neverAppliedStatus.StateRoot 'config.before-dream-skin.toml') -Force
+  Remove-Item -LiteralPath (Join-Path $neverAppliedStatus.StateRoot 'active-theme') -Recurse -Force
+  $result = Invoke-Studio -Case $neverAppliedStatus -Scenario 'stopped'
+  Assert-StudioResult -Result $result -ExitCode 0 -Ok $true -Install 'not-installed' -Codex 'stopped' `
+    -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
+    -AvailableActions @('install', 'uninstall') -ErrorCode $null
+
+  $completedStatus = New-CaseRoot -Name 'completed-recovery-status-actions' -NoState
+  Move-Item -LiteralPath (Join-Path $completedStatus.StateRoot 'config.before-dream-skin.toml') `
+    -Destination (Join-Path $completedStatus.StateRoot 'config.restored.toml')
+  $result = Invoke-Studio -Case $completedStatus -Scenario 'stopped'
+  Assert-StudioResult -Result $result -ExitCode 0 -Ok $true -Install 'not-installed' -Codex 'stopped' `
+    -Session 'official' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
+    -AvailableActions @('install', 'restore', 'uninstall') -ErrorCode $null
+
   $retainedResume = New-CaseRoot -Name 'retained-schema4-paused-status-resume'
   $retainedStatePath = Join-Path $retainedResume.StateRoot 'state.json'
   $retainedPausePath = Join-Path $retainedResume.StateRoot 'paused'
@@ -2339,7 +2355,7 @@ try {
   $result = Invoke-Studio -Case $missingCodexRestore -Scenario 'missing-codex' -Operation 'restore'
   Assert-StudioResult -Result $result -Operation 'restore' -ExitCode 0 -Ok $true -Install 'not-installed' `
     -Codex 'not-installed' -Session 'official' -ThemeName '午夜极光' -RequiresRestart $false -Verified $null `
-    -AvailableActions @('install', 'uninstall') -ErrorCode $null
+    -AvailableActions @('install', 'restore', 'uninstall') -ErrorCode $null
   Assert-ChildInvocation -Case $missingCodexRestore `
     -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-AdapterLockHeld'
 
@@ -2478,7 +2494,7 @@ try {
   }
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
     -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
-    -AvailableActions @('install') -ErrorCode $null
+    -AvailableActions @('install', 'restore', 'uninstall') -ErrorCode $null
   Assert-ChildInvocation -Case $partialEngineUninstall `
     -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-AdapterLockHeld'
   Assert-OperationLog -Case $partialEngineUninstall -ScriptName 'restore-dream-skin.ps1'
@@ -2495,7 +2511,7 @@ try {
     $result = Invoke-Studio -Case $neverApplied -Scenario 'stopped' -Operation 'uninstall'
     Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
       -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
-      -AvailableActions @('install') -ErrorCode $null
+      -AvailableActions @('install', 'uninstall') -ErrorCode $null
   }
   Assert-Equal (Get-ProtectedSnapshot -Case $neverApplied) $before 'Never-applied uninstall changed retained theme state.'
   if ((Get-FileHash -LiteralPath (Join-Path $neverApplied.UserProfile '.codex\config.toml') -Algorithm SHA256).Hash -cne $configBefore) {
@@ -2696,7 +2712,7 @@ try {
   $result = Invoke-Studio -Case $missingCodexUninstall -Scenario 'missing-codex' -Operation 'uninstall'
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
     -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
-    -AvailableActions @('install') -ErrorCode $null
+    -AvailableActions @('install', 'restore', 'uninstall') -ErrorCode $null
   Assert-ChildInvocation -Case $missingCodexUninstall `
     -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-AdapterLockHeld'
   $childInvocationCount = @([IO.File]::ReadAllLines($missingCodexUninstall.ArgvPath)).Count
@@ -2714,7 +2730,7 @@ try {
   $result = Invoke-Studio -Case $uninstall -Scenario 'lifecycle-uninstall' -Operation 'uninstall' -ExtraArguments @('-RestartAuthorized')
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
     -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
-    -AvailableActions @('install') -ErrorCode $null
+    -AvailableActions @('install', 'restore', 'uninstall') -ErrorCode $null
   Assert-ChildInvocation -Case $uninstall `
     -Expected 'restore-dream-skin.ps1 -RestoreBaseTheme|-Uninstall|-NoRelaunch|-CloseRunning|-AdapterLockHeld'
   Assert-OperationLog -Case $uninstall -ScriptName 'restore-dream-skin.ps1'
@@ -2737,7 +2753,7 @@ try {
     -ExtraArguments @('-RestartAuthorized')
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
     -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
-    -AvailableActions @('install') -ErrorCode $null
+    -AvailableActions @('install', 'restore', 'uninstall') -ErrorCode $null
   if (Test-Path -LiteralPath (Join-Path $wrongRuntimeUninstall.Root 'runtime-trace.txt')) {
     throw 'Node-free uninstall still probed the private runtime.'
   }
@@ -2764,7 +2780,7 @@ try {
     -ExtraArguments @('-RestartAuthorized', '-DeleteUserThemes')
   Assert-StudioResult -Result $result -Operation 'uninstall' -ExitCode 0 -Ok $true -Install 'not-installed' `
     -Codex 'stopped' -Session 'official' -ThemeName $null -RequiresRestart $false -Verified $null `
-    -AvailableActions @('install') -ErrorCode $null
+    -AvailableActions @('install', 'restore', 'uninstall') -ErrorCode $null
   foreach ($deleted in @('themes', 'images', 'active-theme')) {
     if (Test-Path -LiteralPath (Join-Path $deleteThemes.StateRoot $deleted)) { throw "Explicit uninstall retained $deleted." }
   }

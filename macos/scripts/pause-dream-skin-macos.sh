@@ -57,6 +57,8 @@ if [ "$DEBUG_READY" = "true" ]; then
   "$NODE" "$INJECTOR" --remove --port "$PORT" --browser-id "$SAVED_BROWSER_ID" --theme-dir "$THEME_DIR" --timeout-ms 8000 >/dev/null \
     || fail "Could not remove the live skin from Codex; pause state was not written."
   REMOVED="true"
+elif codex_is_running; then
+  fail "Could not remove the live skin from Codex; pause state was not written."
 fi
 
 "$NODE" -e '
