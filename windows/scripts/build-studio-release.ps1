@@ -686,8 +686,10 @@ try {
   $setupPin = [DreamSkinReleaseFilePin]::Open($setupPath, $false)
   if (-not $SkipSign) { Assert-FileSignature -Path $setupPath -SignTool $SignTool }
   $setupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($setupPath)
-  if ($setupVersionInfo.ProductVersion -cne $Version -or $setupVersionInfo.FileVersion -cne "$Version.0") {
-    throw 'The setup version metadata does not match windows/VERSION.'
+  $setupProductVersion = "$($setupVersionInfo.ProductVersion)"
+  if ($setupProductVersion -notin @($Version, "$Version.0") -or
+    $setupVersionInfo.FileVersion -cne "$Version.0") {
+    throw "The setup version metadata does not match windows/VERSION: ProductVersion='$setupProductVersion', FileVersion='$($setupVersionInfo.FileVersion)'."
   }
   Invoke-TestOnlyReleaseReplacement -Phase 'setup-after-signature' -Target $setupPath `
     -Replacement $SetupReplacement -Proof 'setup-replacement-denied'
@@ -725,9 +727,10 @@ try {
     $movableSetupPin = $null
     if (-not $SkipSign) { Assert-FileSignature -Path $finalSetupPath -SignTool $SignTool }
     $finalSetupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($finalSetupPath)
-    if ($finalSetupVersionInfo.ProductVersion -cne $Version -or
+    $finalSetupProductVersion = "$($finalSetupVersionInfo.ProductVersion)"
+    if ($finalSetupProductVersion -notin @($Version, "$Version.0") -or
       $finalSetupVersionInfo.FileVersion -cne "$Version.0") {
-      throw 'The final setup version metadata does not match windows/VERSION.'
+      throw "The final setup version metadata does not match windows/VERSION: ProductVersion='$finalSetupProductVersion', FileVersion='$($finalSetupVersionInfo.FileVersion)'."
     }
     Assert-ReleaseMetadata -Root $ReleaseRoot -Version $Version -Architecture $Architecture `
       -Signing $signingMode -File "$baseName.exe" -SourceTree $IndexTree -ExpectedHash $finalSetupPin.Sha256
