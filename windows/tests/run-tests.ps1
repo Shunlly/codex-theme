@@ -20,7 +20,8 @@ if ([IO.File]::ReadAllText((Join-Path $Root 'scripts\studio-adapter.ps1')) -notm
   throw 'Windows Studio adapter must expose all Protocol v1 operations.'
 }
 $builderSource = [IO.File]::ReadAllText((Join-Path $Root 'scripts\build-studio-release.ps1'))
-if ($builderSource -notmatch "(?m)^\s*& \`$PrivateNodePath \(Join-Path \`$SnapshotRepoRoot 'studio\\release\\check-contents\.mjs'\)") {
+if (-not $builderSource.Contains('$scannerPath = Join-Path $SnapshotRepoRoot ''studio\release\check-contents.mjs''') -or
+  -not $builderSource.Contains('& $PrivateNodePath $scannerPath --root $StageRoot --allowlist $allowlistPath')) {
   throw 'Windows Studio release builder must invoke the content scanner.'
 }
 if (-not $builderSource.Contains('--artifacts-path $TestArtifactsRoot')) {

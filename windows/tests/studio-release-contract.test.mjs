@@ -704,6 +704,10 @@ const windowsTestBytes = fs.readFileSync(path.join(repo, "windows/tests/run-test
 assert.deepEqual([...windowsTestBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf],
   "windows/tests/run-tests.ps1 contains non-ASCII source and is invoked by Windows PowerShell 5.1, so it must begin with the UTF-8 BOM bytes EF BB BF");
 const windowsTests = read("windows/tests/run-tests.ps1");
+for (const contract of [
+  "$scannerPath = Join-Path $SnapshotRepoRoot ''studio\\release\\check-contents.mjs''",
+  "& $PrivateNodePath $scannerPath --root $StageRoot --allowlist $allowlistPath",
+]) contains(windowsTests, contract, `native Windows scanner contract missing: ${contract}`);
 const studioProtocolTests = read("windows/tests/studio-protocol.tests.ps1");
 for (const regression of [
   "start-rollback-identity-lost", "resume-rollback-remove-fail",
