@@ -68,7 +68,7 @@ ArchitecturesInstallIn64BitMode=arm64
 Name: "{group}\Codex Dream Skin Studio"; Filename: "{app}\CodexDreamSkinStudio.exe"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\CodexDreamSkinStudio.exe"; Description: "Launch Codex Dream Skin Studio"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\CodexDreamSkinStudio.exe"; Description: "Launch Codex Dream Skin Studio"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function IsDirectoryEmpty(const DirectoryName: String): Boolean;

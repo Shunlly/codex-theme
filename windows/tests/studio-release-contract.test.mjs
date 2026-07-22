@@ -23,6 +23,11 @@ contains(inno, "'--prepare-uninstall'", "exact restore-guard argument missing");
 contains(inno, "ewWaitUntilTerminated", "uninstall guard is not synchronous");
 contains(inno, "ResultCode = 0", "uninstall guard does not fail closed");
 assert.doesNotMatch(inno, /PrivilegesRequiredOverridesAllowed|deleteUserThemes|CodexDreamSkin\\(?:themes|images|active-theme)/i);
+assert.match(inno,
+  /Filename:\s*"\{app\}\\CodexDreamSkinStudio\.exe";[^\r\n]*Flags:\s*nowait postinstall skipifsilent\s*$/m,
+  "interactive setup does not launch Studio by default");
+assert.doesNotMatch(inno, /Flags:[^\r\n]*\bunchecked\b/,
+  "Studio launch remains unchecked by default");
 
 const builder = read("windows/scripts/build-studio-release.ps1");
 const adapter = read("windows/scripts/studio-adapter.ps1");
