@@ -42,6 +42,19 @@
   </sub>
 </p>
 
+## Read This First
+
+This project is currently **Milestone 1: moving the existing scripts and tray into a Studio that ordinary users can operate**. Use this table to choose the right path:
+
+| Your goal | Current path |
+| --- | --- |
+| You do not code and just want to use it | After a signed production artifact is published, open Studio, complete preflight, and authorize one restart only when asked |
+| You are testing locally | Use artifacts labeled `ADHOC` / `UNSIGNED`; they are not production trust evidence |
+| You want to import, save, or switch themes | Keep using the macOS menu-bar / Windows tray advanced paths; current Studio handles lifecycle operations only |
+| You want to send a theme to a friend | `.cdxtheme` theme-package export/import is the next milestone; do not copy the entire engine directory by hand |
+
+Ordinary users need no Terminal, PowerShell, Homebrew, global Node, or administrator elevation. Studio calls the existing engine and does not modify the official Codex package, signature, threads, or authentication data.
+
 ## Tested featured preset: Arina Hashimoto
 
 “Arina Hashimoto / 桥本有菜” has been verified on the real Codex home screen in
@@ -151,6 +164,11 @@ with the Windows `-UNSIGNED` suffix; neither is production trust evidence.
 
 Repository shell launchers, SwiftBar, PowerShell scripts, diagnostics, and manual
 restore commands remain supported maintainer/recovery paths, not the normal install story.
+
+If state looks stuck, use **Pause** in Studio first, then **Complete Restore** if
+needed. Do not delete `state.json`, backup files, or theme directories by hand;
+the engine keeps verifiable recovery evidence and the platform guides describe
+the remaining advanced steps.
 
 Milestone 1 does not include theme-package sharing, workspace scenes/bindings,
 context profiles, or motion/video.
