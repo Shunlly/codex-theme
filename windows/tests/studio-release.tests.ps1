@@ -103,6 +103,11 @@ function Assert-TestReleaseMetadata {
   if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) { throw 'Release setup is missing.' }
   $freshHash = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($freshHash -cne "$($manifest.sha256)") { throw 'Release manifest does not match the fresh setup SHA-256.' }
+  $checksumBytes = [IO.File]::ReadAllBytes($checksumPath)
+  if ($checksumBytes.Length -lt 1 -or $checksumBytes[$checksumBytes.Length - 1] -ne 0x0A -or
+    ($checksumBytes.Length -ge 2 -and $checksumBytes[$checksumBytes.Length - 2] -eq 0x0D)) {
+    throw 'Release checksum must end with LF, not CRLF.'
+  }
   $checksumLines = @([IO.File]::ReadAllLines($checksumPath, $strictUtf8))
   if ($checksumLines.Count -ne 1 -or $checksumLines[0] -cne "$freshHash  $ExpectedFile") {
     throw 'Release metadata must contain exactly one checksum entry.'

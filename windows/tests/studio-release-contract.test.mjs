@@ -31,6 +31,11 @@ assert.doesNotMatch(inno, /Flags:[^\r\n]*\bunchecked\b/,
 
 const builder = read("windows/scripts/build-studio-release.ps1");
 contains(builder, "if ($Version -cne '1.3.1')", "Windows release guard does not match VERSION");
+const checksumWriter = "[IO.File]::WriteAllText((Join-Path $PublishRoot 'SHA256SUMS.txt'), \"$hash  $baseName.exe`n\", [Text.UTF8Encoding]::new($false))";
+contains(builder, checksumWriter, "checksum writer must terminate its portable entry with PowerShell LF");
+assert.doesNotMatch(builder,
+  /\[IO\.File\]::WriteAllText\(\(Join-Path \$PublishRoot 'SHA256SUMS\.txt'\), "\$hash  \$baseName\.exe`r`n", \[Text\.UTF8Encoding\]::new\(\$false\)\)/,
+  "checksum writer must not terminate its portable entry with PowerShell CRLF");
 const adapter = read("windows/scripts/studio-adapter.ps1");
 const common = read("windows/scripts/common-windows.ps1");
 const config = read("windows/scripts/config-utf8.ps1");

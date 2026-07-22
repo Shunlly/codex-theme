@@ -705,7 +705,7 @@ try {
     -Replacement $SetupReplacement -Proof 'setup-replacement-denied'
 
   $hash = $setupPin.Sha256
-  [IO.File]::WriteAllText((Join-Path $PublishRoot 'SHA256SUMS.txt'), "$hash  $baseName.exe`r`n", [Text.UTF8Encoding]::new($false))
+  [IO.File]::WriteAllText((Join-Path $PublishRoot 'SHA256SUMS.txt'), "$hash  $baseName.exe`n", [Text.UTF8Encoding]::new($false))
   $signingMode = if ($SkipSign) { 'UNSIGNED' } else { 'signed' }
   $manifest = [ordered]@{
     schemaVersion = 1

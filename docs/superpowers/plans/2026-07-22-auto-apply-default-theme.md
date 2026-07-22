@@ -789,7 +789,7 @@ gh api "repos/Shunlly/codex-theme/releases/tags/$TAG" > "$ASSET_DIR/release.json
 (cd "$ASSET_DIR" && shasum -a 256 -c SHA256SUMS-macos.txt)
 (cd "$ASSET_DIR" && shasum -a 256 -c SHA256SUMS-windows-x64.txt)
 hdiutil verify "$ASSET_DIR/CodexDreamSkinStudio-1.3.1-macos-universal-ADHOC.dmg"
-file "$ASSET_DIR/CodexDreamSkinStudio-1.3.1-win-x64-UNSIGNED.exe" | grep -E 'PE32\+ executable.*x86-64'
+file "$ASSET_DIR/CodexDreamSkinStudio-1.3.1-win-x64-UNSIGNED.exe" | grep -E 'PE32(\+)? executable'
 
 node - "$ASSET_DIR" "$(git rev-parse "$TAG^{tree}")" <<'NODE'
 const assert = require("node:assert/strict");
@@ -830,8 +830,10 @@ assert.equal(windows.sourceTree, sourceTree);
 NODE
 ```
 
-Expected: both checksum checks say `OK`, the DMG verifies, `file` reports an
-x86-64 PE32+ executable, GitHub has exactly six assets with matching digests,
+Expected: both checksum checks say `OK`, the DMG verifies, and `file` reports a
+Windows PE bootstrapper (`PE32` or `PE32+`). The outer Inno bootstrapper format
+does not prove payload architecture; the Windows manifest/source-tree assertions
+above remain the x64 proof. GitHub has exactly six assets with matching digests,
 and both manifests describe `1.3.1`. Only the Windows manifest currently carries
 the exact Git source tree; do not invent that field in the macOS manifest for this
 feature.
