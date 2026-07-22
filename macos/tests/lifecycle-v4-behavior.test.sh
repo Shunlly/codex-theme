@@ -931,7 +931,13 @@ seed_bundled_presets() {
       return 1
       ;;
     snapshot-complete-swap)
-      expected="$(/usr/bin/find "$UPGRADE_SNAPSHOT_ROOT" -maxdepth 1 -name '.expected.*' -type d -print -quit)"
+      expected=""
+      for candidate in "$UPGRADE_SNAPSHOT_ROOT"/.expected.*; do
+        [ -f "$candidate/lifecycle-state.state" ] || continue
+        [ "$(/usr/bin/sed -n '1p' "$candidate/lifecycle-state.state")" = absent ] || continue
+        [ -z "$expected" ] || return 1
+        expected="$candidate"
+      done
       [ -n "$expected" ] || return 1
       /bin/mv "$expected/COMPLETE.json" "$expected/COMPLETE.json.foreign-owned"
       /bin/cp -pP "$expected/COMPLETE.json.foreign-owned" "$expected/COMPLETE.json"

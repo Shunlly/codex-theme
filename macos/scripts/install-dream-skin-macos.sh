@@ -258,6 +258,12 @@ consume_upgrade_snapshot() {
   local snapshot_digest=""
   local cleanup_root=""
   local cleanup_identity=""
+  local expected_dir=""
+  verify_upgrade_receipt_group original >/dev/null || return 1
+  for expected_dir in "$UPGRADE_SNAPSHOT_ROOT"/.expected.*; do
+    [ -e "$expected_dir" ] || [ -L "$expected_dir" ] || continue
+    verify_upgrade_receipt_group "${expected_dir##*/}" >/dev/null || return 1
+  done
   snapshot_digest="$(upgrade_path_digest "$UPGRADE_SNAPSHOT_ROOT")" || return 1
   cleanup_root="$(/usr/bin/mktemp -d "$STATE_ROOT/.upgrade-cleanup.XXXXXX")" || return 1
   /bin/chmod 700 "$cleanup_root" || return 1
