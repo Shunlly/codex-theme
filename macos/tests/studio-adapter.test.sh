@@ -819,7 +819,7 @@ THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="__HOME__/.codex/config.toml"
 INJECTOR="$SCRIPT_DIR/injector.mjs"
 NODE="__NODE__"
-SKIN_VERSION=1.3.0
+SKIN_VERSION=1.3.1
 CODEX_VERSION=fixture
 NODE_VERSION=v24.0.0
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
@@ -1930,7 +1930,7 @@ THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="$HOME/.codex/config.toml"
 INJECTOR="$SCRIPT_DIR/injector.mjs"
 NODE="$SCRIPT_DIR/node-stub"
-SKIN_VERSION=1.3.0
+SKIN_VERSION=1.3.1
 CODEX_VERSION=fixture
 NODE_VERSION=v20.0.0
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }

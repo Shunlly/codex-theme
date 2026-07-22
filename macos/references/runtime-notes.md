@@ -1,6 +1,6 @@
 # Runtime notes
 
-- Studio is the ordinary-user entry point for 1.3.0: preflight, one authorized restart, strict verify, Pause, then Complete Restore. Shell launchers, SwiftBar, and diagnostics are advanced recovery only. Pause leaves CDP open; Complete Restore closes it.
+- Studio is the ordinary-user entry point for 1.3.1: first launch runs preflight, automatically installs and applies the bundled default theme, preserves explicit restart consent, and requires strict verify. Pause and Complete Restore remain manual controls.
 - Discover the official `com.openai.codex` bundle on every launch; do not assume an upgrade keeps the same executable internals.
 - Use `Contents/Resources/cua_node/bin/node` from that bundle. Require Node.js 20+, a valid strict code signature, matching architecture, and OpenAI Team ID `2DC432GLL2` on both app and runtime.
 - Do not ship a Node binary and do not depend on a globally installed `node` or `npm`.

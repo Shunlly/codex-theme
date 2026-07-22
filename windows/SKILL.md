@@ -13,8 +13,8 @@ No trusted Studio binary is currently claimed as published or accepted. Producti
 installers must pass Authenticode signing and SmartScreen acceptance before publication;
 unsigned development builds carry the `-UNSIGNED` suffix.
 
-1. After a production release, download and install `CodexDreamSkinStudio-1.3.0-win-x64.exe` or `CodexDreamSkinStudio-1.3.0-win-arm64.exe` for the matching architecture; no PowerShell, PATH Node, or administrator elevation is required.
-2. Complete Studio preflight and authorize a single restart only when requested.
+1. After a production release, download and install `CodexDreamSkinStudio-1.3.1-win-x64.exe` or `CodexDreamSkinStudio-1.3.1-win-arm64.exe` for the matching architecture; no PowerShell, PATH Node, or administrator elevation is required.
+2. On first launch, Studio runs preflight, automatically installs and applies the bundled default theme (`preset-romantic-rose`), then waits for strict verified success; authorize a single restart only when requested.
 3. Wait for strict verified success. Use **Pause** for soft-off and **Complete Restore** to remove the live skin and close CDP.
 
 CDP is loopback-only but has no same-user authentication. Pause keeps CDP open; Complete Restore closes it. Official WindowsApps files and signatures stay unchanged.

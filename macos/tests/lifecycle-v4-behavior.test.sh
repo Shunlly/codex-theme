@@ -386,7 +386,7 @@ START_ERROR_LOG="$STATE_ROOT/start-error.log"
 CODEX_BUNDLE="__HOME__/Codex.app"
 CODEX_EXE="$CODEX_BUNDLE/Contents/MacOS/Codex"
 NODE="$SCRIPT_DIR/node-stub"
-SKIN_VERSION=1.3.0
+SKIN_VERSION=1.3.1
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }
 ensure_state_root() { /bin/mkdir -p "$STATE_ROOT"; }
 require_lifecycle_lock() { :; }
@@ -558,7 +558,7 @@ APP_LOG="$STATE_ROOT/app.log"
 APP_ERROR_LOG="$STATE_ROOT/app-error.log"
 START_ERROR_LOG="$STATE_ROOT/start-error.log"
 NODE="$SCRIPT_DIR/node-stub"
-SKIN_VERSION=1.3.0
+SKIN_VERSION=1.3.1
 CODEX_APP_VALIDATED=true
 CODEX_APP_CONTROL_VALIDATED=true
 NODE_RUNTIME_VALIDATED=true
@@ -827,7 +827,7 @@ THEME_DIR="$STATE_ROOT/theme"
 CONFIG_PATH="$HOME/.codex/config.toml"
 INJECTOR="$SCRIPT_DIR/injector.mjs"
 NODE="__NODE__"
-SKIN_VERSION=1.3.0
+SKIN_VERSION=1.3.1
 CODEX_VERSION=fixture
 NODE_VERSION=v22.0.0
 fail() { printf 'fixture: %s\n' "$*" >&2; exit 1; }

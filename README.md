@@ -17,8 +17,8 @@
 
 | 平台 | 文件 | 状态 |
 | --- | --- | --- |
-| Apple Silicon / Intel Mac | `CodexDreamSkinStudio-1.3.0-macos-universal-ADHOC.dmg` | ad-hoc 签名，未公证 |
-| Windows x64 | `CodexDreamSkinStudio-1.3.0-win-x64-UNSIGNED.exe` | 未签名安装器 |
+| Apple Silicon / Intel Mac | `CodexDreamSkinStudio-1.3.1-macos-universal-ADHOC.dmg` | ad-hoc 签名，未公证 |
+| Windows x64 | `CodexDreamSkinStudio-1.3.1-win-x64-UNSIGNED.exe` | 未签名安装器 |
 | Windows arm64 | 暂无 | 需要原生 arm64 Windows 构建机 |
 
 macOS 可能显示开发者无法验证；Windows 可能显示 SmartScreen 警告。这些文件名会一直保留 `ADHOC` / `UNSIGNED`，直到真正完成 Developer ID、公证、Authenticode 和 SmartScreen 验收。
@@ -45,10 +45,10 @@ macOS 可能显示开发者无法验证；Windows 可能显示 SmartScreen 警�
 
 ## 快速开始
 
-当前仓库不声称已有通过生产信任验收的 Studio 二进制发布。当前 Release 是方便测试的未签名构建；生产发布完成后，正式文件会使用 `CodexDreamSkinStudio.dmg`、`CodexDreamSkinStudio-1.3.0-win-x64.exe` 等不带测试标记的名称。
+当前仓库不声称已有通过生产信任验收的 Studio 二进制发布。当前 Release 是方便测试的未签名构建；生产发布完成后，正式文件会使用 `CodexDreamSkinStudio.dmg`、`CodexDreamSkinStudio-1.3.1-win-x64.exe` 等不带测试标记的名称。
 
 1. 从 [Releases](https://github.com/Shunlly/codex-theme/releases) 下载对应平台的测试安装包并打开。
-2. 完成 Studio 的 preflight；只在 Studio 明确请求时授权一次 Codex 重启。
+2. 首次打开后，Studio 会完成 preflight，自动安装并应用内置默认主题，然后执行严格验证；仅在 Codex 正在运行且 Studio 明确请求时授权一次重启。
 3. 等待严格验证成功。用 **Pause** 临时关闭主题，用 **Complete Restore** 恢复官方外观并关闭受管 CDP。
 
 普通使用不需要 Terminal、PowerShell、Homebrew、全局 Node、管理员权限或手动编辑配置。首次运行前，请先安装并至少打开一次官方 Codex Desktop。
@@ -91,7 +91,7 @@ powershell -NoProfile -File windows/tests/run-tests.ps1
 powershell -NoProfile -File windows/scripts/build-studio-release.ps1 -Architecture x64 -SkipSign
 ```
 
-推送形如 `v1.3.0-test.1` 的 tag 会运行 [test-release 工作流](./.github/workflows/test-release.yml)，生成 DMG、EXE、SHA-256 和 release manifest，并创建 GitHub pre-release。
+推送形如 `v1.3.1-test.1` 的 tag 会运行 [test-release 工作流](./.github/workflows/test-release.yml)，生成 DMG、EXE、SHA-256 和 release manifest，并创建 GitHub pre-release。
 
 ## 更多内容
 

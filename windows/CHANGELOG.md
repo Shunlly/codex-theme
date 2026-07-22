@@ -1,5 +1,11 @@
 # Windows Changelog
 
+## 1.3.1 — 2026-07-22
+
+- Studio automatically installs and applies the bundled default theme on first launch.
+- Windows interactive setup launches Studio by default.
+- Existing restart consent, Pause, Complete Restore, and uninstall safety remain unchanged.
+
 ## 1.3.0 — 2026-07-18
 
 ### Changed

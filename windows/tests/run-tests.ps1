@@ -3,7 +3,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
-$ExpectedStudioVersion = '1.3.0'
+$ExpectedStudioVersion = '1.3.1'
 if (([IO.File]::ReadAllText((Join-Path $Root 'VERSION')).Trim()) -cne $ExpectedStudioVersion) {
   throw "Windows VERSION must be $ExpectedStudioVersion."
 }
@@ -37,10 +37,10 @@ function Assert-StudioQuickStartContract {
     throw "Studio quick-start contract is incomplete in $Path"
   }
 }
-Assert-StudioQuickStartContract (Join-Path $Root '..\README.md') '## 快速开始' '### 高级恢复' @('当前仓库不声称已有通过生产信任验收的 Studio 二进制发布', '生产发布完成后', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
-Assert-StudioQuickStartContract (Join-Path $Root '..\README.en.md') '## Quick start' '### Advanced recovery' @('No trusted Studio binary is currently claimed as published or accepted', 'After a production release', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', 'authorize one', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
-Assert-StudioQuickStartContract (Join-Path $Root '..\docs\platforms.md') '## Studio 日常路径' '## 高级恢复' @('当前仓库不声称已有通过生产信任验收的 Studio 二进制发布', '生产发布完成后', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
-Assert-StudioQuickStartContract (Join-Path $Root 'SKILL.md') '## Ordinary-user workflow (Studio)' '## Advanced recovery' @('No trusted Studio binary is currently claimed as published or accepted', 'Authenticode', 'SmartScreen', 'CodexDreamSkinStudio-1.3.0-win-x64.exe', 'preflight', 'authorize a single restart', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
+Assert-StudioQuickStartContract (Join-Path $Root '..\README.md') '## 快速开始' '### 高级恢复' @('当前仓库不声称已有通过生产信任验收的 Studio 二进制发布', '生产发布完成后', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.1-win-x64.exe', 'preflight', '自动安装并应用内置默认主题', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
+Assert-StudioQuickStartContract (Join-Path $Root '..\README.en.md') '## Quick start' '### Advanced recovery' @('No trusted Studio binary is currently claimed as published or accepted', 'After a production release', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.1-win-x64.exe', 'preflight', 'automatically installs and applies the bundled default theme', 'authorize one', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
+Assert-StudioQuickStartContract (Join-Path $Root '..\docs\platforms.md') '## Studio 日常路径' '## 高级恢复' @('当前仓库不声称已有通过生产信任验收的 Studio 二进制发布', '生产发布完成后', 'CodexDreamSkinStudio.dmg', 'CodexDreamSkinStudio-1.3.1-win-x64.exe', 'preflight', '自动安装并应用内置默认主题', '授权一次', '严格验证', 'Pause', 'Complete Restore') @('主题包分享', '工作区场景/绑定', '上下文配置档', '动态/视频')
+Assert-StudioQuickStartContract (Join-Path $Root 'SKILL.md') '## Ordinary-user workflow (Studio)' '## Advanced recovery' @('No trusted Studio binary is currently claimed as published or accepted', 'Authenticode', 'SmartScreen', 'CodexDreamSkinStudio-1.3.1-win-x64.exe', 'preflight', 'automatically installs and applies the bundled default theme', 'authorize a single restart', 'strict verified success', 'Pause', 'Complete Restore') @('theme-package sharing', 'workspace scenes/bindings', 'context profiles', 'motion/video')
 & (Join-Path $PSScriptRoot 'studio-protocol.tests.ps1')
 . (Join-Path $Root 'scripts\common-windows.ps1')
 . (Join-Path $Root 'scripts\theme-windows.ps1')

@@ -17,8 +17,8 @@ Test installers are published on [GitHub Releases](https://github.com/Shunlly/co
 
 | Platform | File | Status |
 | --- | --- | --- |
-| Apple Silicon / Intel Mac | `CodexDreamSkinStudio-1.3.0-macos-universal-ADHOC.dmg` | ad-hoc signed, not notarized |
-| Windows x64 | `CodexDreamSkinStudio-1.3.0-win-x64-UNSIGNED.exe` | unsigned installer |
+| Apple Silicon / Intel Mac | `CodexDreamSkinStudio-1.3.1-macos-universal-ADHOC.dmg` | ad-hoc signed, not notarized |
+| Windows x64 | `CodexDreamSkinStudio-1.3.1-win-x64-UNSIGNED.exe` | unsigned installer |
 | Windows arm64 | Not available yet | requires a native Windows arm64 build host |
 
 macOS may report that the developer cannot be verified, and Windows may show a SmartScreen warning. The filenames retain `ADHOC` / `UNSIGNED` until Developer ID, notarization, Authenticode, and SmartScreen acceptance are complete.
@@ -45,10 +45,10 @@ These screenshots are previews, not importable backgrounds. Import UI-free art w
 
 ## Quick start
 
-No trusted Studio binary is currently claimed as published or accepted. The current Release contains unsigned test builds. After a production release, canonical artifacts will use names such as `CodexDreamSkinStudio.dmg` and `CodexDreamSkinStudio-1.3.0-win-x64.exe` without test labels.
+No trusted Studio binary is currently claimed as published or accepted. The current Release contains unsigned test builds. After a production release, canonical artifacts will use names such as `CodexDreamSkinStudio.dmg` and `CodexDreamSkinStudio-1.3.1-win-x64.exe` without test labels.
 
 1. Download the test installer for your platform from [Releases](https://github.com/Shunlly/codex-theme/releases), then open it.
-2. Complete preflight and authorize one Codex restart only when Studio asks.
+2. On first launch, Studio runs preflight, automatically installs and applies the bundled default theme, then waits for strict verified success; authorize one Codex restart only when Studio requests it.
 3. Wait for strict verified success. Use **Pause** for temporary soft-off and **Complete Restore** to restore the stock appearance and close managed CDP.
 
 Ordinary use needs no Terminal, PowerShell, Homebrew, global Node, administrator elevation, or manual config editing. Install and open the official Codex Desktop app at least once before first use.
@@ -91,7 +91,7 @@ powershell -NoProfile -File windows/tests/run-tests.ps1
 powershell -NoProfile -File windows/scripts/build-studio-release.ps1 -Architecture x64 -SkipSign
 ```
 
-Pushing a tag such as `v1.3.0-test.1` runs the [test-release workflow](./.github/workflows/test-release.yml), builds the DMG and EXE with SHA-256 files and release manifests, and creates a GitHub pre-release.
+Pushing a tag such as `v1.3.1-test.1` runs the [test-release workflow](./.github/workflows/test-release.yml), builds the DMG and EXE with SHA-256 files and release manifests, and creates a GitHub pre-release.
 
 ## More
 

@@ -160,7 +160,7 @@ SNAPSHOT_PACKAGE="$SNAPSHOT_ROOT/macos/studio"
 /usr/bin/find "$SNAPSHOT_ROOT" -type f -exec /bin/chmod a-w {} +
 
 VERSION="$(/usr/bin/tr -d '[:space:]' < "$SNAPSHOT_ROOT/macos/VERSION")"
-[ "$VERSION" = "1.3.0" ] || {
+[ "$VERSION" = "1.3.1" ] || {
   printf 'The macOS release version is invalid.\n' >&2
   exit 1
 }

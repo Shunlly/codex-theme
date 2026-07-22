@@ -47,6 +47,6 @@
 
 - `tests/run-tests.ps1`: strict UTF-8/no-BOM writes, UTF-16 rejection, LF/CRLF preservation, concurrent-write detection, exact backup/recovery, `[desktop]`-scoped restore, ambiguous TOML rejection, non-ASCII paths, Appx/state identity, argument quoting, theme seeding/import/save/switch/pause, byte/dimension limits, junction rejection, payload construction, Browser ID, loopback URL rejection, and renderer isolation for transparent auxiliary windows.
 - `node --check` for the injector and renderer payload.
-- Version contracts keep `VERSION`, injector payload, renderer, Studio metadata, and release names at `1.3.0`; Protocol v1 retains all nine operations and release assembly invokes the content scanner.
+- Version contracts keep `VERSION`, injector payload, renderer, Studio metadata, and release names at `1.3.1`; Protocol v1 retains all nine operations and release assembly invokes the content scanner.
 - Live Windows signoff remains required for Store process ownership, restart consent, screenshot, and CDP closure.
 - Clean-VM signoff also covers no PATH Node, Chinese/space paths, occupied ports, stale/foreign PIDs, Codex update, uninstall theme retention/explicit deletion, SmartScreen/signature, and real home/task interactions.

@@ -4,7 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "codex dream skin studio tests $PID $([guid]::NewGuid().ToString('N'))"
-$versionRoot = Join-Path $temporaryRoot 'release\1.3.0'
+$versionRoot = Join-Path $temporaryRoot 'release\1.3.1'
 $engineRoot = Join-Path $versionRoot 'engine'
 $scriptsRoot = Join-Path $engineRoot 'scripts'
 $adapterPath = Join-Path $scriptsRoot 'studio-adapter.ps1'
@@ -452,7 +452,7 @@ Copy-Item -LiteralPath (Join-Path $Root 'scripts\studio-windows.ps1') -Destinati
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\status-dream-skin.ps1') -Destination $scriptsRoot
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\studio-adapter.ps1') -Destination $scriptsRoot
 Copy-Item -LiteralPath (Join-Path $Root 'scripts\config-utf8.ps1') -Destination $scriptsRoot
-[IO.File]::WriteAllText((Join-Path $engineRoot 'VERSION'), '1.3.0', $utf8NoBom)
+[IO.File]::WriteAllText((Join-Path $engineRoot 'VERSION'), '1.3.1', $utf8NoBom)
 [IO.File]::WriteAllText($injectorPath, '// staged injector', $utf8NoBom)
 
 function Write-LifecycleStub {
@@ -2082,10 +2082,10 @@ try {
   $versionPath = Join-Path $engineRoot 'VERSION'
   $bom = [byte[]](0xEF, 0xBB, 0xBF)
   foreach ($validVersion in @(
-    [Text.Encoding]::UTF8.GetBytes('1.3.0'),
-    [Text.Encoding]::UTF8.GetBytes("1.3.0`n"),
-    [Text.Encoding]::UTF8.GetBytes("1.3.0`r`n"),
-    [byte[]]($bom + [Text.Encoding]::UTF8.GetBytes('1.3.0'))
+    [Text.Encoding]::UTF8.GetBytes('1.3.1'),
+    [Text.Encoding]::UTF8.GetBytes("1.3.1`n"),
+    [Text.Encoding]::UTF8.GetBytes("1.3.1`r`n"),
+    [byte[]]($bom + [Text.Encoding]::UTF8.GetBytes('1.3.1'))
   )) {
     [IO.File]::WriteAllBytes($versionPath, $validVersion)
     $before = Get-StateSnapshot -Root $versionCase.StateRoot
@@ -2095,9 +2095,9 @@ try {
       -ThemeName '午夜极光' -RequiresRestart $false -Verified $null -AvailableActions @('apply', 'restore', 'uninstall') -ErrorCode $null
   }
   foreach ($invalidVersion in @(
-    [Text.Encoding]::UTF8.GetBytes(' 1.3.0'),
-    [Text.Encoding]::UTF8.GetBytes("1.3.0`n`n"),
-    [byte[]](0x31, 0x2E, 0x33, 0x2E, 0x30, 0xFF)
+    [Text.Encoding]::UTF8.GetBytes(' 1.3.1'),
+    [Text.Encoding]::UTF8.GetBytes("1.3.1`n`n"),
+    [byte[]](0x31, 0x2E, 0x33, 0x2E, 0x31, 0xFF)
   )) {
     [IO.File]::WriteAllBytes($versionPath, $invalidVersion)
     $before = Get-StateSnapshot -Root $versionCase.StateRoot
@@ -2112,7 +2112,7 @@ try {
   Assert-StudioResult -Result $result -ExitCode 1 -Ok $false -Install 'not-installed' -Codex 'running' -Session 'stale' `
     -ThemeName '午夜极光' -RequiresRestart $false -Verified $null -AvailableActions @('restore', 'uninstall') `
     -ErrorCode 'STATE_UNSAFE' -RecoveryActions @('restore', 'diagnostics', 'cancel')
-  [IO.File]::WriteAllText($versionPath, '1.3.0', $utf8NoBom)
+  [IO.File]::WriteAllText($versionPath, '1.3.1', $utf8NoBom)
 
   $mutexCase = New-CaseRoot -Name 'mutex-hold' -NoState
   $before = Get-StateSnapshot -Root $mutexCase.StateRoot

@@ -574,7 +574,7 @@ try {
   }
 
   $Version = [IO.File]::ReadAllText((Join-Path $SnapshotWindowsRoot 'VERSION')).Trim()
-  if ($Version -cne '1.3.0') { throw 'The Windows release version is invalid.' }
+  if ($Version -cne '1.3.1') { throw 'The Windows release version is invalid.' }
   $StageRoot = Join-Path $PublishRoot "stage-$Version"
   $EngineRoot = Join-Path $StageRoot 'engine'
   New-Item -ItemType Directory -Path $EngineRoot -Force | Out-Null

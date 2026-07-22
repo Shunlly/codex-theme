@@ -16,13 +16,21 @@ NODE="$NODE" /bin/bash "$ROOT/tests/status-v4.test.sh"
 "$NODE" "$ROOT/tests/diagnostics-wiring.test.mjs"
 "$NODE" "$ROOT/tests/studio-status-action.test.mjs"
 
-EXPECTED_STUDIO_VERSION="1.3.0"
+EXPECTED_STUDIO_VERSION="1.3.1"
 [ "$(/bin/cat "$ROOT/VERSION")" = "$EXPECTED_STUDIO_VERSION" ] || {
   printf 'macOS VERSION must be %s.\n' "$EXPECTED_STUDIO_VERSION" >&2
   exit 1
 }
 [ "$("$NODE" -p "require(process.argv[1]).version" "$ROOT/package.json")" = "$EXPECTED_STUDIO_VERSION" ] || {
   printf 'macOS package version must match VERSION.\n' >&2
+  exit 1
+}
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/studio/Resources/Info.plist")" = "$EXPECTED_STUDIO_VERSION" ] || {
+  printf 'macOS Studio Info.plist version must match VERSION.\n' >&2
+  exit 1
+}
+/usr/bin/grep -F -q '[ "$VERSION" = "1.3.1" ]' "$ROOT/scripts/build-studio-release.sh" || {
+  printf 'macOS Studio release guard must match VERSION.\n' >&2
   exit 1
 }
 for runtime_file in "$ROOT/scripts/common-macos.sh" "$ROOT/scripts/injector.mjs"; do
@@ -55,11 +63,11 @@ done
   "$ROOT/../docs/platforms.md" "$ROOT/../windows/SKILL.md" <<'NODE'
 const fs = require("node:fs");
 const contracts = [
-  ["## 快速开始", "### 高级恢复", ["当前仓库不声称已有通过生产信任验收的 Studio 二进制发布", "生产发布完成后", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
-  ["## Quick start", "### Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "After a production release", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
-  ["## Quick start (Studio)", "## Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "Developer ID", "notarization", "CodexDreamSkinStudio.dmg", "preflight", "Authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
-  ["## Studio 日常路径", "## 高级恢复", ["当前仓库不声称已有通过生产信任验收的 Studio 二进制发布", "生产发布完成后", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
-  ["## Ordinary-user workflow (Studio)", "## Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "Authenticode", "SmartScreen", "CodexDreamSkinStudio-1.3.0-win-x64.exe", "preflight", "authorize a single restart", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+  ["## 快速开始", "### 高级恢复", ["当前仓库不声称已有通过生产信任验收的 Studio 二进制发布", "生产发布完成后", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.1-win-x64.exe", "preflight", "自动安装并应用内置默认主题", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
+  ["## Quick start", "### Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "After a production release", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.1-win-x64.exe", "preflight", "automatically installs and applies the bundled default theme", "authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+  ["## Quick start (Studio)", "## Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "Developer ID", "notarization", "CodexDreamSkinStudio.dmg", "preflight", "automatically installs and applies the bundled default theme", "Authorize one", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
+  ["## Studio 日常路径", "## 高级恢复", ["当前仓库不声称已有通过生产信任验收的 Studio 二进制发布", "生产发布完成后", "CodexDreamSkinStudio.dmg", "CodexDreamSkinStudio-1.3.1-win-x64.exe", "preflight", "自动安装并应用内置默认主题", "授权一次", "严格验证", "Pause", "Complete Restore"], ["主题包分享", "工作区场景/绑定", "上下文配置档", "动态/视频"]],
+  ["## Ordinary-user workflow (Studio)", "## Advanced recovery", ["No trusted Studio binary is currently claimed as published or accepted", "Authenticode", "SmartScreen", "CodexDreamSkinStudio-1.3.1-win-x64.exe", "preflight", "automatically installs and applies the bundled default theme", "authorize a single restart", "strict verified success", "Pause", "Complete Restore"], ["theme-package sharing", "workspace scenes/bindings", "context profiles", "motion/video"]],
 ];
 for (const [file, [quick, advanced, terms, exclusions]] of process.argv.slice(2).map((file, index) => [file, contracts[index]])) {
   const text = fs.readFileSync(file, "utf8");
@@ -1524,7 +1532,7 @@ STUB
   [ "$(state_field port)" = "9341" ]
 ' _ "$ROOT"
 
-/usr/bin/env -u HOME /bin/bash -c '. "$1/scripts/common-macos.sh"; [ -n "$HOME" ] && [ "$SKIN_VERSION" = "1.3.0" ]' _ "$ROOT"
+/usr/bin/env -u HOME /bin/bash -c '. "$1/scripts/common-macos.sh"; [ -n "$HOME" ] && [ "$SKIN_VERSION" = "1.3.1" ]' _ "$ROOT"
 DOCTOR_HOME="$TMP/doctor-home"
 /bin/mkdir -p "$DOCTOR_HOME/.codex" "$DOCTOR_HOME/Library/Application Support/CodexDreamSkinStudio/theme"
 /usr/bin/printf '%s\n' 'model = "gpt-5"' > "$DOCTOR_HOME/.codex/config.toml"

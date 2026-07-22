@@ -7,7 +7,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const read = (relative) => fs.readFileSync(path.join(repo, relative), "utf8");
 const contains = (text, expected, message) => assert.ok(text.includes(expected), message);
 
-assert.equal(read("windows/VERSION").trim(), "1.3.0");
+assert.equal(read("windows/VERSION").trim(), "1.3.1");
 
 const inno = read("windows/build/dream-skin-studio.iss");
 contains(inno, "AppId=com.feiaway.codex-dream-skin-studio", "fixed AppId missing");
@@ -30,6 +30,7 @@ assert.doesNotMatch(inno, /Flags:[^\r\n]*\bunchecked\b/,
   "Studio launch remains unchecked by default");
 
 const builder = read("windows/scripts/build-studio-release.ps1");
+contains(builder, "if ($Version -cne '1.3.1')", "Windows release guard does not match VERSION");
 const adapter = read("windows/scripts/studio-adapter.ps1");
 const common = read("windows/scripts/common-windows.ps1");
 const config = read("windows/scripts/config-utf8.ps1");
