@@ -110,6 +110,12 @@ public final class StudioModel: ObservableObject {
         guard !hasLaunched else { return }
         hasLaunched = true
         await refresh(.preflight)
+        guard envelope?.state.session == .official else { return }
+        if canRequest(.install) {
+            await perform(.install)
+        } else if canRequest(.apply) {
+            await perform(.apply)
+        }
     }
 
     public func request(_ operation: EngineOperation) async {
@@ -171,8 +177,24 @@ public final class StudioModel: ObservableObject {
         deleteUserThemes: Bool = false
     ) async {
         guard beginOperation() else { return }
-        defer { endOperation() }
+        let succeeded = await performActive(
+            operation,
+            restartAuthorized: restartAuthorized,
+            forceAuthorized: forceAuthorized,
+            deleteUserThemes: deleteUserThemes
+        )
+        endOperation()
+        if succeeded, operation == .install, canRequest(.apply) {
+            await perform(.apply)
+        }
+    }
 
+    private func performActive(
+        _ operation: EngineOperation,
+        restartAuthorized: Bool,
+        forceAuthorized: Bool,
+        deleteUserThemes: Bool
+    ) async -> Bool {
         let mutation: EngineEnvelope
         do {
             mutation = try await invoke(
@@ -188,22 +210,24 @@ public final class StudioModel: ObservableObject {
             if clientError.isInterruption {
                 await reconcileStatus(preserving: clientError)
             }
-            return
+            return false
         }
 
         guard mutation.ok else {
             presentRecovery(for: mutation, operation: operation, deleteUserThemes: deleteUserThemes)
-            return
+            return false
         }
-        guard operation != .preflight, operation != .status else { return }
+        guard operation != .preflight, operation != .status else { return true }
         do {
             envelope = try await invoke(.status)
+            return true
         } catch {
             let clientError = normalized(error)
             self.clientError = clientError
             if clientError.isInterruption {
                 await reconcileStatus(preserving: clientError)
             }
+            return false
         }
     }
 

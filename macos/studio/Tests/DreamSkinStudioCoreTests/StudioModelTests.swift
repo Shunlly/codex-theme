@@ -379,16 +379,80 @@ final class StudioModelTests: CoreTestCase {
     @Test
 #endif
     @MainActor
-    func testLaunchRunsPreflightOnlyOnce() async {
-        let preflight = makeEnvelope(operation: .preflight)
-        let engine = ScriptedEngine([.envelope(preflight)])
+    func testLaunchInstallsAndAppliesDefaultThemeOnlyOnce() async {
+        let preflight = makeEnvelope(operation: .preflight, install: "not-installed", session: "official", verified: nil, availableActions: ["install"])
+        let installed = makeEnvelope(operation: .install, session: "official", verified: nil)
+        let ready = makeEnvelope(operation: .status, session: "official", verified: nil, availableActions: ["apply"])
+        let applied = makeEnvelope(operation: .apply)
+        let verified = makeEnvelope(operation: .status)
+        let engine = ScriptedEngine([.envelope(preflight), .envelope(installed), .envelope(ready), .envelope(applied), .envelope(verified)])
         let model = StudioModel(engine: engine)
 
         await model.launch()
         await model.launch()
 
-        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight)])
-        XCTAssertEqual(model.envelope, preflight)
+        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight), call(.install), call(.status), call(.apply), call(.status)])
+        XCTAssertTrue(model.isVerified)
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testLaunchAppliesReadyThemeButSkipsPausedAndActiveSessions() async {
+        let readyEngine = ScriptedEngine([
+            .envelope(makeEnvelope(operation: .preflight, session: "official", verified: nil, availableActions: ["apply"])),
+            .envelope(makeEnvelope(operation: .apply)),
+            .envelope(makeEnvelope(operation: .status)),
+        ])
+        let readyModel = StudioModel(engine: readyEngine)
+        await readyModel.launch()
+        XCTAssertEqual(await readyEngine.recordedCalls(), [call(.preflight), call(.apply), call(.status)])
+
+        let pausedEngine = ScriptedEngine([.envelope(makeEnvelope(operation: .preflight, session: "paused", verified: false, availableActions: ["apply", "resume"]))])
+        let pausedModel = StudioModel(engine: pausedEngine)
+        await pausedModel.launch()
+        XCTAssertEqual(await pausedEngine.recordedCalls(), [call(.preflight)])
+
+        let activeEngine = ScriptedEngine([.envelope(makeEnvelope(
+            operation: .preflight,
+            session: "active",
+            verified: true,
+            availableActions: ["apply", "pause", "verify", "restore"]
+        ))])
+        let activeModel = StudioModel(engine: activeEngine)
+        await activeModel.launch()
+        XCTAssertEqual(await activeEngine.recordedCalls(), [call(.preflight)])
+    }
+
+#if !canImport(XCTest)
+    @Test
+#endif
+    @MainActor
+    func testFailedAutomaticInstallDoesNotApply() async {
+        let preflight = makeEnvelope(
+            operation: .preflight,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            availableActions: ["install"]
+        )
+        let failed = makeEnvelope(
+            operation: .install,
+            ok: false,
+            install: "not-installed",
+            session: "official",
+            verified: nil,
+            errorCode: "OPERATION_FAILED",
+            availableActions: ["install"]
+        )
+        let engine = ScriptedEngine([.envelope(preflight), .envelope(failed)])
+        let model = StudioModel(engine: engine)
+
+        await model.launch()
+
+        XCTAssertEqual(await engine.recordedCalls(), [call(.preflight), call(.install)])
+        XCTAssertFalse(model.isVerified)
     }
 
 #if !canImport(XCTest)
@@ -449,13 +513,22 @@ final class StudioModelTests: CoreTestCase {
             errorCode: "CODEX_CLOSE_REQUIRED",
             recoveryActions: ["authorize-restart", "cancel"]
         )
-        let installed = makeEnvelope(operation: .install)
-        let status = makeEnvelope(operation: .status)
+        let installed = makeEnvelope(operation: .install, session: "official", verified: nil)
+        let installedStatus = makeEnvelope(
+            operation: .status,
+            session: "official",
+            verified: nil,
+            availableActions: ["apply"]
+        )
+        let applied = makeEnvelope(operation: .apply)
+        let verified = makeEnvelope(operation: .status)
         let engine = ScriptedEngine([
             .envelope(ready),
             .envelope(closeRequired),
             .envelope(installed),
-            .envelope(status),
+            .envelope(installedStatus),
+            .envelope(applied),
+            .envelope(verified),
         ])
         let model = StudioModel(engine: engine)
 
@@ -472,7 +545,10 @@ final class StudioModelTests: CoreTestCase {
             call(.install),
             call(.install, restart: true),
             call(.status),
+            call(.apply),
+            call(.status),
         ])
+        XCTAssertTrue(model.isVerified)
     }
 
 #if !canImport(XCTest)
