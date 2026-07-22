@@ -31,10 +31,11 @@ assert.doesNotMatch(inno, /Flags:[^\r\n]*\bunchecked\b/,
 
 const builder = read("windows/scripts/build-studio-release.ps1");
 contains(builder, "if ($Version -cne '1.3.1')", "Windows release guard does not match VERSION");
-const checksumWriter = "[IO.File]::WriteAllText((Join-Path $PublishRoot 'SHA256SUMS.txt'), \"$hash  $baseName.exe`n\", [Text.UTF8Encoding]::new($false))";
-contains(builder, checksumWriter, "checksum writer must terminate its portable entry with PowerShell LF");
+const checksumWriter = /^\s*\[IO\.File\]::WriteAllText\(\s*\(Join-Path \$PublishRoot 'SHA256SUMS\.txt'\),\s*"\$hash  \$baseName\.exe`n",\s*\[Text\.UTF8Encoding\]::new\(\$false\)\s*\)\s*$/m;
+assert.match(builder, checksumWriter,
+  "active checksum writer must terminate its portable entry with PowerShell LF");
 assert.doesNotMatch(builder,
-  /\[IO\.File\]::WriteAllText\(\(Join-Path \$PublishRoot 'SHA256SUMS\.txt'\), "\$hash  \$baseName\.exe`r`n", \[Text\.UTF8Encoding\]::new\(\$false\)\)/,
+  /^\s*\[IO\.File\]::WriteAllText\(\s*\(Join-Path \$PublishRoot 'SHA256SUMS\.txt'\),\s*"\$hash  \$baseName\.exe`r`n",\s*\[Text\.UTF8Encoding\]::new\(\$false\)\s*\)\s*$/m,
   "checksum writer must not terminate its portable entry with PowerShell CRLF");
 const adapter = read("windows/scripts/studio-adapter.ps1");
 const common = read("windows/scripts/common-windows.ps1");
@@ -1271,7 +1272,7 @@ releaseSecurityContract("I7 release metadata truth", () => {
     "manifest-schemaVersion-mutation", "manifest-version-mutation", "manifest-architecture-mutation",
     "manifest-signing-mutation", "manifest-file-mutation", "manifest-sha256-mutation",
     "manifest-sourceTree-mutation", "manifest-extra-key-mutation", "checksum-hash-mutation",
-    "checksum-file-mutation", "checksum-extra-entry-mutation", "setup-byte-mutation",
+    "checksum-file-mutation", "checksum-extra-entry-mutation", "checksum-crlf-mutation", "setup-byte-mutation",
   ]) contains(releaseTests, regression, `metadata mutation regression missing: ${regression}`);
 });
 

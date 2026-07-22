@@ -378,9 +378,10 @@ try {
   [IO.File]::WriteAllBytes($manifestPath, $originalManifestBytes)
 
   foreach ($checksumMutation in @(
-    @{ Name = 'checksum-hash-mutation'; Text = "$((('0' * 64) -join ''))  $setupFile`r`n" },
-    @{ Name = 'checksum-file-mutation'; Text = "$((Get-FileHash -LiteralPath $mutationSetupPath -Algorithm SHA256).Hash.ToLowerInvariant())  other.exe`r`n" },
-    @{ Name = 'checksum-extra-entry-mutation'; Text = "$([Text.UTF8Encoding]::new($false).GetString($originalChecksumBytes))$((('0' * 64) -join ''))  other.exe`r`n" }
+    @{ Name = 'checksum-hash-mutation'; Text = "$((('0' * 64) -join ''))  $setupFile`n" },
+    @{ Name = 'checksum-file-mutation'; Text = "$((Get-FileHash -LiteralPath $mutationSetupPath -Algorithm SHA256).Hash.ToLowerInvariant())  other.exe`n" },
+    @{ Name = 'checksum-extra-entry-mutation'; Text = "$([Text.UTF8Encoding]::new($false).GetString($originalChecksumBytes))$((('0' * 64) -join ''))  other.exe`n" },
+    @{ Name = 'checksum-crlf-mutation'; Text = "$((Get-FileHash -LiteralPath $mutationSetupPath -Algorithm SHA256).Hash.ToLowerInvariant())  $setupFile`r`n" }
   )) {
     [IO.File]::WriteAllText($checksumPath, $checksumMutation.Text, [Text.UTF8Encoding]::new($false))
     $rejected = $false
