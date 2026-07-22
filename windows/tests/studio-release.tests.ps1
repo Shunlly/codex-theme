@@ -314,8 +314,9 @@ try {
     throw 'Staged Studio FileVersionInfo does not match windows/VERSION.'
   }
   $setupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($Setup)
-  $setupProductVersion = "$($setupVersionInfo.ProductVersion)"
-  if ($setupVersionInfo.FileVersion -cne "$Version.0" -or
+  $setupProductVersion = "$($setupVersionInfo.ProductVersion)".Trim()
+  $setupFileVersion = "$($setupVersionInfo.FileVersion)".Trim()
+  if ($setupFileVersion -cne "$Version.0" -or
     $setupProductVersion -notin @($Version, "$Version.0")) {
     throw 'Setup FileVersionInfo does not match windows/VERSION.'
   }

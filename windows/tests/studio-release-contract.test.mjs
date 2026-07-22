@@ -1050,9 +1050,13 @@ contains(inno, "VersionInfoProductVersion={#AppVersion}.0", "setup ProductVersio
 contains(inno, "VersionInfoProductTextVersion={#AppVersion}", "setup textual ProductVersion is not derived from windows/VERSION");
 contains(builder, "$setupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($setupPath)",
   "matching-host builder does not inspect setup PE metadata");
+contains(builder, "$setupProductVersion = \"$($setupVersionInfo.ProductVersion)\".Trim()",
+  "setup ProductVersion is not normalized for fixed-width Inno metadata");
+contains(builder, "$setupFileVersion = \"$($setupVersionInfo.FileVersion)\".Trim()",
+  "setup FileVersion is not normalized for fixed-width Inno metadata");
 contains(builder, "$setupProductVersion -notin @($Version, \"$Version.0\")",
   "setup ProductVersion does not accept only the equivalent text and binary forms");
-contains(builder, "$setupVersionInfo.FileVersion -cne \"$Version.0\"", "setup FileVersion is not verified");
+contains(builder, "$setupFileVersion -cne \"$Version.0\"", "setup FileVersion is not verified");
 const pinnedSetupIndex = builder.indexOf("[DreamSkinReleaseFilePin]::Open($setupPath, $false)");
 const pinnedSetupSignatureIndex = builder.indexOf("Assert-FileSignature -Path $setupPath", pinnedSetupIndex);
 const pinnedSetupVersionIndex = builder.indexOf("$setupVersionInfo =", pinnedSetupSignatureIndex);
