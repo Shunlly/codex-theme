@@ -5,179 +5,102 @@
 </p>
 
 <p align="center">
-  <strong>给 Codex 桌面端换一张会呼吸的脸。</strong><br>
-  外部主题 / 换肤工具 · 本机 CDP 注入 · 不改官方安装包
+  给 Codex Desktop 换上可恢复、可交互的全窗主题。<br>
+  本机 CDP 注入，不修改官方 <code>.app</code>、<code>app.asar</code> 或 WindowsApps。
 </p>
 
-<p align="center">
-  一张图，一种心情 · 写代码，也要有氛围感
-</p>
+> 非 OpenAI 官方项目。当前下载是未签名测试版，只适合测试，不代表生产信任验收。
 
-<p align="center">
-  非 OpenAI 官方产品。不修改 <code>.app</code> / <code>app.asar</code> / WindowsApps。
-</p>
+## 下载
 
-## 赞助商
+测试版安装包放在 [GitHub Releases](https://github.com/Shunlly/codex-theme/releases)：
 
-<p align="center">
-  <a href="https://passion8.cc/register?aff=TuPe">
-    <img src="docs/images/sponsor-passion8.png" alt="Passion8" height="72">
-  </a>
-</p>
+| 平台 | 文件 | 状态 |
+| --- | --- | --- |
+| Apple Silicon / Intel Mac | `CodexDreamSkinStudio-1.3.0-macos-universal-ADHOC.dmg` | ad-hoc 签名，未公证 |
+| Windows x64 | `CodexDreamSkinStudio-1.3.0-win-x64-UNSIGNED.exe` | 未签名安装器 |
+| Windows arm64 | 暂无 | 需要原生 arm64 Windows 构建机 |
 
-<p align="center">
-  <strong>更智能的连接 · 更热爱的创造</strong><br>
-  <sub>热爱驱动 · 无限可能 · Connect AI · Power Creation</sub>
-</p>
-
-<p align="center">
-  感谢 <a href="https://passion8.cc/register?aff=TuPe"><strong>passion8.cc</strong></a> 赞助本项目。<br>
-  满血 AI 中转：官方模型直连，无降智、无套壳；一行配置接入 Codex / Claude Code / Grok。
-</p>
-
-<p align="center">
-  <sub>
-    换肤与 API 配置互相独立，本项目不会自动改写你的模型供应商设置。
-  </sub>
-</p>
-
-## 先看这里
-
-本项目现在处于 **Milestone 1：先把脚本和托盘收进普通用户可用的 Studio**。你可以按下面的路径判断自己该做什么：
-
-| 你的目标 | 当前入口 |
-| --- | --- |
-| 不会编程，只想使用 | 等正式签名包发布后，双击 Studio，完成 preflight，再按提示授权一次重启 |
-| 正在本地测试 | 使用带 `ADHOC` / `UNSIGNED` 标记的开发产物；它们不是生产信任证明 |
-| 需要换图、保存或切换主题 | 继续使用 macOS 菜单栏 / Windows 托盘高级入口，当前 Studio 只负责生命周期操作 |
-| 想把主题发给朋友 | `.cdxtheme` 主题包导出/导入是下一阶段，当前不要手工复制整个引擎目录 |
-
-普通用户不需要 Terminal、PowerShell、Homebrew、全局 Node 或管理员权限。Studio 只调用现有引擎，不修改官方 Codex 安装包、签名、线程和认证信息。
-
-## 实测精选预设：桥本有菜
-
-下面这套「桥本有菜 / Arina Hashimoto」已经在真实 Codex 首页分别验证浅色和暗色外观。用户提供的源 PNG 为 `1672 × 941`，主题包在保持源图近 16:9 构图的前提下派生导出 `2560 × 1440` JPEG，并不代表增加了源图细节。截图中的侧栏、卡片、项目选择和输入框都是 Codex 原生控件。
-
-<p align="center">
-  <img src="docs/images/presets/romantic-rose-light.jpg" alt="桥本有菜主题浅色实机效果" width="900"><br>
-  <sub>浅色 · 真实注入截图（未发送输入已在截图时遮蔽，仅预览）</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/presets/romantic-rose-dark.jpg" alt="桥本有菜主题暗色实机效果" width="900"><br>
-  <sub>暗色 · 真实注入截图（未发送输入已在截图时遮蔽，仅预览）</sub>
-</p>
-
-Studio 首次安装会预置「桥本有菜」主题。Milestone 1 的原生 Studio 只负责安装、应用、暂停、恢复、验证与卸载；本地主题切换和导入仍通过 macOS SwiftBar/脚本或 Windows 系统托盘完成。
-
-> 可下载的用户源图是 [`docs/images/presets/romantic-rose-source.png`](./docs/images/presets/romantic-rose-source.png)（`1672 × 941`）；macOS 一键预设使用 [`macos/presets/preset-romantic-rose/background.jpg`](./macos/presets/preset-romantic-rose/background.jpg)（规范化派生 `2560 × 1440`）。上面两个效果图包含真实 UI，**只作预览，绝不能当背景导入**。背景为用户提供的 AI 生成示例，不代表 OpenAI/Codex 官方视觉或背书；公开再分发前请确认人物与素材权利。
-
-## 概念效果图（不可直接导入）
-
-下面八张图用于表达可实现的视觉方向，但它们是带界面的概念效果图，不是可直接使用的主题背景。需要同类效果时，先按[参考生图提示词](./docs/reference-background-prompt-guide.md)生成无 UI 的 `2560 × 1440` 素材；八种风格的详细拆解见[概念图提示词](./docs/background-generation-prompts.md)。
-
-<p align="center">
-  <img src="docs/images/gallery/skin-01.jpg" alt="粉系定制" width="900"><br>
-  <sub>粉系定制</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/gallery/skin-02.jpg" alt="财神打工" width="900"><br>
-  <sub>财神打工版</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/gallery/skin-03.jpg" alt="红白科幻" width="900"><br>
-  <sub>红白科幻</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/gallery/skin-04.jpg" alt="清透定制" width="900"><br>
-  <sub>清透定制</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/gallery/skin-05.jpg" alt="灵感小宇宙" width="900"><br>
-  <sub>灵感小宇宙</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/gallery/skin-06.jpg" alt="紫夜限定" width="900"><br>
-  <sub>紫夜限定</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/gallery/skin-07.jpg" alt="青蓝虚拟歌姬" width="900"><br>
-  <sub>青蓝虚拟歌姬</sub>
-</p>
-
-<p align="center">
-  <img src="docs/images/gallery/skin-08.jpg" alt="舞台黑金" width="900"><br>
-  <sub>舞台黑金</sub>
-</p>
+macOS 可能显示开发者无法验证；Windows 可能显示 SmartScreen 警告。这些文件名会一直保留 `ADHOC` / `UNSIGNED`，直到真正完成 Developer ID、公证、Authenticode 和 SmartScreen 验收。
 
 ## 它能做什么
 
-- **真·可交互**：侧栏、建议卡、项目选择、输入框都是原生控件，不是整窗假截图贴上去
-- **真背景层**：一张 16:9 纯壁纸连续铺满整窗，首页突出氛围，任务页自动降低干扰
-- **可换图**：换一张喜欢的纯背景，自适应焦点、安全区和配色后变成你的主题
-- **可存主题**：macOS 菜单栏与 Windows 系统托盘都能保存/切换本地主题
-- **可恢复**：一键还原官方外观
-- **相对安全**：本机回环 CDP 注入，不改官方二进制与签名
+- 保留 Codex 原生侧栏、项目选择、卡片、输入框和任务交互。
+- 用一张纯背景图连续覆盖首页和任务页，任务页自动降低干扰。
+- Studio 提供 preflight、安装、应用、验证、Pause、恢复和卸载。
+- macOS 菜单栏和 Windows 托盘继续提供换图、保存与切换本地主题。
+- Complete Restore 可以移除实时注入并关闭受管 CDP。
+
+<p align="center">
+  <img src="docs/images/presets/romantic-rose-light.jpg" alt="浅色主题真实效果" width="860"><br>
+  <sub>浅色 · 真实 Codex 首页；原生控件仍可交互</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/presets/romantic-rose-dark.jpg" alt="暗色主题真实效果" width="860"><br>
+  <sub>暗色 · 同一主题自动适配</sub>
+</p>
+
+截图只作预览，不能作为背景导入。可导入的素材必须是无窗口、无侧栏、无文字、无 Logo 的纯背景图；构图模板见[背景生成指南](./docs/reference-background-prompt-guide.md)。
 
 ## 快速开始
 
-当前仓库不声称已有通过生产信任验收的 Studio 二进制发布。下面是 Developer ID/公证/装订/Gatekeeper 或 Authenticode/SmartScreen 全部通过并正式发布后的普通用户流程。
+当前仓库不声称已有通过生产信任验收的 Studio 二进制发布。当前 Release 是方便测试的未签名构建；生产发布完成后，正式文件会使用 `CodexDreamSkinStudio.dmg`、`CodexDreamSkinStudio-1.3.0-win-x64.exe` 等不带测试标记的名称。
 
-1. 生产发布完成后，下载对应平台的 Studio 产物，打开或安装它。
-2. 完成 Studio 的 preflight；仅在 Studio 请求时授权一次 Codex 重启。
-3. 等待严格验证的成功状态；用 **Pause** 暂时关闭，用 **Complete Restore** 移除实时皮肤并关闭受管 CDP。
+1. 从 [Releases](https://github.com/Shunlly/codex-theme/releases) 下载对应平台的测试安装包并打开。
+2. 完成 Studio 的 preflight；只在 Studio 明确请求时授权一次 Codex 重启。
+3. 等待严格验证成功。用 **Pause** 临时关闭主题，用 **Complete Restore** 恢复官方外观并关闭受管 CDP。
 
-日常 macOS 不需要 Terminal、SwiftBar、Homebrew 或单独安装 Node；日常 Windows 不需要 PowerShell、PATH Node、管理员权限或手动命令。
-
-| 平台 | Studio artifact | 高级恢复 |
-|------|------|------|
-| Apple Silicon / Intel Mac | `CodexDreamSkinStudio.dmg` | [`macos/README.md`](./macos/README.md) |
-| Windows x64 / arm64 | `CodexDreamSkinStudio-1.3.0-win-x64.exe` / `CodexDreamSkinStudio-1.3.0-win-arm64.exe` | [`windows/SKILL.md`](./windows/SKILL.md) |
-
-本地开发产物会明确标记为 `macos/release/adhoc/CodexDreamSkinStudio-1.3.0-macos-universal-ADHOC.dmg` 或带 `-UNSIGNED` 的 Windows 安装包，不能当作生产信任验收结果。
+普通使用不需要 Terminal、PowerShell、Homebrew、全局 Node、管理员权限或手动编辑配置。首次运行前，请先安装并至少打开一次官方 Codex Desktop。
 
 ### 高级恢复
 
-仓库脚本、SwiftBar、PowerShell、诊断和手动 Restore 仍是维护/恢复入口，不是普通安装路径。按平台文档执行。
+遇到异常时，先使用 **Pause**，再使用 **Complete Restore**。不要手动删除状态、备份或主题目录；需要进一步处理时按平台文档执行：
 
-遇到状态异常时，先在 Studio 中使用 **Pause**，仍无法恢复再使用 **Complete Restore**；不要手动删除 `state.json`、备份文件或主题目录。Studio 会保留可验证的恢复证据，必要时再按平台文档执行高级恢复。
+- [macOS 使用与恢复](./macos/README.md)
+- [Windows 使用与恢复](./windows/SKILL.md)
+- [平台路径与能力对照](./docs/platforms.md)
 
-Milestone 1 不包含主题包分享、工作区场景/绑定、上下文配置档或动态/视频效果。
+## 当前边界
 
-本仓库另带四套不自动安装的[可选用户主题](./user-themes/)：`IU 象牙婚礼`、`五条悟`、`木之本樱 春日祭`、`楪祈`。
+Milestone 1 的原生 Studio 只负责可靠的生命周期操作。主题包分享、工作区场景/绑定、上下文配置档和动态/视频背景还没有进入当前版本。
 
-更细的说明：
-
-- Mac：[`macos/README.md`](./macos/README.md)
-- Windows：[`windows/SKILL.md`](./windows/SKILL.md)
-- 路径对照：[`docs/platforms.md`](./docs/platforms.md)
-- 可直接复制的参考生图模板：[`docs/reference-background-prompt-guide.md`](./docs/reference-background-prompt-guide.md)
-- 八种概念方向详细提示词：[`docs/background-generation-prompts.md`](./docs/background-generation-prompts.md)
-- 项目记录：[`docs/PROJECT.md`](./docs/PROJECT.md)
-
-## 反馈与贡献
-
-- **Issue：** 请用 [Issue 模板](./.github/ISSUE_TEMPLATE/)（Bug / 功能）；已关闭空白 Issue。提交前建议先跑 Verify / Restore 自检。
-- **PR：** 请按 [PR 模板](./.github/pull_request_template.md) 写清改动，并勾选对应自测（如 `macos/tests/run-tests.sh`、verify / restore）。
+下一阶段会优先实现 `.cdxtheme`：一个文件导出、导入和分享主题，同时保留素材来源、版本和兼容性信息。现在不要把整个引擎目录发给朋友。
 
 ## 安全边界
 
-- CDP 只绑 `127.0.0.1`，主题运行期间勿跑来路不明的本机程序
-- 不修改官方安装目录与代码签名
-- **不会**自动改写 API Key / Base URL；中转与换肤分开
+- CDP 只绑定 `127.0.0.1`，不会暴露到局域网，但同一用户下没有额外认证。
+- 不修改官方 Codex 二进制、安装目录、代码签名、线程或认证信息。
+- 不读取或改写 `auth.json`、API Key、Base URL 和模型供应商设置。
+- 配置写入使用严格 UTF-8、备份、原子替换和可恢复事务。
+- Pause 不关闭 CDP；不再使用主题时应执行 Complete Restore。
 
-## 许可与声明
+## 开发与构建
 
-- 见 [`macos/LICENSE`](./macos/LICENSE)（MIT）与 [`macos/NOTICE.md`](./macos/NOTICE.md)
-- 非 OpenAI 官方产品；Codex 及相关权利归其权利人
-- 随仓库预设及效果图中的人物 / IP 素材仅作主题示意；商用或公开再分发请自行确认肖像、素材与商标权利
+```bash
+# macOS 测试
+cd macos && npm test
 
----
+# macOS 未签名测试 DMG
+/bin/bash macos/scripts/build-studio-release.sh --adhoc
 
-Star 一下，然后挑一张图，把你的 Codex 变成今天想要的样子。
+# Windows 测试（在 Windows PowerShell 5.1 中）
+powershell -NoProfile -File windows/tests/run-tests.ps1
+
+# Windows x64 未签名测试安装器（需要 .NET 8 + Inno Setup 6）
+powershell -NoProfile -File windows/scripts/build-studio-release.ps1 -Architecture x64 -SkipSign
+```
+
+推送形如 `v1.3.0-test.1` 的 tag 会运行 [test-release 工作流](./.github/workflows/test-release.yml)，生成 DMG、EXE、SHA-256 和 release manifest，并创建 GitHub pre-release。
+
+## 更多内容
+
+- [可选用户主题](./user-themes/)
+- [概念图库与提示词](./docs/background-generation-prompts.md)
+- [Studio 协议](./studio/protocol/README.md)
+- [项目记录](./docs/PROJECT.md)
+- [Issue 模板](./.github/ISSUE_TEMPLATE/)
+
+## 许可
+
+项目代码使用 MIT License，见 [`macos/LICENSE`](./macos/LICENSE)。人物、IP、预设和预览素材不因代码许可证自动获得再分发授权，请自行确认肖像、素材和商标权利。

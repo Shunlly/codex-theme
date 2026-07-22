@@ -1,0 +1,76 @@
+name: Build test release
+
+on:
+  push:
+    tags:
+      - "v*-test.*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ad-hoc DMG
+        run: /bin/bash macos/scripts/build-studio-release.sh --adhoc
+      - name: Collect macOS artifacts
+        run: |
+          mkdir -p dist
+          cp macos/release/adhoc/*.dmg dist/
+          cp macos/release/adhoc/SHA256SUMS.txt dist/SHA256SUMS-macos.txt
+          cp macos/release/adhoc/release-manifest.json dist/release-manifest-macos.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-release
+          path: dist/
+
+  windows-x64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup -y --no-progress
+      - name: Run portable release contracts
+        shell: powershell
+        run: |
+          node studio/protocol/validate-fixtures.mjs
+          node windows/tests/studio-release-contract.test.mjs
+      - name: Build unsigned installer
+        shell: powershell
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File windows/scripts/build-studio-release.ps1 -Architecture x64 -SkipSign -SkipTests
+      - name: Collect Windows artifacts
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item windows/release/*.exe dist/
+          Copy-Item windows/release/SHA256SUMS.txt dist/SHA256SUMS-windows-x64.txt
+          Copy-Item windows/release/release-manifest.json dist/release-manifest-windows-x64.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-test-release
+          path: dist/
+
+  release:
+    needs: [macos, windows-x64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --prerelease
+          --title "Codex Dream Skin Studio $GITHUB_REF_NAME"
+          --notes "Unsigned test build. macOS is ad-hoc signed and not notarized; Windows x64 is unsigned. Use only for testing."
