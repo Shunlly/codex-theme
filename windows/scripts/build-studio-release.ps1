@@ -405,14 +405,22 @@ function Assert-ReleaseMetadata {
 }
 
 function Invoke-TestOnlyReleaseReplacement {
-  param([string]$Phase, [string]$Target, [string]$Replacement, [string]$Proof)
+  param(
+    [string]$Phase,
+    [string]$Target,
+    [string]$Replacement,
+    [string]$Proof,
+    [switch]$ExpectSuccess
+  )
   if (-not $TestOnlyToken -or "$env:DREAM_SKIN_RELEASE_TEST_REPLACE_PHASE" -cne $Phase) { return }
   if (-not (Test-Path -LiteralPath $Replacement -PathType Leaf)) {
     throw 'The release replacement test seam is invalid.'
   }
   try { [IO.File]::Replace($Replacement, $Target, $null) } catch {
+    if ($ExpectSuccess) { throw 'setup-publication-replacement-unexpectedly-denied' }
     throw "$Proof`: replacement was denied by the pinned release identity."
   }
+  if ($ExpectSuccess) { return }
   throw "$Proof`: replacement unexpectedly succeeded."
 }
 
@@ -476,8 +484,9 @@ $scannerPin = $null
 $allowlistPin = $null
 $iconPin = $null
 $setupPin = $null
-$movableSetupPin = $null
 $finalSetupPin = $null
+$setupPublicationIdentity = $null
+$setupPublicationHash = $null
 $releaseInputPaths = @(
   'Directory.Build.props', 'Directory.Build.targets',
   'windows/Directory.Build.props', 'windows/Directory.Build.targets',
@@ -712,10 +721,12 @@ try {
   Assert-ReleaseMetadata -Root $PublishRoot -Version $Version -Architecture $Architecture `
     -Signing $signingMode -File "$baseName.exe" -SourceTree $IndexTree -ExpectedHash $hash
 
-  $movableSetupPin = [DreamSkinReleaseFilePin]::Open($setupPath, $true)
-  $setupPin.AssertSameFile($movableSetupPin)
+  $setupPublicationIdentity = $setupPin.Identity
+  $setupPublicationHash = $setupPin.Sha256
   $setupPin.Dispose()
   $setupPin = $null
+  Invoke-TestOnlyReleaseReplacement -Phase 'setup-before-publication' -Target $setupPath `
+    -Replacement $SetupReplacement -Proof 'setup-publication-identity-mismatch' -ExpectSuccess
 
   if (Test-Path -LiteralPath $ReleaseRoot) { [IO.Directory]::Move($ReleaseRoot, $OldRelease) }
   try {
@@ -723,9 +734,10 @@ try {
     $releaseMoved = $true
     $finalSetupPath = Join-Path $ReleaseRoot "$baseName.exe"
     $finalSetupPin = [DreamSkinReleaseFilePin]::Open($finalSetupPath, $false)
-    $movableSetupPin.AssertSameFile($finalSetupPin)
-    $movableSetupPin.Dispose()
-    $movableSetupPin = $null
+    if ($finalSetupPin.Identity -cne $setupPublicationIdentity -or
+      $finalSetupPin.Sha256 -cne $setupPublicationHash) {
+      throw 'setup-publication-identity-mismatch'
+    }
     if (-not $SkipSign) { Assert-FileSignature -Path $finalSetupPath -SignTool $SignTool }
     $finalSetupVersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($finalSetupPath)
     $finalSetupProductVersion = "$($finalSetupVersionInfo.ProductVersion)".Trim()
@@ -741,7 +753,6 @@ try {
     $swapped = $true
   } catch {
     if ($finalSetupPin) { $finalSetupPin.Dispose(); $finalSetupPin = $null }
-    if ($movableSetupPin) { $movableSetupPin.Dispose(); $movableSetupPin = $null }
     if ($releaseMoved -and (Test-Path -LiteralPath $ReleaseRoot)) {
       [IO.Directory]::Move($ReleaseRoot, $FailedRelease)
       $releaseMoved = $false
@@ -763,7 +774,6 @@ try {
   if ($allowlistPin) { $allowlistPin.Dispose() }
   if ($iconPin) { $iconPin.Dispose() }
   if ($setupPin) { $setupPin.Dispose() }
-  if ($movableSetupPin) { $movableSetupPin.Dispose() }
   if ($finalSetupPin) { $finalSetupPin.Dispose() }
   if (-not $swapped -and (Test-Path -LiteralPath $OldRelease) -and -not (Test-Path -LiteralPath $ReleaseRoot)) {
     [IO.Directory]::Move($OldRelease, $ReleaseRoot)

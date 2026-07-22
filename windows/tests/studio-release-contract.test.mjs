@@ -1120,21 +1120,30 @@ releaseSecurityContract("C1 stage-to-ISCC identity", () => {
 
 releaseSecurityContract("C1 setup publication identity", () => {
   for (const contract of [
-    "DreamSkinReleaseFilePin", "$setupPin", "$movableSetupPin", "$finalSetupPin",
-    "setup-after-signature", "setup-replacement-denied", "Assert-ReleaseMetadata",
+    "DreamSkinReleaseFilePin", "$setupPin", "$finalSetupPin",
+    "$setupPublicationIdentity", "$setupPublicationHash",
+    "setup-after-signature", "setup-replacement-denied", "setup-before-publication",
+    "setup-publication-identity-mismatch", "setup-publication-replacement-unexpectedly-denied",
+    "Assert-ReleaseMetadata",
   ]) contains(builder, contract, `setup identity contract missing: ${contract}`);
   const setupPin = builder.indexOf("[DreamSkinReleaseFilePin]::Open($setupPath, $false)");
   const setupSignature = builder.indexOf("Assert-FileSignature -Path $setupPath", setupPin);
   const setupHash = builder.indexOf("$setupPin.Sha256", setupSignature);
   const setupMetadata = builder.indexOf("Assert-ReleaseMetadata", setupHash);
+  const setupDispose = builder.indexOf("$setupPin.Dispose()", setupMetadata);
   const publishMove = builder.indexOf("[IO.Directory]::Move($PublishRoot, $ReleaseRoot)", setupMetadata);
   const finalPin = builder.indexOf("[DreamSkinReleaseFilePin]::Open($finalSetupPath, $false)", publishMove);
+  const finalIdentity = builder.indexOf("$finalSetupPin.Identity -cne $setupPublicationIdentity", finalPin);
   const finalMetadata = builder.indexOf("Assert-ReleaseMetadata", finalPin);
   assert.ok(setupPin >= 0 && setupSignature > setupPin && setupHash > setupSignature &&
-    setupMetadata > setupHash && publishMove > setupMetadata && finalPin > publishMove &&
-    finalMetadata > finalPin,
-  "one proven setup object does not span signature, hash, metadata, and final publication checks");
-  for (const regression of ["setup-replacement-denied", "setup replacement race replaced prior release"]) {
+    setupMetadata > setupHash && setupDispose > setupMetadata && publishMove > setupDispose &&
+    finalPin > publishMove && finalIdentity > finalPin && finalMetadata > finalIdentity,
+  "setup proof does not span signature, hash, metadata, handle close, move, and final identity checks");
+  for (const regression of [
+    "setup-replacement-denied", "setup replacement race replaced prior release",
+    "setup-publication-identity-mismatch", "setup publication race replaced prior release",
+    "setup-publication-replacement-unexpectedly-denied",
+  ]) {
     contains(releaseTests, regression, `setup replacement regression missing: ${regression}`);
   }
 });

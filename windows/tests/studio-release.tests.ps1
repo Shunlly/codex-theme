@@ -443,11 +443,18 @@ try {
   foreach ($race in @(
     @{ Phase = 'stage-after-scan'; Proof = 'stage-adapter-replacement-denied'; Failure = 'stage replacement race replaced prior release' },
     @{ Phase = 'manifest-before-iscc'; Proof = 'manifest-replacement-denied'; Failure = 'manifest replacement race replaced prior release' },
-    @{ Phase = 'setup-after-signature'; Proof = 'setup-replacement-denied'; Failure = 'setup replacement race replaced prior release' }
+    @{ Phase = 'setup-after-signature'; Proof = 'setup-replacement-denied'; Failure = 'setup replacement race replaced prior release' },
+    @{
+      Phase = 'setup-before-publication'
+      Proof = 'setup-publication-identity-mismatch'
+      Forbidden = 'setup-publication-replacement-unexpectedly-denied'
+      Failure = 'setup publication race replaced prior release'
+    }
   )) {
     $env:DREAM_SKIN_RELEASE_TEST_REPLACE_PHASE = $race.Phase
     $raceBuild = Invoke-TestProcess $PowerShell $BuilderTestArguments
-    if ($raceBuild.ExitCode -eq 0 -or $raceBuild.Output -notmatch [regex]::Escape($race.Proof)) {
+    if ($raceBuild.ExitCode -eq 0 -or $raceBuild.Output -notmatch [regex]::Escape($race.Proof) -or
+      ($race.Forbidden -and $raceBuild.Output -match [regex]::Escape($race.Forbidden))) {
       throw "The $($race.Phase) replacement seam did not prove denial."
     }
     Assert-SnapshotEqual @(Get-FileSnapshot $ReleaseRoot) $goodRelease $race.Failure
