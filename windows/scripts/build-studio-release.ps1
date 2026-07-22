@@ -399,7 +399,7 @@ function Assert-ReleaseMetadata {
   try { $checksumText = $strictUtf8.GetString([IO.File]::ReadAllBytes($checksumPath)) } catch {
     throw 'Release checksum is not strict UTF-8.'
   }
-  if ($checksumText -cne "$ExpectedHash  $File`r`n") {
+  if ($checksumText -cne "$ExpectedHash  $File`n") {
     throw 'Release metadata must contain exactly one checksum entry.'
   }
 }

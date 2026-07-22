@@ -37,6 +37,17 @@ assert.match(builder, checksumWriter,
 assert.doesNotMatch(builder,
   /^\s*\[IO\.File\]::WriteAllText\(\s*\(Join-Path \$PublishRoot 'SHA256SUMS\.txt'\),\s*"\$hash  \$baseName\.exe`r`n",\s*\[Text\.UTF8Encoding\]::new\(\$false\)\s*\)\s*$/m,
   "checksum writer must not terminate its portable entry with PowerShell CRLF");
+const metadataVerifierStart = builder.indexOf("function Assert-ReleaseMetadata {");
+const metadataVerifierEnd = builder.indexOf("\nfunction Invoke-TestOnlyReleaseReplacement", metadataVerifierStart);
+const metadataVerifier = builder.slice(metadataVerifierStart, metadataVerifierEnd);
+assert.ok(metadataVerifierStart >= 0 && metadataVerifierEnd > metadataVerifierStart,
+  "release metadata verifier is not delimited");
+assert.match(metadataVerifier,
+  /^\s*if\s*\(\$checksumText\s*-cne\s*"\$ExpectedHash  \$File`n"\)\s*\{$/m,
+  "release metadata checksum comparison must use PowerShell LF");
+assert.doesNotMatch(metadataVerifier,
+  /^\s*if\s*\(\$checksumText\s*-cne\s*"\$ExpectedHash  \$File`r`n"\)\s*\{$/m,
+  "release metadata checksum comparison must not use PowerShell CRLF");
 const adapter = read("windows/scripts/studio-adapter.ps1");
 const common = read("windows/scripts/common-windows.ps1");
 const config = read("windows/scripts/config-utf8.ps1");
