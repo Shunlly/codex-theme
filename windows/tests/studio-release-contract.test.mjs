@@ -1024,6 +1024,30 @@ for (const contract of [
   "RefreshButton.IsEnabled", "VerifyButton.IsEnabled", "RefreshButton_Click", "VerifyButton_Click",
   "DispatchAsync(EngineOperation.Verify)", "RefreshStatusAsync()", "_confirming = true",
 ]) contains(window, contract, `Windows UI dispatcher/busy contract missing: ${contract}`);
+for (const contract of [
+  "AutomaticOperation(string? session, IReadOnlyCollection<string> actions)",
+  'session is "paused" or "active"',
+  "DispatchWithInstallFollowUpAsync(EngineOperation operation)",
+]) contains(window, contract, `automatic default-theme orchestration missing: ${contract}`);
+
+const initializeStart = window.indexOf("private async Task InitializeAsync()");
+const initializeEnd = window.indexOf("private Forms.NotifyIcon CreateTray()", initializeStart);
+const initialize = window.slice(initializeStart, initializeEnd);
+contains(initialize, "AutomaticOperation(", "startup does not select an automatic operation after preflight");
+contains(initialize, "DispatchWithInstallFollowUpAsync(automaticOperation)",
+  "startup does not run the selected automatic operation");
+
+const followUpStart = window.indexOf("private async Task<bool> DispatchWithInstallFollowUpAsync");
+const followUpEnd = window.indexOf("private async Task<bool> DispatchAsync", followUpStart);
+const followUp = window.slice(followUpStart, followUpEnd);
+contains(followUp, "if (!await DispatchAsync(operation)) return false;",
+  "failed install still advances to Apply");
+contains(followUp, "operation == EngineOperation.Install && CanRun(EngineOperation.Apply)",
+  "successful install does not gate Apply on refreshed availability");
+contains(followUp, "return await DispatchAsync(EngineOperation.Apply);",
+  "successful install does not advance through the normal Apply dispatcher");
+assert.ok((window.match(/DispatchWithInstallFollowUpAsync\(PrimaryOperation\(\)\)/g) || []).length >= 2,
+  "main button and tray primary action do not share install-follow-up dispatch");
 const uninstallStart = window.indexOf("UninstallButton_Click");
 const uninstallHandler = window.slice(uninstallStart, window.indexOf("ShowSafeOperationFailure", uninstallStart));
 assert.match(uninstallHandler, /_confirming = true[\s\S]*ShowDialog\(\)[\s\S]*finally[\s\S]*_confirming = false/,

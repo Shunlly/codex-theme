@@ -57,7 +57,9 @@ public partial class MainWindow : Window
       FinishPrepareUninstall(success ? 0 : 1);
       return;
     }
-    await DispatchAsync(EngineOperation.Preflight);
+    if (!await DispatchAsync(EngineOperation.Preflight) || _envelope is null) return;
+    if (AutomaticOperation(_envelope.State.Session, _envelope.State.AvailableActions) is { } automaticOperation)
+      await DispatchWithInstallFollowUpAsync(automaticOperation);
   }
 
   private Forms.NotifyIcon CreateTray()
@@ -71,7 +73,8 @@ public partial class MainWindow : Window
     };
     tray.DoubleClick += (_, _) => ShowWindow();
     tray.ContextMenuStrip.Items.Add("显示窗口", null, (_, _) => ShowWindow()).Name = "show";
-    tray.ContextMenuStrip.Items.Add("应用主题", null, async (_, _) => await DispatchAsync(PrimaryOperation())).Name = "primary";
+    tray.ContextMenuStrip.Items.Add("应用主题", null,
+      async (_, _) => await DispatchWithInstallFollowUpAsync(PrimaryOperation())).Name = "primary";
     tray.ContextMenuStrip.Items.Add("暂停", null, async (_, _) => await DispatchAsync(EngineOperation.Pause)).Name = "pause";
     tray.ContextMenuStrip.Items.Add("完全恢复", null, async (_, _) => await DispatchAsync(EngineOperation.Restore)).Name = "restore";
     tray.ContextMenuStrip.Items.Add(new Forms.ToolStripSeparator());
@@ -84,6 +87,14 @@ public partial class MainWindow : Window
     if (_envelope?.State.AvailableActions.Contains("install") == true) return EngineOperation.Install;
     if (_envelope?.State.Session == "paused" && _envelope.State.AvailableActions.Contains("resume")) return EngineOperation.Resume;
     return EngineOperation.Apply;
+  }
+
+  internal static EngineOperation? AutomaticOperation(string? session, IReadOnlyCollection<string> actions)
+  {
+    if (session is "paused" or "active") return null;
+    if (actions.Contains("install")) return EngineOperation.Install;
+    if (actions.Contains("apply")) return EngineOperation.Apply;
+    return null;
   }
 
   private bool CanRun(EngineOperation operation)
@@ -137,6 +148,14 @@ public partial class MainWindow : Window
   {
     if (!AllowsRefresh(_busy, _confirming, _handoff.IsActive)) return false;
     return await DispatchAsync(EngineOperation.Status, bypassAvailability: true);
+  }
+
+  private async Task<bool> DispatchWithInstallFollowUpAsync(EngineOperation operation)
+  {
+    if (!await DispatchAsync(operation)) return false;
+    if (operation == EngineOperation.Install && CanRun(EngineOperation.Apply))
+      return await DispatchAsync(EngineOperation.Apply);
+    return true;
   }
 
   private async Task<bool> DispatchAsync(EngineOperation operation, bool deleteUserThemes = false,
@@ -401,7 +420,8 @@ public partial class MainWindow : Window
     if (_prepareUninstall && !_explicitExit) System.Windows.Application.Current.Shutdown(1);
   }
 
-  private async void PrimaryButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(PrimaryOperation());
+  private async void PrimaryButton_Click(object sender, RoutedEventArgs e) =>
+    await DispatchWithInstallFollowUpAsync(PrimaryOperation());
   private async void PauseButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(EngineOperation.Pause);
   private async void VerifyButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(EngineOperation.Verify);
   private async void RestoreButton_Click(object sender, RoutedEventArgs e) => await DispatchAsync(EngineOperation.Restore);

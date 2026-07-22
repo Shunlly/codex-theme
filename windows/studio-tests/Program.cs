@@ -220,6 +220,14 @@ Assert(MainWindow.AllowsTermination(busy: false), "Idle window termination was v
 Assert(MainWindow.AllowsRefresh(busy: false, confirming: false), "Idle status refresh was unavailable.");
 Assert(!MainWindow.AllowsRefresh(busy: true, confirming: false), "Busy status refresh was allowed.");
 Assert(!MainWindow.AllowsRefresh(busy: false, confirming: true), "Confirmation allowed a concurrent status refresh.");
+Assert(MainWindow.AutomaticOperation("official", new[] { "install" }) == EngineOperation.Install,
+  "Clean startup did not select Install.");
+Assert(MainWindow.AutomaticOperation("official", new[] { "apply" }) == EngineOperation.Apply,
+  "Ready startup did not select Apply.");
+Assert(MainWindow.AutomaticOperation("paused", new[] { "apply", "resume" }) is null,
+  "Paused startup resumed automatically.");
+Assert(MainWindow.AutomaticOperation("active", new[] { "apply", "pause", "restore" }) is null,
+  "Active startup reapplied unnecessarily.");
 var handoffReservation = new HandoffReservation();
 Assert(handoffReservation.TryBegin(busy: false, confirming: false), "Idle handoff could not reserve the owner.");
 Assert(!MainWindow.AllowsDispatch(busy: false, confirming: false, handoffReservation.IsActive),
