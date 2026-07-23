@@ -1371,8 +1371,10 @@ const coordinator = fs.existsSync(coordinatorPath) ? fs.readFileSync(coordinator
 for (const contract of [
   "NamedPipeServerStream", "NamedPipeClientStream", "PipeOptions.CurrentUserOnly",
   '"activate"', '"prepare-uninstall"', "OwnerProcessId", "WaitForExit", "CancellationTokenSource",
-  "RequestReadTimeout", "MonitorClientDisconnectAsync", "responseTimeout",
+  "RequestReadTimeout", "MonitorClientDisconnectAsync", "responseTimeout", "requestParsed",
 ]) contains(coordinator, contract, `single-instance handoff missing: ${contract}`);
+contains(coordinator, "if (!requestParsed) continue;",
+  "a silent named-pipe client can still block the next Studio instance");
 contains(app, "SingleInstanceCoordinator", "App startup does not use the IPC coordinator");
 contains(app, "prepareUninstall ? null : TimeSpan.FromSeconds(15)",
   "interactive prepare-uninstall still has activation's short response deadline");

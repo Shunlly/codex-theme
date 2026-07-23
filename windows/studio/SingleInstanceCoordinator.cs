@@ -117,6 +117,7 @@ internal sealed class SingleInstanceCoordinator : IDisposable
       catch (OperationCanceledException) { return; }
 
       var response = new SingleInstanceResponse(1, Environment.ProcessId, false);
+      var requestParsed = false;
       var handlerCompleted = false;
       var delivered = false;
       CancellationTokenSource? requestCancellation = null;
@@ -134,6 +135,7 @@ internal sealed class SingleInstanceCoordinator : IDisposable
           String.IsNullOrWhiteSpace(request.ExecutablePath)) {
           throw new InvalidDataException("The instance request is invalid.");
         }
+        requestParsed = true;
         requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         disconnectMonitor = MonitorClientDisconnectAsync(pipe, requestCancellation);
         response = await handler(request, requestCancellation.Token);
@@ -148,6 +150,10 @@ internal sealed class SingleInstanceCoordinator : IDisposable
       catch
       {
         if (!handlerCompleted) response = new SingleInstanceResponse(1, Environment.ProcessId, false);
+        // A client that never completed a request may keep the pipe open while
+        // it waits for a response. Close that instance without writing so it
+        // cannot starve the next legitimate Studio invocation.
+        if (!requestParsed) continue;
         try
         {
           using var writer = new StreamWriter(pipe, Utf8, 1024, leaveOpen: true);
