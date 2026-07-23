@@ -7,6 +7,7 @@
 - Pause fails without writing paused state when a running Codex renderer cannot prove live skin removal.
 - Paused upgrades stay paused, while Complete Restore and uninstall remain off after Studio reopens until Install is chosen manually.
 - Windows readiness matches the exact 1.3.1 engine version, and test releases run the native Windows gate before publication.
+- Removed legacy sponsor and promotional metadata from bundled themes and standalone documentation.
 
 ## 1.3.0 — 2026-07-18
 

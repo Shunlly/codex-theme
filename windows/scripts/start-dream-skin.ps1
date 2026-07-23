@@ -70,10 +70,10 @@ function Invoke-DreamSkinStartupCleanup {
   if ($NewManagedCdp) {
     try {
       Stop-DreamSkinCodex -Codex $Codex -AllowForce
-      if ((Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0) {
+      if (@(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0) {
         throw 'Codex processes remain after startup rollback.'
       }
-      if ((Get-DreamSkinPortListenersStrict -Port $Port).Count -ne 0) {
+      if (@(Get-DreamSkinPortListenersStrict -Port $Port).Count -ne 0) {
         throw "The rollback CDP listener on port $Port did not close."
       }
       $cleanupProven = $true
@@ -81,7 +81,7 @@ function Invoke-DreamSkinStartupCleanup {
       Write-Warning 'Startup rollback could not fully close Codex; recovery state was preserved.'
     }
   }
-  if ($injectorStopped -and $null -ne $ClosedCodex) {
+  if ($null -ne $ClosedCodex) {
     $closedCleanupProven = $false
     if (-not $NewManagedCdp -or $cleanupProven) {
       try {
@@ -89,17 +89,17 @@ function Invoke-DreamSkinStartupCleanup {
         $closedMatchesCurrentCandidate = Test-DreamSkinPathEqual `
           -Left $ClosedCodex.Executable -Right $Codex.Executable
         if (-not ($NewManagedCdp -and $closedMatchesCurrentCandidate) -and
-          (Get-DreamSkinCodexProcessesStrict -Codex $ClosedCodex).Count -ne 0) {
+          @(Get-DreamSkinCodexProcessesStrict -Codex $ClosedCodex).Count -ne 0) {
           throw 'The pre-launch closed Codex process appeared or remained during startup rollback.'
         }
         $closedMatchesCurrent = Test-DreamSkinPathEqual -Left $ClosedCodex.Executable -Right $Codex.Executable
         if (-not $NewManagedCdp -and -not $closedMatchesCurrent -and
-          (Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0) {
+          @(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0) {
           throw 'The current Codex process appeared during pre-launch startup rollback.'
         }
         $closedPortMatchesCurrent = [int]$ClosedCodexPort -eq $Port
         if (-not ($NewManagedCdp -and $closedPortMatchesCurrent) -and
-          (Get-DreamSkinPortListenersStrict -Port ([int]$ClosedCodexPort)).Count -ne 0) {
+          @(Get-DreamSkinPortListenersStrict -Port ([int]$ClosedCodexPort)).Count -ne 0) {
           throw "The pre-launch closed CDP listener on port $ClosedCodexPort appeared or remained."
         }
         $closedCleanupProven = $true
@@ -163,14 +163,14 @@ try {
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.PackageRoot -Right $currentCodex.PackageRoot) -and
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.Executable -Right $currentCodex.Executable))
   if ($null -ne $savedPathCandidate -and $null -eq $savedCodex -and -not $candidateMatchesCurrent) {
-    $unverifiedSavedRunning = (Get-DreamSkinCodexProcesses -Codex $savedPathCandidate).Count -gt 0
+    $unverifiedSavedRunning = @(Get-DreamSkinCodexProcesses -Codex $savedPathCandidate).Count -gt 0
     $unverifiedSavedOwnsPort = Test-DreamSkinCodexPortOwner -Port $Port -Codex $savedPathCandidate
     if ($unverifiedSavedRunning -or $unverifiedSavedOwnsPort) {
       throw 'The saved Codex path is still active but no longer matches a registered OpenAI.Codex package. Close it manually; state was preserved.'
     }
   }
 
-  $currentProcesses = Get-DreamSkinCodexProcesses -Codex $currentCodex
+  $currentProcesses = @(Get-DreamSkinCodexProcesses -Codex $currentCodex)
   $codexToStop = $currentCodex
   $closedCodex = $null
   $closedCodexPort = $null
@@ -178,7 +178,7 @@ try {
   $savedIsDifferent = [bool]($null -ne $savedCodex -and
     -not (Test-DreamSkinPathEqual -Left $savedCodex.Executable -Right $currentCodex.Executable))
   if ($savedIsDifferent) {
-    $savedProcesses = Get-DreamSkinCodexProcesses -Codex $savedCodex
+    $savedProcesses = @(Get-DreamSkinCodexProcesses -Codex $savedCodex)
     $savedOwnsPort = Test-DreamSkinCodexPortOwner -Port $Port -Codex $savedCodex
     if ($currentProcesses.Count -gt 0 -and ($savedProcesses.Count -gt 0 -or $savedOwnsPort)) {
       throw 'Multiple registered Codex package versions are active. Close them manually before starting Dream Skin.'
@@ -200,11 +200,11 @@ try {
     }
   }
   $debugReady = $null -ne $cdpIdentity
-  $codexProcesses = if (Test-DreamSkinPathEqual -Left $codexToStop.Executable -Right $currentCodex.Executable) {
+  $codexProcesses = @(if (Test-DreamSkinPathEqual -Left $codexToStop.Executable -Right $currentCodex.Executable) {
     $currentProcesses
   } else {
     Get-DreamSkinCodexProcesses -Codex $codexToStop
-  }
+  })
   if (-not $debugReady -and $codexProcesses.Count -gt 0) {
     $restartAuthorized = [bool]$RestartExisting
     if (-not $restartAuthorized -and $PromptRestart) {
@@ -335,12 +335,12 @@ try {
           $foregroundClosedMatchesCurrent = Test-DreamSkinPathEqual `
             -Left $foregroundCleanupClosedCodex.Executable -Right $codex.Executable
           if (-not ($foregroundCleanupNewManagedCdp -and $foregroundClosedMatchesCurrent) -and
-            (Get-DreamSkinCodexProcessesStrict -Codex $foregroundCleanupClosedCodex).Count -ne 0) {
+            @(Get-DreamSkinCodexProcessesStrict -Codex $foregroundCleanupClosedCodex).Count -ne 0) {
             throw 'Foreground cleanup closed-session identity changed while the operation lock was released.'
           }
           $foregroundClosedPortMatchesCurrent = [int]$foregroundCleanupClosedCodexPort -eq $Port
           if (-not ($foregroundCleanupNewManagedCdp -and $foregroundClosedPortMatchesCurrent) -and
-            (Get-DreamSkinPortListenersStrict -Port ([int]$foregroundCleanupClosedCodexPort)).Count -ne 0) {
+            @(Get-DreamSkinPortListenersStrict -Port ([int]$foregroundCleanupClosedCodexPort)).Count -ne 0) {
             throw 'Foreground cleanup closed-session port changed while the operation lock was released.'
           }
         }

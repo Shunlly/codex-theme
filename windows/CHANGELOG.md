@@ -4,6 +4,8 @@
 
 - Studio automatically installs and applies the bundled default theme on first launch.
 - Windows interactive setup launches Studio by default.
+- Windows PowerShell 5.1 entrypoints with non-ASCII source now carry an explicit UTF-8 BOM, so the one-click path loads reliably on the supported shell.
+- Native config publication now pins the staged candidate through final proof and fails closed when an external namespace move or delete changes the target; the external result and recovery data are retained instead of being overwritten.
 - Existing restart consent, Pause, Complete Restore, and uninstall safety remain unchanged.
 
 ## 1.3.0 — 2026-07-18

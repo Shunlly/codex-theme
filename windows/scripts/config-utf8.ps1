@@ -55,7 +55,9 @@ public static class DreamSkinConfigNative
     private const uint CREATE_NEW = 1;
     private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const uint FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+    private const uint FILE_ATTRIBUTE_TEMPORARY = 0x00000100;
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
     private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
     private const uint ERROR_FILE_NOT_FOUND = 2;
@@ -357,6 +359,34 @@ public static class DreamSkinConfigNative
         }
     }
 
+    private static SafeFileHandle CreateParentNamespaceLock(string parentPath, string lockName)
+    {
+        string lockPath = Path.Combine(parentPath, lockName);
+        SafeFileHandle handle = CreateFileW(NormalizePath(lockPath),
+            FILE_READ_ATTRIBUTES | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero, CREATE_NEW,
+            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_DELETE_ON_CLOSE,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new IOException("Could not hold the Dream Skin parent namespace lock: " + parentPath,
+                new Win32Exception(error));
+        }
+        try
+        {
+            Inspect(handle, lockPath);
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
     private static void WriteAll(SafeFileHandle handle, byte[] bytes, string path)
     {
         int offset = 0;
@@ -437,19 +467,24 @@ public static class DreamSkinConfigNative
         return difference == 0;
     }
 
-    private static void RenameRelative(SafeFileHandle file, SafeFileHandle parent, string fileName, uint flags)
+    private static void RenameRelative(SafeFileHandle file, SafeFileHandle parent,
+        string parentPath, string fileName, uint flags)
     {
-        byte[] name = Encoding.Unicode.GetBytes(fileName);
+        if (!ComparablePath(ResolvedPath(parent, parentPath)).Equals(
+            ComparablePath(parentPath), StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Dream Skin rename parent identity changed: " + parentPath);
+        string destinationPath = NormalizePath(Path.Combine(parentPath, fileName));
+        byte[] name = Encoding.Unicode.GetBytes(destinationPath);
         int rootOffset = IntPtr.Size == 8 ? 8 : 4;
         int lengthOffset = rootOffset + IntPtr.Size;
         int nameOffset = lengthOffset + 4;
-        int size = nameOffset + name.Length;
+        int size = checked(nameOffset + name.Length + 2);
         IntPtr buffer = Marshal.AllocHGlobal(size);
         try
         {
             for (int index = 0; index < size; index++) Marshal.WriteByte(buffer, index, 0);
             Marshal.WriteInt32(buffer, 0, unchecked((int)flags));
-            Marshal.WriteIntPtr(buffer, rootOffset, parent.DangerousGetHandle());
+            Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
             Marshal.WriteInt32(buffer, lengthOffset, name.Length);
             Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
             if (!SetFileInformationByHandle(file, FILE_INFO_BY_HANDLE_CLASS.FileRenameInfoEx,
@@ -514,12 +549,14 @@ public static class DreamSkinConfigNative
         private readonly string fileName;
         private readonly string candidateName;
         private readonly string temporaryName;
+        private readonly string parentLockName;
         private readonly string parentIdentity;
         private readonly string targetIdentity;
         private readonly bool targetExisted;
         private readonly int expectedLength;
         private readonly byte[] expectedHash;
         private SafeFileHandle parent;
+        private SafeFileHandle parentLock;
         private SafeFileHandle target;
         private SafeFileHandle temporary;
         private bool temporaryAtCandidatePath;
@@ -539,8 +576,10 @@ public static class DreamSkinConfigNative
             string nonce = Guid.NewGuid().ToString("N");
             candidateName = "." + nonce + ".candidate";
             temporaryName = "." + nonce + ".tmp";
+            parentLockName = "." + nonce + ".lock";
             ValidateComponentLength(candidateName);
             ValidateComponentLength(temporaryName);
+            ValidateComponentLength(parentLockName);
             expectedLength = bytes.Length;
             expectedHash = Hash(bytes);
             parentIdentity = null;
@@ -551,10 +590,12 @@ public static class DreamSkinConfigNative
                 parent = OpenStable(parentPath, FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
                     FILE_SHARE_READ | FILE_SHARE_WRITE, true);
                 parentIdentity = Identity(Inspect(parent, parentPath));
+                parentLock = CreateParentNamespaceLock(parentPath, parentLockName);
+                AssertParentUnchanged();
 
                 bool missing;
                 target = TryOpenStableFile(path, FILE_READ_ATTRIBUTES | DELETE,
-                    FILE_SHARE_READ, out missing);
+                    FILE_SHARE_READ | FILE_SHARE_DELETE, out missing);
                 targetExisted = !missing;
                 targetIdentity = targetExisted ? Identity(Inspect(target, path)) : null;
 
@@ -573,7 +614,7 @@ public static class DreamSkinConfigNative
                 }
                 temporaryAtCandidatePath = true;
                 Inspect(temporary, candidatePath);
-                RenameRelative(temporary, parent, temporaryName, 0);
+                RenameRelative(temporary, parent, parentPath, temporaryName, 0);
                 temporaryAtCandidatePath = false;
                 temporaryAtInternalName = true;
                 WriteAll(temporary, bytes, temporaryName);
@@ -583,12 +624,28 @@ public static class DreamSkinConfigNative
             }
             catch (Exception error)
             {
-                try { Dispose(); }
-                catch (Exception cleanupError)
+                Exception rollbackError = null;
+                bool rollbackConfirmed = true;
+                if (parent != null && targetExisted && target != null &&
+                    !target.IsInvalid && !target.IsClosed)
                 {
+                    rollbackConfirmed = TryRestoreOriginal(out rollbackError);
+                    RollbackConfirmed = rollbackConfirmed;
+                }
+                Exception cleanupError = null;
+                try { Dispose(); }
+                catch (Exception errorDuringCleanup) { cleanupError = errorDuringCleanup; }
+                if (!rollbackConfirmed)
+                {
+                    var failures = new System.Collections.Generic.List<Exception> { error };
+                    if (rollbackError != null) failures.Add(rollbackError);
+                    if (cleanupError != null) failures.Add(cleanupError);
+                    throw new IOException("Atomic write preparation failed and original target rollback was unconfirmed.",
+                        new AggregateException(failures));
+                }
+                if (cleanupError != null)
                     throw new IOException("Atomic write preparation and cleanup both failed.",
                         new AggregateException(error, cleanupError));
-                }
                 throw;
             }
         }
@@ -644,13 +701,11 @@ public static class DreamSkinConfigNative
                     if (targetExisted)
                     {
                         AssertCommitted();
-                        RenameRelative(target, parent, fileName,
-                            FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS);
-                        temporaryAtTarget = false;
+                        throw new IOException("Published Dream Skin config rollback is unconfirmed; the verified candidate was retained.");
                     }
                     else
                     {
-                        RenameRelative(temporary, parent, temporaryName, 0);
+                        RenameRelative(temporary, parent, parentPath, temporaryName, 0);
                         temporaryAtTarget = false;
                         temporaryAtInternalName = true;
                     }
@@ -677,12 +732,12 @@ public static class DreamSkinConfigNative
                 AssertUnchanged();
                 if (targetExisted)
                 {
-                    RenameRelative(temporary, parent, fileName,
+                    RenameRelative(temporary, parent, parentPath, fileName,
                         FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS);
                 }
                 else
                 {
-                    RenameRelative(temporary, parent, fileName, 0);
+                    RenameRelative(temporary, parent, parentPath, fileName, 0);
                 }
                 temporaryAtInternalName = false;
                 temporaryAtTarget = true;
@@ -734,6 +789,7 @@ public static class DreamSkinConfigNative
             }
             if (temporary != null) temporary.Dispose();
             if (target != null) target.Dispose();
+            if (parentLock != null) parentLock.Dispose();
             if (parent != null) parent.Dispose();
             if (cleanupError != null) throw cleanupError;
         }
@@ -901,30 +957,44 @@ public static class DreamSkinConfigNative
         using (SafeFileHandle parent = OpenStable(directory, FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE, true))
         {
-            bool archiveMissing;
-            using (SafeFileHandle archive = TryOpenStableEntry(fullArchivePath,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, out archiveMissing))
+            string parentIdentity = Identity(Inspect(parent, directory));
+            using (SafeFileHandle parentLock = CreateParentNamespaceLock(
+                directory, "." + Guid.NewGuid().ToString("N") + ".lock"))
             {
-                if (!archiveMissing)
-                    throw new IOException("Dream Skin state quarantine destination already exists.");
-            }
-            bool missing;
-            using (SafeFileHandle file = TryOpenStableFile(fullPath,
-                GENERIC_READ | FILE_READ_ATTRIBUTES | DELETE, FILE_SHARE_READ, out missing))
-            {
-                if (missing) throw new IOException("Expected Dream Skin state disappeared before quarantine.");
-                if (Identity(Inspect(file, fullPath)) != expectedIdentity)
-                    throw new IOException("Dream Skin state identity changed before quarantine.");
-                byte[] actual = ReadAll(file, fullPath);
-                if (!EqualBytes(actual, expectedBytes))
-                    throw new IOException("Dream Skin state bytes changed before quarantine.");
-                RenameRelative(file, parent, archiveName, 0);
-                if (!ComparablePath(ResolvedPath(file, fullPath)).Equals(
-                    ComparablePath(fullArchivePath), StringComparison.OrdinalIgnoreCase))
-                    throw new IOException("Dream Skin state quarantine resolved to an unexpected path.");
-                if (Identity(Inspect(file, fullArchivePath)) != expectedIdentity ||
-                    !EqualBytes(ReadAll(file, fullArchivePath), expectedBytes))
-                    throw new IOException("Dream Skin state identity or bytes changed during quarantine.");
+                if (!ComparablePath(ResolvedPath(parent, directory)).Equals(
+                    ComparablePath(directory), StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Dream Skin state quarantine parent identity changed: " + directory);
+                using (SafeFileHandle currentParent = OpenStable(directory,
+                    FILE_TRAVERSE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, true))
+                {
+                    if (Identity(Inspect(currentParent, directory)) != parentIdentity)
+                        throw new IOException("Dream Skin state quarantine parent identity changed: " + directory);
+                }
+                bool archiveMissing;
+                using (SafeFileHandle archive = TryOpenStableEntry(fullArchivePath,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, out archiveMissing))
+                {
+                    if (!archiveMissing)
+                        throw new IOException("Dream Skin state quarantine destination already exists.");
+                }
+                bool missing;
+                using (SafeFileHandle file = TryOpenStableFile(fullPath,
+                    GENERIC_READ | FILE_READ_ATTRIBUTES | DELETE, FILE_SHARE_READ, out missing))
+                {
+                    if (missing) throw new IOException("Expected Dream Skin state disappeared before quarantine.");
+                    if (Identity(Inspect(file, fullPath)) != expectedIdentity)
+                        throw new IOException("Dream Skin state identity changed before quarantine.");
+                    byte[] actual = ReadAll(file, fullPath);
+                    if (!EqualBytes(actual, expectedBytes))
+                        throw new IOException("Dream Skin state bytes changed before quarantine.");
+                    RenameRelative(file, parent, directory, archiveName, 0);
+                    if (!ComparablePath(ResolvedPath(file, fullPath)).Equals(
+                        ComparablePath(fullArchivePath), StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("Dream Skin state quarantine resolved to an unexpected path.");
+                    if (Identity(Inspect(file, fullArchivePath)) != expectedIdentity ||
+                        !EqualBytes(ReadAll(file, fullArchivePath), expectedBytes))
+                        throw new IOException("Dream Skin state identity or bytes changed during quarantine.");
+                }
             }
         }
     }
@@ -1071,10 +1141,12 @@ function Get-DreamSkinStableFileSnapshotCore {
       throw "Dream Skin config path resolves outside its trusted structure: $fullPath"
     }
   }
+  $snapshotBytes = $null
+  if ($null -ne $native) { $snapshotBytes = [byte[]]$native.Bytes }
   return [pscustomobject]@{
     FullPath = $fullPath
     Exists = $exists
-    Bytes = if ($null -ne $native) { [byte[]]$native.Bytes } else { $null }
+    Bytes = $snapshotBytes
     Identity = if ($null -ne $native) { $native.Identity } else { $null }
     Components = @(Get-DreamSkinStablePathComponentSnapshots -Path $fullPath)
   }
@@ -1116,11 +1188,19 @@ function Get-DreamSkinStableFileSnapshot {
 
 function ConvertFrom-DreamSkinUtf8Bytes {
   param(
-    [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes,
+    [Parameter(Mandatory = $true)][AllowNull()][object]$Bytes,
     [Parameter(Mandatory = $true)][string]$Path
   )
 
   try {
+    if ($null -eq $Bytes) {
+      if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Cannot decode a missing config file: $Path"
+      }
+      $Bytes = [byte[]]@()
+    } else {
+      $Bytes = [byte[]]$Bytes
+    }
     $offset = if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { 3 } else { 0 }
     $content = $script:DreamSkinUtf8NoBom.GetString($Bytes, $offset, $Bytes.Length - $offset)
     if ($content.IndexOf([char]0) -ge 0) {
@@ -1134,12 +1214,15 @@ function ConvertFrom-DreamSkinUtf8Bytes {
 
 function Test-DreamSkinBytesEqual {
   param(
-    [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Left,
-    [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Right
+    [Parameter(Mandatory = $true)][AllowNull()][object]$Left,
+    [Parameter(Mandatory = $true)][AllowNull()][object]$Right
   )
-  if ($Left.Length -ne $Right.Length) { return $false }
-  for ($index = 0; $index -lt $Left.Length; $index++) {
-    if ($Left[$index] -ne $Right[$index]) { return $false }
+  if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+  $leftBytes = [byte[]]$Left
+  $rightBytes = [byte[]]$Right
+  if ($leftBytes.Length -ne $rightBytes.Length) { return $false }
+  for ($index = 0; $index -lt $leftBytes.Length; $index++) {
+    if ($leftBytes[$index] -ne $rightBytes[$index]) { return $false }
   }
   return $true
 }
@@ -1147,14 +1230,15 @@ function Test-DreamSkinBytesEqual {
 function Assert-DreamSkinFileUnchanged {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [AllowNull()][byte[]]$ExpectedBytes
+    [AllowNull()][object]$ExpectedBytes
   )
   if ($null -eq $ExpectedBytes) {
     if (Test-Path -LiteralPath $Path) { throw "File changed during the operation; retry without other writers: $Path" }
     return
   }
   if (-not (Test-Path -LiteralPath $Path)) { throw "File disappeared during the operation; retry: $Path" }
-  $currentBytes = [System.IO.File]::ReadAllBytes($Path)
+  $ExpectedBytes = [byte[]]$ExpectedBytes
+  $currentBytes = (Get-DreamSkinStableFileSnapshot -Path $Path).Bytes
   if (-not (Test-DreamSkinBytesEqual -Left $ExpectedBytes -Right $currentBytes)) {
     throw "File changed during the operation; retry without other writers: $Path"
   }
@@ -1188,7 +1272,7 @@ function Write-DreamSkinUtf8FileAtomically {
     [string]$Content,
 
     [AllowNull()]
-    [byte[]]$ExpectedBytes,
+    [object]$ExpectedBytes,
 
     [AllowNull()]
     $ExpectedSnapshot,
@@ -1211,13 +1295,14 @@ function Write-DreamSkinBytesAtomically {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes,
-    [AllowNull()][byte[]]$ExpectedBytes,
+    [Parameter(Mandatory = $true)][AllowNull()][object]$Bytes,
+    [AllowNull()][object]$ExpectedBytes,
     [AllowNull()]$ExpectedSnapshot,
     [AllowNull()]$PreparedTransaction
   )
 
   $fullPath = [DreamSkinConfigNative]::NormalizePath($Path)
+  if ($null -eq $Bytes) { $Bytes = [byte[]]@() } else { $Bytes = [byte[]]$Bytes }
   if ($PSBoundParameters.ContainsKey('ExpectedSnapshot')) {
     if ($null -eq $ExpectedSnapshot -or
       -not $fullPath.Equals($ExpectedSnapshot.FullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -1299,7 +1384,7 @@ function Assert-DreamSkinTomlLineEditingSafe {
   if ($Content.Contains('"""') -or $Content.Contains("'''")) {
     throw 'Refusing to rewrite TOML containing multiline strings; use single-line values before installing Dream Skin.'
   }
-  foreach ($match in [regex]::Matches($Content, '(?m)^[^\r\n]*=[\t ]*\[[^\r\n]*$')) {
+  foreach ($match in [regex]::Matches($Content, '(?m)^[^\r\n]*=[\t ]*\[[^\r\n]*\r?$')) {
     if ((Get-DreamSkinTomlArrayBracketBalance -Line $match.Value) -ne 0) {
       throw 'Refusing to rewrite TOML containing multiline arrays; use single-line arrays before installing Dream Skin.'
     }
@@ -1391,7 +1476,7 @@ function Set-DreamSkinSectionSetting {
   param(
     [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Body,
     [Parameter(Mandatory = $true)][string]$Key,
-    [AllowNull()][string]$Line,
+    [AllowNull()][object]$Line,
     [Parameter(Mandatory = $true)][string]$NewLine
   )
 
@@ -1402,7 +1487,7 @@ function Set-DreamSkinSectionSetting {
     throw "Refusing to rewrite duplicate '$Key' entries in the [desktop] section."
   }
   if ($null -eq $Line) { return $matcher.Replace($Body, '', 1) }
-  $normalizedLine = $Line.TrimEnd("`r", "`n") + $NewLine
+  $normalizedLine = ([string]$Line).TrimEnd("`r", "`n") + $NewLine
   if ($matcher.IsMatch($Body)) {
     $literalReplacement = $normalizedLine.Replace('$', '$$')
     return $matcher.Replace($Body, $literalReplacement, 1)
@@ -1837,17 +1922,19 @@ function Publish-DreamSkinConfigBackupArchive {
   }
 
   $backupBytes = [IO.File]::ReadAllBytes($BackupPath)
-  $archiveBytes = if (Test-Path -LiteralPath $ArchivePath -PathType Leaf) {
-    [IO.File]::ReadAllBytes($ArchivePath)
-  } else { $null }
+  $archiveBytes = $null
+  if (Test-Path -LiteralPath $ArchivePath -PathType Leaf) {
+    $archiveBytes = [IO.File]::ReadAllBytes($ArchivePath)
+  }
   Write-DreamSkinBytesAtomically -Path $ArchivePath -Bytes $backupBytes -ExpectedBytes $archiveBytes
 
   $hasMarker = Test-Path -LiteralPath $backupMarkerPath -PathType Leaf
   if ($hasMarker) {
     $markerBytes = [IO.File]::ReadAllBytes($backupMarkerPath)
-    $archiveMarkerBytes = if (Test-Path -LiteralPath $archiveMarkerPath -PathType Leaf) {
-      [IO.File]::ReadAllBytes($archiveMarkerPath)
-    } else { $null }
+    $archiveMarkerBytes = $null
+    if (Test-Path -LiteralPath $archiveMarkerPath -PathType Leaf) {
+      $archiveMarkerBytes = [IO.File]::ReadAllBytes($archiveMarkerPath)
+    }
     Write-DreamSkinBytesAtomically -Path $archiveMarkerPath -Bytes $markerBytes -ExpectedBytes $archiveMarkerBytes
   } elseif (Test-Path -LiteralPath $archiveMarkerPath) {
     Remove-Item -LiteralPath $archiveMarkerPath -Force -ErrorAction Stop

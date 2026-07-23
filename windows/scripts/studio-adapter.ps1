@@ -53,7 +53,7 @@ $PrivateNodePath = Join-Path $EngineRoot 'runtime\node.exe'
 function Copy-DreamSkinStudioState {
   param([Parameter(Mandatory = $true)][object]$State, [bool]$RequiresRestart = $State.requiresRestart)
   return New-DreamSkinStudioState -Install "$($State.install)" -Codex "$($State.codex)" `
-    -Session "$($State.session)" -Operation 'idle' -ThemeName $State.themeName `
+    -Session "$($State.session)" -Operation "$($State.operation)" -ThemeName $State.themeName `
     -RequiresRestart $RequiresRestart -Verified $State.verified -AvailableActions @($State.availableActions)
 }
 

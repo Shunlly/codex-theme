@@ -3,13 +3,14 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 const injectorPath = path.join(root, "scripts", "injector.mjs");
-const temporary = await fs.mkdtemp("/tmp/codex-dream-skin-windows-anchor-");
+const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "codex-dream-skin-windows-anchor-"));
 let browserId = "Browser-A";
 let targets = [];
 let closeAnchorOnList = false;

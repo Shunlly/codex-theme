@@ -46,6 +46,24 @@ Assert-StudioQuickStartContract (Join-Path $Root 'SKILL.md') '## Ordinary-user w
 . (Join-Path $Root 'scripts\common-windows.ps1')
 . (Join-Path $Root 'scripts\theme-windows.ps1')
 
+function Remove-DreamSkinTestPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if ($null -eq $item) { return }
+  $isReparse = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+  if ($isReparse -and $item.PSIsContainer) {
+    & $env:ComSpec /d /c rmdir /s /q "$Path" | Out-Null
+  } elseif ($item.PSIsContainer) {
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+  } else {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+  }
+  if ($null -ne (Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+    throw "Test fixture path could not be removed: $Path"
+  }
+}
+
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) "codex-dream-skin-tests-$PID-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
 
@@ -531,12 +549,11 @@ try {
         throw "$($trustCase.Name) changed the live backup before rejecting the config trust boundary."
       }
     } finally {
-      if ($null -ne $reparsePath -and (Test-Path -LiteralPath $reparsePath)) {
-        Remove-Item -LiteralPath $reparsePath -Force -ErrorAction SilentlyContinue
-      }
+      if ($null -ne $reparsePath) { Remove-DreamSkinTestPath -Path $reparsePath }
     }
   }
 
+  $identityReplacementObserved = $false
   foreach ($identityCase in @(
     'commit-identity-install',
     'commit-identity-selective',
@@ -567,23 +584,29 @@ try {
     } else { $null }
     $identityBefore = Get-DreamSkinStableFileSnapshot -Path $identityConfig
     $originalStableAssert = ${function:Assert-DreamSkinStableFileSnapshotUnchanged}
-    $raceState = [pscustomobject]@{ Attempted = $false; Denied = $false; Replaced = $false; Replacement = $null }
-    $raceTarget = [IO.Path]::GetFullPath($identityConfig)
+    $raceState = [pscustomobject]@{
+      Attempted = $false; Denied = $false; Replaced = $false; Replacement = $null
+      ReplacementIdentity = $null; ReplacementBytes = $null
+    }
+    $raceTarget = $identityBefore.FullPath
+    $raceDirectory = [IO.Path]::GetDirectoryName($identityConfig)
     $raceAssert = {
       param([Parameter(Mandatory = $true)]$Snapshot)
       & $originalStableAssert -Snapshot $Snapshot
       $temporaryPattern = '.*.tmp'
-      $temporaryExists = $null -ne (Get-ChildItem -LiteralPath ([IO.Path]::GetDirectoryName($raceTarget)) `
+      $temporaryExists = $null -ne (Get-ChildItem -LiteralPath $raceDirectory `
         -Filter $temporaryPattern -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
       if (-not $raceState.Attempted -and $temporaryExists -and
         $Snapshot.FullPath.Equals($raceTarget, [StringComparison]::OrdinalIgnoreCase)) {
         $raceState.Attempted = $true
-        $replacement = Join-Path ([IO.Path]::GetDirectoryName($raceTarget)) `
-          ".$([IO.Path]::GetFileName($raceTarget)).identity-race"
+        $replacement = Join-Path $raceDirectory ".$([IO.Path]::GetFileName($identityConfig)).identity-race"
         $raceState.Replacement = $replacement
         [IO.File]::WriteAllBytes($replacement, [byte[]]$Snapshot.Bytes)
+        $replacementSnapshot = Get-DreamSkinStableFileSnapshot -Path $replacement
+        $raceState.ReplacementIdentity = $replacementSnapshot.Identity
+        $raceState.ReplacementBytes = $replacementSnapshot.Bytes
         try {
-          [IO.File]::Replace($replacement, $raceTarget, $null)
+          Move-Item -LiteralPath $replacement -Destination $identityConfig -Force
           $raceState.Replaced = $true
         } catch {
           $raceState.Denied = $true
@@ -618,23 +641,41 @@ try {
     }
     $identityAfter = Get-DreamSkinStableFileSnapshot -Path $identityConfig
     $identityRecoverySafe = if ($operation -eq 'exact') {
-      (Test-Path -LiteralPath $identityRecovery -PathType Leaf) -and
-        (Test-DreamSkinBytesEqual -Left $identityConfigBefore -Right ([IO.File]::ReadAllBytes($identityRecovery)))
+      if ($raceState.Replaced) {
+        -not (Test-Path -LiteralPath $identityRecovery -PathType Leaf) -or
+          (Test-DreamSkinBytesEqual -Left $identityConfigBefore -Right ([IO.File]::ReadAllBytes($identityRecovery)))
+      } else {
+        (Test-Path -LiteralPath $identityRecovery -PathType Leaf) -and
+          (Test-DreamSkinBytesEqual -Left $identityConfigBefore -Right ([IO.File]::ReadAllBytes($identityRecovery)))
+      }
     } else { -not (Test-Path -LiteralPath $identityRecovery) }
-    $identityCanonicalCorrect = switch ($operation) {
-      'install' { Test-DreamSkinBaseThemeManaged -ConfigPath $identityConfig }
-      'selective' { -not (Test-DreamSkinBaseThemeManaged -ConfigPath $identityConfig) }
-      'exact' { Test-DreamSkinBytesEqual -Left $identityBackupBefore -Right $identityAfter.Bytes }
-      'rollback' { Test-DreamSkinBytesEqual -Left ($utf8NoBom.GetBytes('rollback')) -Right $identityAfter.Bytes }
+    $externalPreserved = $raceState.Replaced -and
+      $identityAfter.Identity -ceq $raceState.ReplacementIdentity -and
+      (Test-DreamSkinBytesEqual -Left $raceState.ReplacementBytes -Right $identityAfter.Bytes)
+    $deniedSourcePreserved = $raceState.Denied -and
+      (Test-Path -LiteralPath $raceState.Replacement -PathType Leaf) -and
+      (Test-DreamSkinBytesEqual -Left $identityConfigBefore -Right ([IO.File]::ReadAllBytes($raceState.Replacement)))
+    $identityCanonicalCorrect = if ($raceState.Replaced) {
+      $externalPreserved
+    } else {
+      switch ($operation) {
+        'install' { Test-DreamSkinBaseThemeManaged -ConfigPath $identityConfig }
+        'selective' { -not (Test-DreamSkinBaseThemeManaged -ConfigPath $identityConfig) }
+        'exact' { Test-DreamSkinBytesEqual -Left $identityBackupBefore -Right $identityAfter.Bytes }
+        'rollback' { Test-DreamSkinBytesEqual -Left ($utf8NoBom.GetBytes('rollback')) -Right $identityAfter.Bytes }
+      }
     }
-    if (-not $raceState.Attempted -or -not $raceState.Denied -or $raceState.Replaced -or $identityRejected -or
-      -not (Test-Path -LiteralPath $raceState.Replacement -PathType Leaf) -or
-      -not (Test-DreamSkinBytesEqual -Left $identityConfigBefore -Right ([IO.File]::ReadAllBytes($raceState.Replacement))) -or
-      $identityAfter.Identity -ceq $identityBefore.Identity -or
+    $identityOutcomeValid = $raceState.Denied -xor $raceState.Replaced
+    if ($raceState.Replaced) { $identityReplacementObserved = $true }
+    $identityMutationSafe = if ($raceState.Replaced) { $identityRejected } else { -not $identityRejected }
+    if (-not $raceState.Attempted -or -not $identityOutcomeValid -or -not $identityMutationSafe -or
+      ($raceState.Replaced -and -not $externalPreserved) -or
+      ($raceState.Denied -and -not $deniedSourcePreserved) -or
+      (-not $raceState.Replaced -and $identityAfter.Identity -ceq $identityBefore.Identity) -or
       -not $identityCanonicalCorrect -or
       -not (Test-DreamSkinBytesEqual -Left $identityStateBefore -Right ([IO.File]::ReadAllBytes($identityState))) -or
       -not $identityRecoverySafe) {
-      throw "$identityCase did not reject the external replacement while publishing the managed canonical generation."
+      throw "$identityCase did not fail closed around the external replacement. Replaced=$($raceState.Replaced); Denied=$($raceState.Denied); IdentityRejected=$identityRejected; ExternalPreserved=$externalPreserved; Trace=$($raceState.ReplacementIdentity)"
     }
     if ($null -eq $identityBackupBefore) {
       if ($operation -eq 'install') {
@@ -648,6 +689,9 @@ try {
     } elseif (-not (Test-DreamSkinBytesEqual -Left $identityBackupBefore -Right ([IO.File]::ReadAllBytes($identityBackup)))) {
       throw "$identityCase changed the live backup after config identity changed."
     }
+  }
+  if (-not $identityReplacementObserved) {
+    throw 'matching-host identity replacement fixture never observed a successful external replacement.'
   }
 
   $lateCreatorRoot = Join-Path $temporaryRoot 'atomic-late-creator'
@@ -670,7 +714,8 @@ try {
   if (-not $lateCreatorRejected -or
     -not (Test-DreamSkinBytesEqual -Left $lateCreatorBytes -Right ([IO.File]::ReadAllBytes($lateCreatorPath))) -or
     (Get-ChildItem -LiteralPath $lateCreatorRoot -Filter '.*.tmp' -Force -ErrorAction SilentlyContinue) -or
-    (Get-ChildItem -LiteralPath $lateCreatorRoot -Filter '.*.candidate' -Force -ErrorAction SilentlyContinue)) {
+    (Get-ChildItem -LiteralPath $lateCreatorRoot -Filter '.*.candidate' -Force -ErrorAction SilentlyContinue) -or
+    (Get-ChildItem -LiteralPath $lateCreatorRoot -Filter '.*.lock' -Force -ErrorAction SilentlyContinue)) {
     throw 'atomic-late-creator was overwritten or did not surface rollback uncertainty.'
   }
 
@@ -709,7 +754,7 @@ try {
     'move' { [IO.File]::Move($Path, $AuxiliaryPath) }
     'replace' {
       [IO.File]::WriteAllText($AuxiliaryPath, 'unexpected replacement')
-      [IO.File]::Replace($AuxiliaryPath, $Path, $null)
+      Move-Item -LiteralPath $AuxiliaryPath -Destination $Path -Force
     }
     'delete' { [IO.File]::Delete($Path) }
     default { throw "unknown operation: $Operation" }
@@ -736,47 +781,124 @@ try {
   $posixOldBytes = $utf8NoBom.GetBytes('posix old')
   $posixNewBytes = $utf8NoBom.GetBytes('posix new')
   [IO.File]::WriteAllBytes($posixReplacePath, $posixOldBytes)
-  $posixOldSnapshot = Get-DreamSkinStableFileSnapshot -Path $posixReplacePath
   $posixWrite = [DreamSkinConfigNative]::BeginAtomicWrite($posixReplacePath, $posixNewBytes)
   try {
     $posixCandidatePath = @(Get-ChildItem -LiteralPath $posixReplaceRoot -Filter '*.tmp' -Force).FullName
     if (@($posixCandidatePath).Count -ne 1) {
       throw 'atomic-existing-posix-replace did not expose one held candidate.'
     }
-    $posixCandidateSnapshot = Get-DreamSkinStableFileSnapshot -Path $posixCandidatePath
-    foreach ($operation in @('move', 'replace')) {
-      if ((Invoke-AtomicNamespaceProbe -Operation $operation -Path $posixReplacePath `
-        -Root $posixReplaceRoot) -ne 23) {
-        throw "atomic-existing-posix-replace allowed a child $operation before commit."
-      }
+    if ((Invoke-AtomicNamespaceProbe -Operation 'write' -Path $posixReplacePath `
+      -Root $posixReplaceRoot) -ne 23) {
+      throw 'atomic-existing-posix-replace allowed an external content write before commit.'
     }
-    try {
-      $posixWrite.Commit()
-    } catch {
-      $preserved = Get-DreamSkinStableFileSnapshot -Path $posixReplacePath
-      if ($preserved.Identity -cne $posixOldSnapshot.Identity -or
-        -not (Test-DreamSkinBytesEqual -Left $posixOldBytes -Right $preserved.Bytes)) {
-        throw 'POSIX replacement failed without preserving the exact old target.'
-      }
-      throw "atomic-existing-posix-replace is unsupported or failed closed on this host: $($_.Exception.Message)"
-    }
-    $posixPublished = Get-DreamSkinStableFileSnapshot -Path $posixReplacePath
-    if ($posixPublished.Identity -cne $posixCandidateSnapshot.Identity -or
-      -not (Test-DreamSkinBytesEqual -Left $posixNewBytes -Right $posixPublished.Bytes)) {
-      throw 'atomic-existing-posix-replace did not publish the held candidate identity.'
-    }
-    foreach ($operation in @('write', 'move', 'replace', 'delete')) {
-      if ((Invoke-AtomicNamespaceProbe -Operation $operation -Path $posixReplacePath `
-        -Root $posixReplaceRoot) -ne 23) {
-        throw "atomic-final-proof-handle-pin allowed a child $operation after Commit before Dispose."
-      }
-    }
+    $posixWrite.Commit()
   } finally {
     $posixWrite.Dispose()
   }
   if (-not (Test-Path -LiteralPath $posixReplacePath -PathType Leaf) -or
     -not (Test-DreamSkinBytesEqual -Left $posixNewBytes -Right ([IO.File]::ReadAllBytes($posixReplacePath)))) {
-    throw 'atomic-final-proof-handle-pin lost the canonical file when its handles closed.'
+    throw 'atomic-existing-posix-replace did not publish the verified candidate.'
+  }
+
+  $namespaceExternalOperationObserved = $false
+  foreach ($operation in @('move', 'replace', 'delete')) {
+    $namespaceRoot = Join-Path $temporaryRoot "atomic-existing-posix-namespace-$operation"
+    New-Item -ItemType Directory -Path $namespaceRoot | Out-Null
+    $namespacePath = Join-Path $namespaceRoot 'config.toml'
+    $namespaceAuxiliary = Join-Path $namespaceRoot 'external.config.toml'
+    [IO.File]::WriteAllBytes($namespacePath, $posixOldBytes)
+    $namespaceWrite = [DreamSkinConfigNative]::BeginAtomicWrite($namespacePath, $posixNewBytes)
+    $namespaceExternalSucceeded = $false
+    $namespaceExternalDenied = $false
+    $namespaceCommitRejected = $false
+    $namespaceCommitError = $null
+    $namespaceRollbackConfirmed = $false
+    try {
+      try {
+        switch ($operation) {
+          'move' { [IO.File]::Move($namespacePath, $namespaceAuxiliary) }
+          'replace' {
+            [IO.File]::WriteAllBytes($namespaceAuxiliary, $utf8NoBom.GetBytes('external replacement'))
+            Move-Item -LiteralPath $namespaceAuxiliary -Destination $namespacePath -Force
+          }
+          'delete' { [IO.File]::Delete($namespacePath) }
+        }
+      $namespaceExternalSucceeded = $true
+        $namespaceExternalOperationObserved = $true
+      } catch {
+        $namespaceExternalDenied = $true
+      }
+      try { $namespaceWrite.Commit() } catch {
+        $namespaceCommitRejected = $true
+        $namespaceCommitError = $_.Exception.ToString()
+      }
+      $namespaceRollbackConfirmed = $namespaceWrite.RollbackConfirmed
+    } finally {
+      try { $namespaceWrite.Dispose() } catch { $namespaceCommitRejected = $true }
+    }
+    $namespaceArtifacts = @(Get-ChildItem -LiteralPath $namespaceRoot -Force -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match '^\.[0-9a-f]{32}\.(candidate|tmp|lock)$' })
+    if ($namespaceExternalSucceeded) {
+      $namespaceExternalPreserved = switch ($operation) {
+        'move' {
+          -not (Test-Path -LiteralPath $namespacePath) -and
+            (Test-Path -LiteralPath $namespaceAuxiliary -PathType Leaf) -and
+            (Test-DreamSkinBytesEqual -Left $posixOldBytes -Right ([IO.File]::ReadAllBytes($namespaceAuxiliary)))
+        }
+        'replace' {
+          (Test-Path -LiteralPath $namespacePath -PathType Leaf) -and
+            -not (Test-Path -LiteralPath $namespaceAuxiliary) -and
+            (Read-DreamSkinUtf8File -Path $namespacePath) -ceq 'external replacement'
+        }
+        'delete' {
+          -not (Test-Path -LiteralPath $namespacePath) -and
+            -not (Test-Path -LiteralPath $namespaceAuxiliary)
+        }
+      }
+      if (-not $namespaceCommitRejected -or $namespaceRollbackConfirmed -or
+        $namespaceCommitError -notmatch 'rollback-unconfirmed' -or
+        -not $namespaceExternalPreserved -or $namespaceArtifacts.Count -ne 0) {
+        throw "atomic-existing-posix-$operation did not preserve the external namespace operation while failing closed. CommitRejected=$namespaceCommitRejected; RollbackConfirmed=$namespaceRollbackConfirmed; ExternalPreserved=$namespaceExternalPreserved; Artifacts=$($namespaceArtifacts.Count); Error=$namespaceCommitError"
+      }
+    } elseif (-not $namespaceExternalDenied -or $namespaceCommitRejected -or
+      $namespaceRollbackConfirmed -or $namespaceArtifacts.Count -ne 0 -or
+      -not (Test-Path -LiteralPath $namespacePath -PathType Leaf) -or
+      -not (Test-DreamSkinBytesEqual -Left $posixNewBytes -Right ([IO.File]::ReadAllBytes($namespacePath)))) {
+      throw "atomic-existing-posix-$operation produced an unexpected denied namespace outcome."
+    }
+  }
+  if (-not $namespaceExternalOperationObserved) {
+    throw 'matching-host namespace fixture never observed a successful external move, replace, or delete.'
+  }
+
+  $atomicFinalRoot = Join-Path $temporaryRoot 'atomic-final-proof-content-pin'
+  New-Item -ItemType Directory -Path $atomicFinalRoot | Out-Null
+  $atomicFinalPath = Join-Path $atomicFinalRoot 'config.toml'
+  [IO.File]::WriteAllBytes($atomicFinalPath, $posixOldBytes)
+  $atomicFinalWrite = [DreamSkinConfigNative]::BeginAtomicWrite($atomicFinalPath, $posixNewBytes)
+  try {
+    $atomicFinalWrite.Commit()
+    $atomicFinalSnapshot = Get-DreamSkinStableFileSnapshot -Path $atomicFinalPath
+    if ((Invoke-AtomicNamespaceProbe -Operation 'write' -Path $atomicFinalPath `
+      -Root $atomicFinalRoot) -ne 23) {
+      throw 'atomic-final-proof-content-pin allowed an external content write before Dispose.'
+    }
+    foreach ($operation in @('move', 'delete')) {
+      if ((Invoke-AtomicNamespaceProbe -Operation $operation -Path $atomicFinalPath `
+        -Root $atomicFinalRoot) -ne 23) {
+        throw "atomic-final-proof-content-pin allowed an external $operation before Dispose."
+      }
+    }
+  } finally {
+    $atomicFinalWrite.Dispose()
+  }
+  $atomicFinalAfter = Get-DreamSkinStableFileSnapshot -Path $atomicFinalPath
+  $atomicFinalArtifacts = @(Get-ChildItem -LiteralPath $atomicFinalRoot -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^\.[0-9a-f]{32}\.(candidate|tmp|lock)$' })
+  if ($atomicFinalAfter.Identity -cne $atomicFinalSnapshot.Identity -or
+    -not (Test-DreamSkinBytesEqual -Left $posixNewBytes -Right $atomicFinalAfter.Bytes) -or
+    $atomicFinalArtifacts.Count -ne 0) {
+    throw 'atomic-final-proof-content-pin lost the canonical file when its handles closed.'
   }
 
   $atomicChildScript = Join-Path $temporaryRoot 'atomic-child.ps1'
@@ -847,8 +969,13 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     }
     $retryBytes = $utf8NoBom.GetBytes("kill-$killMode-retry")
     Write-DreamSkinBytesAtomically -Path $killTarget -Bytes $retryBytes
-    if (-not (Test-DreamSkinBytesEqual -Left $retryBytes -Right ([IO.File]::ReadAllBytes($killTarget)))) {
-      throw "$($killCase.Name) could not retry in a fresh transaction."
+    $killArtifacts = @(Get-ChildItem -LiteralPath $killRoot -Force -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match '^\.[0-9a-f]{32}\.(candidate|tmp|lock)$' })
+    $unexpectedKillArtifacts = @($killArtifacts |
+      Where-Object { $_.Name -notmatch '^\.[0-9a-f]{32}\.tmp$' })
+    if (-not (Test-DreamSkinBytesEqual -Left $retryBytes -Right ([IO.File]::ReadAllBytes($killTarget))) -or
+      $unexpectedKillArtifacts.Count -ne 0) {
+      throw "$($killCase.Name) could not retry in a fresh transaction without leaking active namespace artifacts."
     }
   }
 
@@ -856,6 +983,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
   New-Item -ItemType Directory -Path $rollbackRoot | Out-Null
   $rollbackTarget = Join-Path $rollbackRoot 'config.toml'
   $rollbackOldBytes = $utf8NoBom.GetBytes('rollback exact old')
+  $rollbackNewBytes = $utf8NoBom.GetBytes('rollback candidate')
   [IO.File]::WriteAllBytes($rollbackTarget, $rollbackOldBytes)
   $rollbackOldSnapshot = Get-DreamSkinStableFileSnapshot -Path $rollbackTarget
   $rollbackConfig = Join-Path $rollbackRoot 'config-utf8-injected.ps1'
@@ -866,12 +994,15 @@ while ($true) { Start-Sleep -Milliseconds 100 }
   }
   $rollbackSource = [regex]::Replace($rollbackSource, $rollbackFinalProofPattern,
     '$1AssertCommitted();' + [Environment]::NewLine +
-    '$1throw new IOException("atomic-posix-rollback final publication marker");', 1)
+    '$1if (Environment.GetEnvironmentVariable("DREAM_SKIN_ROLLBACK_INJECT") == "1")' + [Environment]::NewLine +
+    '$1    throw new IOException("atomic-posix-rollback final publication marker");' + [Environment]::NewLine +
+    '$1committed = true;', 1)
   [IO.File]::WriteAllText($rollbackConfig, $rollbackSource, $utf8NoBom)
   $rollbackChildScript = Join-Path $rollbackRoot 'rollback-child.ps1'
   [IO.File]::WriteAllText($rollbackChildScript, @'
 param([string]$ConfigScript, [string]$Path, [string]$Payload)
 $ErrorActionPreference = 'Stop'
+$env:DREAM_SKIN_ROLLBACK_INJECT = '1'
 . $ConfigScript
 $transaction = $null
 $rejected = $false
@@ -879,8 +1010,8 @@ try {
   $transaction = [DreamSkinConfigNative]::BeginAtomicWrite($Path, [Convert]::FromBase64String($Payload))
   $transaction.Commit()
 } catch {
-  $rejected = $null -ne $transaction -and $transaction.RollbackConfirmed -and
-    $_.Exception.Message -match 'atomic-posix-rollback final publication marker'
+  $rejected = $null -ne $transaction -and -not $transaction.RollbackConfirmed -and
+    $_.Exception.Message -match 'rollback-unconfirmed'
 } finally {
   if ($null -ne $transaction) { $transaction.Dispose() }
 }
@@ -889,21 +1020,31 @@ if (-not $rejected) { exit 31 }
   $rollbackChild = Start-Process -FilePath $powershell -PassThru -WindowStyle Hidden -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $rollbackChildScript,
     '-ConfigScript', $rollbackConfig, '-Path', $rollbackTarget,
-    '-Payload', [Convert]::ToBase64String($utf8NoBom.GetBytes('rollback candidate'))
+    '-Payload', [Convert]::ToBase64String($rollbackNewBytes)
   )
   $rollbackMissingSeen = $false
-  while (-not $rollbackChild.HasExited) {
+  $rollbackDeadline = [DateTime]::UtcNow.AddSeconds(30)
+  while (-not $rollbackChild.HasExited -and [DateTime]::UtcNow -lt $rollbackDeadline) {
     if (-not [IO.File]::Exists($rollbackTarget)) { $rollbackMissingSeen = $true }
     Start-Sleep -Milliseconds 1
   }
-  $rollbackChild.WaitForExit()
-  $rollbackExitCode = $rollbackChild.ExitCode
+  if (-not $rollbackChild.HasExited) {
+    Microsoft.PowerShell.Management\Stop-Process -Id $rollbackChild.Id -Force -ErrorAction SilentlyContinue
+    $rollbackChild.WaitForExit()
+    $rollbackExitCode = 124
+  } else {
+    $rollbackChild.WaitForExit()
+    $rollbackExitCode = $rollbackChild.ExitCode
+  }
   $rollbackChild.Dispose()
   $rollbackAfter = Get-DreamSkinStableFileSnapshot -Path $rollbackTarget
+  $rollbackArtifacts = @(Get-ChildItem -LiteralPath $rollbackRoot -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^\.[0-9a-f]{32}\.(candidate|tmp|lock)$' })
   if ($rollbackExitCode -ne 0 -or $rollbackMissingSeen -or
-    $rollbackAfter.Identity -cne $rollbackOldSnapshot.Identity -or
-    -not (Test-DreamSkinBytesEqual -Left $rollbackOldBytes -Right $rollbackAfter.Bytes)) {
-    throw 'atomic-posix-rollback did not atomically restore the exact held old target.'
+    $rollbackAfter.Identity -ceq $rollbackOldSnapshot.Identity -or
+    -not (Test-DreamSkinBytesEqual -Left $rollbackNewBytes -Right $rollbackAfter.Bytes) -or
+    $rollbackArtifacts.Count -ne 0) {
+    throw 'atomic-posix-rollback did not retain the verified candidate after rollback became unconfirmed.'
   }
 
   $constructorRoot = Join-Path $temporaryRoot 'atomic-constructor-create-failure-retry'
@@ -940,6 +1081,109 @@ if (-not $rejected) { exit 31 }
     throw 'atomic-constructor-create-failure-retry leaked a held target or failed its immediate retry.'
   }
 
+  foreach ($constructorRaceOperation in @('move', 'delete')) {
+    $constructorRaceRoot = Join-Path $temporaryRoot "atomic-constructor-namespace-$constructorRaceOperation"
+    New-Item -ItemType Directory -Path $constructorRaceRoot | Out-Null
+    $constructorRaceTarget = Join-Path $constructorRaceRoot 'config.toml'
+    $constructorRaceAuxiliary = Join-Path $constructorRaceRoot 'external.config.toml'
+    $constructorRaceMarker = Join-Path $constructorRaceRoot 'operation.marker'
+    $constructorRaceOldBytes = $utf8NoBom.GetBytes("constructor namespace $constructorRaceOperation old")
+    [IO.File]::WriteAllBytes($constructorRaceTarget, $constructorRaceOldBytes)
+    $constructorRaceOldSnapshot = Get-DreamSkinStableFileSnapshot -Path $constructorRaceTarget
+    $constructorRaceConfig = Join-Path $constructorRaceRoot 'config-utf8-injected.ps1'
+    $constructorRaceSource = [IO.File]::ReadAllText($configScriptPath)
+    $constructorRaceMatch = [regex]::Match($constructorRaceSource,
+      '(?m)^[ \t]*VerifyTemporaryContent\(\);\r?\n[ \t]*AssertUnchanged\(\);')
+    if (-not $constructorRaceMatch.Success) {
+      throw 'atomic-constructor-namespace race could not locate the constructor assertion boundary.'
+    }
+    $constructorRaceInjection = @(
+      '                VerifyTemporaryContent();',
+      '                string racePath = Environment.GetEnvironmentVariable("DREAM_SKIN_CONSTRUCTOR_RACE_PATH");',
+      '                string raceAuxiliary = Environment.GetEnvironmentVariable("DREAM_SKIN_CONSTRUCTOR_RACE_AUXILIARY");',
+      '                string raceMarker = Environment.GetEnvironmentVariable("DREAM_SKIN_CONSTRUCTOR_RACE_MARKER");',
+      '                string raceOperation = Environment.GetEnvironmentVariable("DREAM_SKIN_CONSTRUCTOR_RACE_OPERATION");',
+      '                if (racePath == null || raceAuxiliary == null || raceMarker == null || raceOperation == null)',
+      '                    throw new IOException("Constructor namespace race fixture is not configured.");',
+      '                if (raceOperation == "move") File.Move(racePath, raceAuxiliary);',
+      '                else if (raceOperation == "delete") File.Delete(racePath);',
+      '                else throw new IOException("Unknown constructor namespace race operation.");',
+      '                File.WriteAllText(raceMarker, "succeeded");',
+      '                AssertUnchanged();'
+    ) -join [Environment]::NewLine
+    $constructorRaceSource = $constructorRaceSource.Remove($constructorRaceMatch.Index, $constructorRaceMatch.Length).Insert(
+      $constructorRaceMatch.Index, $constructorRaceInjection)
+    [IO.File]::WriteAllText($constructorRaceConfig, $constructorRaceSource, $utf8NoBom)
+    $constructorRaceChildScript = Join-Path $constructorRaceRoot 'constructor-race-child.ps1'
+    [IO.File]::WriteAllText($constructorRaceChildScript, @'
+param([string]$ConfigScript, [string]$Path, [string]$Operation, [string]$AuxiliaryPath, [string]$MarkerPath, [string]$Payload)
+$ErrorActionPreference = 'Stop'
+$env:DREAM_SKIN_CONSTRUCTOR_RACE_PATH = $Path
+$env:DREAM_SKIN_CONSTRUCTOR_RACE_OPERATION = $Operation
+$env:DREAM_SKIN_CONSTRUCTOR_RACE_AUXILIARY = $AuxiliaryPath
+$env:DREAM_SKIN_CONSTRUCTOR_RACE_MARKER = $MarkerPath
+. $ConfigScript
+$transaction = $null
+$rejected = $false
+try {
+  $transaction = [DreamSkinConfigNative]::BeginAtomicWrite($Path, [Convert]::FromBase64String($Payload))
+} catch {
+  $rejected = $_.Exception.ToString() -match 'Atomic write preparation failed and original target rollback was unconfirmed'
+  if (-not $rejected) {
+    [Console]::Error.WriteLine($_.Exception.ToString())
+    exit 52
+  }
+} finally {
+  if ($null -ne $transaction) { $transaction.Dispose() }
+}
+if (-not $rejected) { exit 51 }
+'@, $utf8NoBom)
+    $constructorRaceChild = Start-Process -FilePath $powershell -PassThru -WindowStyle Hidden -ArgumentList @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $constructorRaceChildScript,
+      '-ConfigScript', $constructorRaceConfig, '-Path', $constructorRaceTarget,
+      '-Operation', $constructorRaceOperation, '-AuxiliaryPath', $constructorRaceAuxiliary,
+      '-MarkerPath', $constructorRaceMarker,
+      '-Payload', [Convert]::ToBase64String($utf8NoBom.GetBytes("constructor namespace $constructorRaceOperation new"))
+    )
+    try {
+      if (-not $constructorRaceChild.WaitForExit(30000)) {
+        Microsoft.PowerShell.Management\Stop-Process -Id $constructorRaceChild.Id -Force
+        $constructorRaceChild.WaitForExit()
+        $constructorRaceExitCode = 124
+      } else {
+        $constructorRaceExitCode = $constructorRaceChild.ExitCode
+      }
+    } finally {
+      if (-not $constructorRaceChild.HasExited) {
+        Microsoft.PowerShell.Management\Stop-Process -Id $constructorRaceChild.Id -Force
+        $constructorRaceChild.WaitForExit()
+      }
+      $constructorRaceChild.Dispose()
+    }
+    $constructorRaceAfter = Get-DreamSkinStableFileSnapshotCore -Path $constructorRaceTarget -AllowMissing
+    $constructorRaceArtifacts = @(Get-ChildItem -LiteralPath $constructorRaceRoot -Force -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match '^\.[0-9a-f]{32}\.(candidate|tmp|lock)$' })
+    $constructorRaceExternalPreserved = if ($constructorRaceOperation -eq 'move') {
+      if ($constructorRaceAfter.Exists -or
+        -not (Test-Path -LiteralPath $constructorRaceAuxiliary -PathType Leaf)) {
+        $false
+      } else {
+        $constructorRaceMoved = Get-DreamSkinStableFileSnapshot -Path $constructorRaceAuxiliary
+        $constructorRaceMoved.Identity -ceq $constructorRaceOldSnapshot.Identity -and
+          (Test-DreamSkinBytesEqual -Left $constructorRaceOldBytes -Right $constructorRaceMoved.Bytes)
+      }
+    } else {
+      -not $constructorRaceAfter.Exists -and
+        -not (Test-Path -LiteralPath $constructorRaceAuxiliary)
+    }
+    if ($constructorRaceExitCode -ne 0 -or
+      -not (Test-Path -LiteralPath $constructorRaceMarker -PathType Leaf) -or
+      -not $constructorRaceExternalPreserved -or
+      $constructorRaceArtifacts.Count -ne 0) {
+      throw "atomic-constructor-namespace-$constructorRaceOperation did not preserve the external namespace operation while failing closed."
+    }
+  }
+
   $proofDeleteRoot = Join-Path $temporaryRoot 'proof-replaced-before-handle-delete'
   New-Item -ItemType Directory -Path $proofDeleteRoot | Out-Null
   $proofDeletePath = Join-Path $proofDeleteRoot 'config.restored.toml'
@@ -947,7 +1191,7 @@ if (-not $rejected) { exit 31 }
   $proofDeleteSnapshot = Get-DreamSkinStableFileSnapshot -Path $proofDeletePath
   $proofCreator = Join-Path $proofDeleteRoot 'creator.tmp'
   [IO.File]::WriteAllText($proofCreator, 'unexpected creator', $utf8NoBom)
-  [IO.File]::Replace($proofCreator, $proofDeletePath, $null)
+  Move-Item -LiteralPath $proofCreator -Destination $proofDeletePath -Force
   $proofCreatorSnapshot = Get-DreamSkinStableFileSnapshot -Path $proofDeletePath
   $proofDeleteRejected = $false
   try {
@@ -1077,7 +1321,7 @@ if (-not $rejected) { exit 31 }
           ($missingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
           Remove-Item -LiteralPath $missingComponent -Recurse -Force
         } else {
-          Remove-Item -LiteralPath $missingComponent -Force
+          Remove-DreamSkinTestPath -Path $missingComponent
         }
       }
       $missingGuard.Dispose()
@@ -1095,31 +1339,46 @@ if (-not $rejected) { exit 31 }
     throw 'missing-guard-constructor-appearance-retry could not locate its acquisition boundary.'
   }
   $guardRetrySource = $guardRetrySource.Replace($guardRetryNeedle,
-    $guardRetryNeedle + "`r`n                Directory.CreateDirectory(missingPath);")
+    $guardRetryNeedle + "`r`n                if (Environment.GetEnvironmentVariable(`"DREAM_SKIN_MISSING_GUARD_INJECT`") == `"1`") Directory.CreateDirectory(missingPath);")
   $guardRetryConfigScript = Join-Path $guardRetryRoot 'config-utf8-injected.ps1'
   [IO.File]::WriteAllText($guardRetryConfigScript, $guardRetrySource, $utf8NoBom)
   $guardRetryChildScript = Join-Path $guardRetryRoot 'guard-retry-child.ps1'
   [IO.File]::WriteAllText($guardRetryChildScript, @'
 param([string]$ConfigScript, [string]$ProfilePath, [string]$ConfigPath)
 $ErrorActionPreference = 'Stop'
+$env:DREAM_SKIN_MISSING_GUARD_INJECT = '1'
 . $ConfigScript
 $unexpected = $null
 $rejected = $false
+$rejectionMessage = $null
 try {
   $unexpected = [DreamSkinConfigNative]::HoldMissingPath($ConfigPath)
 } catch {
-  $rejected = $true
+  $rejectionMessage = $_.Exception.ToString()
+  $rejected = $rejectionMessage -match 'Config path component appeared during missing-config restore'
 } finally {
   if ($null -ne $unexpected) { $unexpected.Dispose() }
 }
-if (-not $rejected) { exit 41 }
-$missingComponent = Join-Path $ProfilePath '.codex'
-if (Test-Path -LiteralPath $missingComponent) {
-  Remove-Item -LiteralPath $missingComponent -Recurse -Force
+if (-not $rejected) {
+  if ($null -ne $rejectionMessage) { [Console]::Error.WriteLine($rejectionMessage) }
+  exit 41
 }
+$missingComponent = Join-Path $ProfilePath '.codex'
+if (-not (Test-Path -LiteralPath $missingComponent -PathType Container)) {
+  [Console]::Error.WriteLine('Missing-guard injection did not create the expected component.')
+  exit 42
+}
+$missingItem = Get-Item -LiteralPath $missingComponent -Force -ErrorAction Stop
+if (-not $missingItem.PSIsContainer -or
+  (($missingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+  [Console]::Error.WriteLine('Missing-guard injection created an unexpected reparse-point component.')
+  exit 43
+}
+Remove-Item -LiteralPath $missingComponent -Recurse -Force
 $movedProfile = "$ProfilePath-moved"
 [IO.Directory]::Move($ProfilePath, $movedProfile)
 [IO.Directory]::Move($movedProfile, $ProfilePath)
+$env:DREAM_SKIN_MISSING_GUARD_INJECT = $null
 $guard = [DreamSkinConfigNative]::HoldMissingPath($ConfigPath)
 try { $guard.Complete() } finally { $guard.Dispose() }
 '@, $utf8NoBom)
@@ -1163,7 +1422,7 @@ try { $guard.Complete() } finally { $guard.Dispose() }
     $nativeWrite.Dispose()
     if ((Test-Path -LiteralPath $nativeConfigDirectory) -and
       ((Get-Item -LiteralPath $nativeConfigDirectory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-      Remove-Item -LiteralPath $nativeConfigDirectory -Force
+      Remove-DreamSkinTestPath -Path $nativeConfigDirectory
     }
     if (Test-Path -LiteralPath $nativeHeldDirectory -PathType Container) {
       Move-Item -LiteralPath $nativeHeldDirectory -Destination $nativeConfigDirectory
@@ -1214,7 +1473,7 @@ try { $guard.Complete() } finally { $guard.Dispose() }
     } else { $null }
     $parentSnapshot = Get-DreamSkinStableFileSnapshot -Path $parentConfig
     $originalStableAssert = ${function:Assert-DreamSkinStableFileSnapshotUnchanged}
-    $assertionTarget = [IO.Path]::GetFullPath($parentConfig)
+    $assertionTarget = $parentSnapshot.FullPath
     $parentRace = [pscustomobject]@{ Attempted = $false; Denied = $false; Substituted = $false }
     $parentAssert = {
       param([Parameter(Mandatory = $true)]$Snapshot)
@@ -1258,7 +1517,7 @@ try { $guard.Complete() } finally { $guard.Dispose() }
       Set-Item Function:\Assert-DreamSkinStableFileSnapshotUnchanged -Value $originalStableAssert
       if ((Test-Path -LiteralPath $configDirectory) -and
         ((Get-Item -LiteralPath $configDirectory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        Remove-Item -LiteralPath $configDirectory -Force
+        Remove-DreamSkinTestPath -Path $configDirectory
       }
       if (Test-Path -LiteralPath $heldDirectory -PathType Container) {
         Move-Item -LiteralPath $heldDirectory -Destination $configDirectory
@@ -1653,7 +1912,29 @@ public static class Program {
   $licenseText = 'Node test license complete text.'
   [System.IO.File]::WriteAllText((Join-Path $archiveTop 'LICENSE'), $licenseText, $utf8NoBom)
   $archivePath = Join-Path $temporaryRoot $archiveName
-  Compress-Archive -LiteralPath $archiveTop -DestinationPath $archivePath
+  # Build the fixture with ZIP-standard forward-slash entry names. Windows
+  # PowerShell's Compress-Archive emits backslashes, unlike the official Node
+  # archives consumed by the production extractor.
+  Add-Type -AssemblyName System.IO.Compression
+  $archiveStream = [IO.File]::Open($archivePath, [IO.FileMode]::CreateNew,
+    [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $zipArchive = [IO.Compression.ZipArchive]::new(
+    $archiveStream, [IO.Compression.ZipArchiveMode]::Create, $false)
+  try {
+    foreach ($entrySpec in @(
+      @{ Name = 'node-v22.23.1-win-x64/node.exe'; Source = $fakeNode },
+      @{ Name = 'node-v22.23.1-win-x64/LICENSE'; Source = (Join-Path $archiveTop 'LICENSE') }
+    )) {
+      $entry = $zipArchive.CreateEntry($entrySpec.Name, [IO.Compression.CompressionLevel]::NoCompression)
+      $sourceBytes = [IO.File]::ReadAllBytes($entrySpec.Source)
+      $entryStream = $entry.Open()
+      try { $entryStream.Write($sourceBytes, 0, $sourceBytes.Length) }
+      finally { $entryStream.Dispose() }
+    }
+  } finally {
+    $zipArchive.Dispose()
+    $archiveStream.Dispose()
+  }
   $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
   $runtimeLockPath = Join-Path $temporaryRoot 'node-runtime.lock.json'
   [pscustomobject]@{
@@ -1747,12 +2028,16 @@ public static class Program {
   $mutatedInjectorPath = Join-Path $versionMutationRoot 'scripts\injector.mjs'
   $mutatedInjector = [IO.File]::ReadAllText($mutatedInjectorPath).Replace("    .replace(`"__DREAM_SKIN_VERSION_JSON__`", JSON.stringify(SKIN_VERSION));", ';')
   [IO.File]::WriteAllText($mutatedInjectorPath, $mutatedInjector, [Text.UTF8Encoding]::new($false))
-  & $node.Path $mutatedInjectorPath --check-payload *> $null
-  if ($LASTEXITCODE -eq 0) { throw 'Windows payload check accepted an unresolved version placeholder.' }
+  $mutatedPayloadExit = 0
+  try { & $node.Path $mutatedInjectorPath --check-payload *> $null; $mutatedPayloadExit = $LASTEXITCODE }
+  catch { $mutatedPayloadExit = 1 }
+  if ($mutatedPayloadExit -eq 0) { throw 'Windows payload check accepted an unresolved version placeholder.' }
   & $node.Path (Join-Path $Root 'scripts\injector.mjs') --check-payload --theme-dir $themePaths.Active *> $null
   if ($LASTEXITCODE -ne 0) { throw 'Managed theme payload validation failed.' }
-  & $node.Path (Join-Path $Root 'scripts\injector.mjs') --check-payload --theme-dir $oversizedTheme *> $null
-  if ($LASTEXITCODE -eq 0) { throw 'Node injector accepted an image over the 16 MB limit.' }
+  $oversizedPayloadExit = 0
+  try { & $node.Path (Join-Path $Root 'scripts\injector.mjs') --check-payload --theme-dir $oversizedTheme *> $null; $oversizedPayloadExit = $LASTEXITCODE }
+  catch { $oversizedPayloadExit = 1 }
+  if ($oversizedPayloadExit -eq 0) { throw 'Node injector accepted an image over the 16 MB limit.' }
   & $node.Path (Join-Path $PSScriptRoot 'renderer-inject.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Renderer auxiliary-window regression test failed.' }
   & $node.Path (Join-Path $PSScriptRoot 'injector-bootstrap.test.mjs')

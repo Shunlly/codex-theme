@@ -32,7 +32,7 @@ try {
 
   $registeredInstalls = @(Get-DreamSkinRegisteredCodexInstalls)
   $codex = Resolve-DreamSkinCodexInstallFromState -State $state -RegisteredInstalls $registeredInstalls
-  if ($null -eq $codex -or (Get-DreamSkinCodexProcesses -Codex $codex).Count -eq 0) {
+  if ($null -eq $codex -or @(Get-DreamSkinCodexProcesses -Codex $codex).Count -eq 0) {
     throw 'STATE_UNSAFE: The saved Codex process identity is no longer active.'
   }
   $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $Port -Codex $codex

@@ -62,6 +62,9 @@ assert.doesNotMatch(metadataVerifier,
   /^\s*if\s*\(\$checksumText\s*-cne\s*"\$ExpectedHash  \$File`r`n"\)\s*\{$/m,
   "release metadata checksum comparison must not use PowerShell CRLF");
 const adapter = read("windows/scripts/studio-adapter.ps1");
+const injectorOneShotTest = read("windows/tests/injector-one-shot.test.mjs");
+contains(adapter, '-Operation "$($State.operation)"',
+  "Windows adapter error projection discards the Protocol v1 busy operation state");
 const common = read("windows/scripts/common-windows.ps1");
 const config = read("windows/scripts/config-utf8.ps1");
 const protocolTests = read("windows/tests/studio-protocol.tests.ps1");
@@ -111,7 +114,7 @@ const debugLaunch = startScript.indexOf("Start-Process -FilePath $codex.Executab
 assert.ok(recoveryWrite >= 0 && recoveryWrite < debugLaunch,
   "Apply/Resume does not publish durable CDP-only recovery authority before launch");
 const recoveryRetryGuard = startScript.indexOf("$previousState.schemaVersion -eq 4");
-const ordinaryProcessProbe = startScript.indexOf("$currentProcesses = Get-DreamSkinCodexProcesses");
+const ordinaryProcessProbe = startScript.indexOf("$currentProcesses = @(Get-DreamSkinCodexProcesses");
 assert.ok(recoveryRetryGuard >= 0 && recoveryRetryGuard < ordinaryProcessProbe,
   "direct start reinterprets retained schema-4 recovery through fail-open legacy probes");
 contains(startScript, "Invoke-DreamSkinStartupCleanup",
@@ -270,7 +273,7 @@ contains(startupRollback,
   "Apply/Resume rollback treats a missing or mismatched Browser ID as successful cleanup");
 contains(startupRollback, "Get-DreamSkinPortListenersStrict -Port $Port",
   "new-CDP rollback does not prove that its listener closed");
-contains(startupRollback, "(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0",
+contains(startupRollback, "@(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0",
   "new-CDP rollback does not prove that Codex closed");
 contains(startupRollback,
   "$cleanupComplete = $injectorStopped -and $cleanupProven",
@@ -285,7 +288,7 @@ const rollbackRemove = startupRollback.indexOf("--remove --port $Port --browser-
 const rollbackRemoveExit = startupRollback.indexOf("$LASTEXITCODE -ne 0", rollbackRemove);
 const existingCleanupProof = startupRollback.indexOf("$cleanupProven = $true", rollbackRemoveExit);
 const rollbackStopCodex = startupRollback.indexOf("Stop-DreamSkinCodex -Codex $Codex -AllowForce");
-const rollbackNoProcesses = startupRollback.indexOf("(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0",
+const rollbackNoProcesses = startupRollback.indexOf("@(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0",
   rollbackStopCodex);
 const rollbackPortClosed = startupRollback.indexOf("Get-DreamSkinPortListenersStrict -Port $Port",
   rollbackNoProcesses);
@@ -296,13 +299,13 @@ assert.ok(rollbackStopCodex >= 0 && rollbackNoProcesses > rollbackStopCodex &&
   rollbackPortClosed > rollbackNoProcesses && launchedCleanupProof > rollbackPortClosed,
   "new-CDP rollback marks cleanup before Codex and its listener are confirmed closed");
 const closedCleanupStart = startupRollback.indexOf(
-  "if ($injectorStopped -and $null -ne $ClosedCodex)");
+  "if ($null -ne $ClosedCodex)");
 const closedNoProcesses = startupRollback.indexOf(
-  "(Get-DreamSkinCodexProcessesStrict -Codex $ClosedCodex).Count -ne 0", closedCleanupStart);
+  "@(Get-DreamSkinCodexProcessesStrict -Codex $ClosedCodex).Count -ne 0", closedCleanupStart);
 const closedCurrentDiffers = startupRollback.indexOf(
   "Test-DreamSkinPathEqual -Left $ClosedCodex.Executable -Right $Codex.Executable", closedNoProcesses);
 const closedCurrentNoProcesses = startupRollback.indexOf(
-  "(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0", closedCurrentDiffers);
+  "@(Get-DreamSkinCodexProcessesStrict -Codex $Codex).Count -ne 0", closedCurrentDiffers);
 const closedPortAbsent = startupRollback.indexOf(
   "Get-DreamSkinPortListenersStrict -Port ([int]$ClosedCodexPort)", closedCurrentNoProcesses);
 const closedCleanupProof = startupRollback.indexOf("$cleanupProven = $true", closedPortAbsent);
@@ -310,6 +313,8 @@ assert.ok(closedCleanupStart >= 0 && closedNoProcesses > closedCleanupStart &&
   closedCurrentDiffers > closedNoProcesses && closedCurrentNoProcesses > closedCurrentDiffers &&
   closedPortAbsent > closedCurrentNoProcesses && closedCleanupProof > closedPortAbsent,
   "pre-launch closed Codex cleanup does not strictly prove closed/current identities and port absence");
+assert.doesNotMatch(startupRollback, /if \(\$injectorStopped -and \$null -ne \$ClosedCodex\)/,
+  "prior watcher failure suppresses independent pre-launch closed-session safety probes");
 contains(startupRollback, "$closedMatchesCurrent = Test-DreamSkinPathEqual",
   "combined closed/new cleanup cannot deduplicate the current package identity");
 contains(startupRollback, "$closedPortMatchesCurrent = [int]$ClosedCodexPort -eq $Port",
@@ -502,6 +507,12 @@ for (const contract of [
 ]) {
   contains(config, contract, `native state quarantine is incomplete: ${contract}`);
 }
+for (const contract of [
+  "string destinationPath = NormalizePath(Path.Combine(parentPath, fileName))",
+  "int size = checked(nameOffset + name.Length + 2)",
+  "Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero)",
+  "ComparablePath(ResolvedPath(parent, parentPath))",
+]) contains(config, contract, `native rename buffer is incompatible or loses its pinned parent: ${contract}`);
 const codexAbsenceStart = common.indexOf("function Assert-DreamSkinNoRegisteredCodexProcessOrListener");
 const codexAbsenceEnd = common.indexOf("\nfunction ", codexAbsenceStart + 1);
 const codexAbsence = common.slice(codexAbsenceStart, codexAbsenceEnd < 0 ? undefined : codexAbsenceEnd);
@@ -700,15 +711,99 @@ for (const contract of [
 assert.doesNotMatch(app, /DeleteUserThemes/);
 
 const installScript = read("windows/scripts/install-dream-skin.ps1");
+const pauseScript = read("windows/scripts/pause-dream-skin.ps1");
+const scalarCollectionCount = /(?<!@)\(Get-DreamSkin(?:CodexProcesses(?:Strict)?|PortListeners(?:Strict)?|CdpTargets)\b[^\r\n]*\)\.Count/;
+const scalarCollectionAssignment = /^\s*\$\w+\s*=\s*Get-DreamSkin(?:CodexProcesses(?:Strict)?|PortListeners(?:Strict)?|CdpTargets)\b/m;
+for (const [name, source] of [
+  ["common-windows.ps1", common],
+  ["install-dream-skin.ps1", installScript],
+  ["start-dream-skin.ps1", startScript],
+  ["pause-dream-skin.ps1", pauseScript],
+  ["restore-dream-skin.ps1", restoreScript],
+]) {
+  assert.doesNotMatch(source, scalarCollectionCount,
+    `${name} relies on PowerShell 7 scalar .Count behavior for process or listener output`);
+  assert.doesNotMatch(source, scalarCollectionAssignment,
+    `${name} stores process or listener output without a Windows PowerShell 5.1 array boundary`);
+}
 const windowsTestBytes = fs.readFileSync(path.join(repo, "windows/tests/run-tests.ps1"));
 assert.deepEqual([...windowsTestBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf],
   "windows/tests/run-tests.ps1 contains non-ASCII source and is invoked by Windows PowerShell 5.1, so it must begin with the UTF-8 BOM bytes EF BB BF");
+function collectPowerShellFiles(directory, result = []) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) collectPowerShellFiles(fullPath, result);
+    else if (entry.isFile() && entry.name.endsWith(".ps1")) result.push(fullPath);
+  }
+  return result;
+}
+for (const filePath of collectPowerShellFiles(path.join(repo, "windows"))) {
+  const bytes = fs.readFileSync(filePath);
+  const body = bytes.subarray(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0);
+  if (body.some((value) => value >= 0x80)) {
+    assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf],
+      `Windows PowerShell 5.1 script contains non-ASCII source without a UTF-8 BOM: ${path.relative(repo, filePath)}`);
+  }
+}
 const windowsTests = read("windows/tests/run-tests.ps1");
 for (const contract of [
   "$scannerPath = Join-Path $SnapshotRepoRoot ''studio\\release\\check-contents.mjs''",
   "& $PrivateNodePath $scannerPath --root $StageRoot --allowlist $allowlistPath",
 ]) contains(windowsTests, contract, `native Windows scanner contract missing: ${contract}`);
 const studioProtocolTests = read("windows/tests/studio-protocol.tests.ps1");
+contains(studioProtocolTests, ". (Join-Path $Root 'scripts\\config-utf8.ps1')",
+  "Windows protocol parent does not load the native file-identity type used by race assertions");
+contains(studioProtocolTests, "codexExe = $transition.CodexExecutable",
+  "Windows protocol parent calls a Codex fixture helper that exists only inside child stubs");
+contains(studioProtocolTests, "$env:DREAM_SKIN_TEST_SCENARIO -like 'real-pause*'",
+  "matching-host pause fixture is missing");
+contains(studioProtocolTests, "codexExe = $codex.Executable; codexPackageRoot = $codex.PackageRoot",
+  "matching-host pause fixture does not use the registered case Codex identity");
+const startStudioProcessStart = studioProtocolTests.indexOf("function Start-StudioProcess");
+const startStudioProcessEnd = studioProtocolTests.indexOf("\nfunction Complete-StudioProcess", startStudioProcessStart);
+const startStudioProcess = studioProtocolTests.slice(startStudioProcessStart, startStudioProcessEnd);
+const childStart = startStudioProcess.indexOf("$process = Start-Process");
+const retainedHandle = startStudioProcess.indexOf("$null = $process.Handle", childStart);
+const childReturn = startStudioProcess.indexOf("return [pscustomobject]@{ Process = $process", childStart);
+assert.ok(childStart >= 0 && retainedHandle > childStart && childReturn > retainedHandle,
+  "Windows PowerShell 5.1 protocol tests do not retain the child handle before observing ExitCode");
+const realLifecycleStart = studioProtocolTests.indexOf("function Invoke-RealLifecycle");
+const realLifecycleEnd = studioProtocolTests.indexOf("\nfunction Assert-TraceOrder", realLifecycleStart);
+const realLifecycle = studioProtocolTests.slice(realLifecycleStart, realLifecycleEnd);
+const realChildStart = realLifecycle.indexOf("$process = Start-Process");
+const realRetainedHandle = realLifecycle.indexOf("$null = $process.Handle", realChildStart);
+const realExitRead = realLifecycle.indexOf("ExitCode = $process.ExitCode", realChildStart);
+assert.ok(realChildStart >= 0 && realRetainedHandle > realChildStart && realExitRead > realRetainedHandle,
+  "Windows PowerShell 5.1 lifecycle tests do not retain the child handle before observing ExitCode");
+const rollbackStateAssertStart = studioProtocolTests.indexOf("function Assert-RealStartRollbackState");
+const rollbackStateAssertEnd = studioProtocolTests.indexOf("\nfunction ", rollbackStateAssertStart + 1);
+const rollbackStateAssert = studioProtocolTests.slice(rollbackStateAssertStart, rollbackStateAssertEnd);
+contains(rollbackStateAssert, "Test-StudioFixturePathEqual",
+  "Windows protocol parent does not use its own path comparison helper");
+assert.doesNotMatch(rollbackStateAssert, /\bTest-DreamSkinPathEqual\b/,
+  "Windows protocol parent calls a path helper that exists only inside child stubs");
+for (const nullableExpectation of [
+  "[AllowNull()][object]$ThemeName",
+  "[AllowNull()][object]$ErrorCode",
+]) contains(studioProtocolTests, nullableExpectation,
+  `PowerShell protocol assertion coerces null to an empty string: ${nullableExpectation}`);
+assert.doesNotMatch(studioProtocolTests, /\bGet-DreamSkinAppearanceMarkerPath\b/,
+  "Windows protocol fixtures call a production helper that is only loaded in child processes");
+const protocolCommonStubStart = studioProtocolTests.indexOf("$commonStub = @'");
+const protocolCommonStubEnd = studioProtocolTests.indexOf("'@\n$themeStub", protocolCommonStubStart);
+const protocolCommonStub = studioProtocolTests.slice(protocolCommonStubStart, protocolCommonStubEnd);
+contains(protocolCommonStub, "function Remove-DreamSkinManagedLegacyShortcuts",
+  "Windows protocol common stub omits completed-uninstall shortcut cleanup");
+contains(studioProtocolTests, "$deadline = (Get-Date).AddSeconds(15)",
+  "Windows lifecycle lock test uses a cold-start timeout too short for matching-host native initialization");
+contains(studioProtocolTests, "Complete-StudioProcess -Invocation $lockInvocation",
+  "Windows lifecycle lock timeout leaks its child process and hides diagnostics");
+for (const contract of [
+  "DREAM_SKIN_TEST_RELEASE", "probe-release",
+  "Lifecycle lock fixture was not released by its parent",
+  "[IO.File]::WriteAllText($lockRelease, 'release', $utf8NoBom)",
+]) contains(studioProtocolTests, contract,
+  `Windows lifecycle lock fixture still depends on fixed sleep timing: ${contract}`);
 for (const regression of [
   "start-rollback-identity-lost", "resume-rollback-remove-fail",
   "start-rollback-close-fail", "start-rollback-listener-stuck",
@@ -742,6 +837,15 @@ for (const regression of [
   "damaged-recovery-residual-listener", "damaged-recovery-tray-like",
   "damaged-recovery-listener-probe-fail", "damaged-recovery-uninspectable-tray",
 ]) contains(studioProtocolTests, regression, `malformed-state lifecycle regression missing: ${regression}`);
+const mismatchedWatcherStart = studioProtocolTests.indexOf(
+  "if ($scenario -eq 'damaged-recovery-mismatched-watcher')");
+const mismatchedWatcherEnd = studioProtocolTests.indexOf(
+  "if ($scenario -eq 'damaged-recovery-uninspectable-watcher')", mismatchedWatcherStart);
+const mismatchedWatcher = studioProtocolTests.slice(mismatchedWatcherStart, mismatchedWatcherEnd);
+contains(mismatchedWatcher, "Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime\\node.exe'",
+  "mismatched watcher fixture no longer uses the real lifecycle engine runtime identity");
+assert.doesNotMatch(mismatchedWatcher, /\$env:DREAM_SKIN_REAL_NODE/,
+  "mismatched watcher fixture can silently evade the production EngineRoot identity check");
 contains(studioProtocolTests, "damaged-recovery-normalized-snapshot",
   "matching-host normalized stable-snapshot quarantine fixture missing");
 for (const contract of [
@@ -811,8 +915,12 @@ const pathHelpers = config.slice(comparableStart, config.indexOf("private static
 assert.doesNotMatch(pathHelpers, /Substring\(8\)[\s\S]*Path\.GetFullPath|Substring\(4\)[\s\S]*Path\.GetFullPath/,
   "comparable path strips the extended prefix before legacy normalization");
 contains(pathHelpers, "NormalizeAbsolutePath", "native path helpers do not share extended absolute normalization");
+contains(config, "FILE_FLAG_DELETE_ON_CLOSE",
+  "atomic writes do not hold a delete-on-close child lock inside the validated parent");
+contains(atomic, "parentLock",
+  "atomic writes do not retain the parent namespace lock through publication");
 const candidateCreate = atomic.indexOf("CreateFileW(NormalizePath(candidatePath)");
-const candidatePlacement = atomic.indexOf("RenameRelative(temporary, parent, temporaryName, 0)");
+const candidatePlacement = atomic.indexOf("RenameRelative(temporary, parent, parentPath, temporaryName, 0)");
 const candidateWrite = atomic.indexOf("WriteAll(temporary, bytes");
 const candidateVerify = atomic.indexOf("VerifyTemporaryContent()");
 assert.ok(candidateCreate >= 0 && candidatePlacement > candidateCreate && candidateWrite > candidatePlacement &&
@@ -830,18 +938,36 @@ for (const contract of [
 assert.ok(!atomic.includes("rollbackName"),
   "existing-target commit still creates a two-rename canonical-name gap");
 assert.match(atomic,
-  /RenameRelative\(temporary,\s*parent,\s*fileName,\s*FILE_RENAME_FLAG_REPLACE_IF_EXISTS\s*\|\s*FILE_RENAME_FLAG_POSIX_SEMANTICS\)/,
+  /RenameRelative\(temporary,\s*parent,\s*parentPath,\s*fileName,\s*FILE_RENAME_FLAG_REPLACE_IF_EXISTS\s*\|\s*FILE_RENAME_FLAG_POSIX_SEMANTICS\)/,
   "existing target is not published with one POSIX replacement operation");
-contains(atomic, "RenameRelative(temporary, parent, fileName, 0)",
+contains(atomic, "RenameRelative(temporary, parent, parentPath, fileName, 0)",
   "initially absent target no longer uses a no-replace publication");
 const targetOpen = atomic.slice(atomic.indexOf("target = TryOpenStableFile"), candidateCreate);
-assert.ok(targetOpen.includes("FILE_SHARE_READ") && !targetOpen.includes("FILE_SHARE_DELETE"),
-  "held existing target does not pin its namespace through publication");
+assert.ok(targetOpen.includes("FILE_SHARE_READ | FILE_SHARE_DELETE") &&
+  !targetOpen.includes("FILE_SHARE_WRITE"),
+  "held existing target cannot be atomically replaced or permits content mutation");
+assert.ok(!config.includes("ClearDeletePending"),
+  "atomic rollback still attempts to reverse an external delete-pending operation");
+assert.doesNotMatch(atomic, /currentTargetMissing|recovering a missing path/,
+  "atomic rollback still recreates a canonical path removed by an external namespace operation");
+contains(atomic, "Published Dream Skin config rollback is unconfirmed; the verified candidate was retained.",
+  "final publication failure does not explicitly retain the verified candidate while rollback is uncertain");
 const parentOpenStart = atomic.indexOf("parent = OpenStable");
 const parentOpen = atomic.slice(parentOpenStart, atomic.indexOf(";", parentOpenStart) + 1);
 assert.ok(parentOpen.includes("FILE_TRAVERSE | FILE_READ_ATTRIBUTES") &&
   parentOpen.includes("FILE_SHARE_READ | FILE_SHARE_WRITE") && !parentOpen.includes("FILE_SHARE_DELETE"),
   "held rename root lacks traverse access or permits namespace substitution");
+const quarantineStart = config.indexOf("public static void QuarantineExpectedFile");
+const quarantineEnd = config.indexOf("public static DreamSkinNativePathSnapshot Snapshot", quarantineStart);
+const quarantine = config.slice(quarantineStart, quarantineEnd);
+contains(quarantine, "CreateParentNamespaceLock(",
+  "state quarantine does not hold a child namespace lock while publishing its archive");
+contains(quarantine, "ResolvedPath(parent, directory)",
+  "state quarantine does not revalidate the parent identity after acquiring its child lock");
+contains(quarantine, "string parentIdentity = Identity(Inspect(parent, directory))",
+  "state quarantine does not capture the held parent file identity");
+contains(quarantine, "Identity(Inspect(currentParent, directory))",
+  "state quarantine does not compare the held parent identity with a fresh path handle");
 const constructorStart = atomic.indexOf("internal AtomicWriteTransaction");
 const constructorTry = atomic.indexOf("try", constructorStart);
 const parentAcquire = atomic.indexOf("parent = OpenStable", constructorStart);
@@ -886,11 +1012,42 @@ for (const regression of [
   "commit-identity-rollback", "commit-parent-junction-install", "commit-parent-junction-selective",
   "commit-parent-junction-exact", "commit-parent-junction-rollback", "atomic-late-creator",
   "atomic-temp-mutation", "missing-parent-guard", "commit-parent-junction-native-boundary",
-  "atomic-existing-posix-replace", "atomic-final-proof-handle-pin", "atomic-posix-rollback",
+  "atomic-existing-posix-replace", "atomic-final-proof-content-pin", "atomic-posix-rollback",
   "atomic-kill-before-commit", "atomic-kill-after-commit", "atomic-constructor-create-failure-retry",
   "missing-guard-constructor-appearance-retry", "proof-replaced-before-handle-delete",
   "proof-same-bytes-creator-compensation", "missing-config-complete-boundary", "native-long-path",
 ]) contains(matchingHostTests, regression, `matching-host config trust regression missing: ${regression}`);
+contains(windowsTests, "foreach ($constructorRaceOperation in @('move', 'delete'))",
+  "matching-host config constructor race fixture does not cover move and delete");
+contains(windowsTests, "atomic-constructor-namespace-$constructorRaceOperation",
+  "matching-host config constructor race fixture does not isolate its artifacts");
+contains(windowsTests, "DREAM_SKIN_MISSING_GUARD_INJECT",
+  "missing-path constructor fixture does not limit its appearance injection to the first attempt");
+contains(windowsTests, "$env:DREAM_SKIN_MISSING_GUARD_INJECT = $null",
+  "missing-path constructor fixture does not disable its injection before retry");
+const guardRetryStart = windowsTests.indexOf("$guardRetryRoot =");
+const guardRetryEnd = windowsTests.indexOf("$nativeParentRoot", guardRetryStart);
+assert.ok(guardRetryStart >= 0 && guardRetryEnd > guardRetryStart,
+  "missing-path constructor fixture boundaries are missing or reversed");
+const guardRetryFixture = windowsTests.slice(guardRetryStart, guardRetryEnd);
+for (const contract of [
+  "GetEnvironmentVariable", "Directory.CreateDirectory(missingPath)",
+  "$rejectionMessage = $_.Exception.ToString()",
+  "Config path component appeared during missing-config restore",
+  "if (-not (Test-Path -LiteralPath $missingComponent -PathType Container))",
+  "$missingItem = Get-Item -LiteralPath $missingComponent -Force -ErrorAction Stop",
+  "ReparsePoint",
+  "if (-not $rejected) {", "exit 41", "$env:DREAM_SKIN_MISSING_GUARD_INJECT = $null",
+  "$guard.Complete()",
+]) contains(guardRetryFixture, contract,
+  `missing-guard fixture is missing fail-closed evidence: ${contract}`);
+const guardInject = guardRetryFixture.indexOf("GetEnvironmentVariable");
+const guardReject = guardRetryFixture.indexOf("$rejectionMessage = $_.Exception.ToString()");
+const guardClear = guardRetryFixture.indexOf("$env:DREAM_SKIN_MISSING_GUARD_INJECT = $null");
+const guardRetry = guardRetryFixture.indexOf("$guard = [DreamSkinConfigNative]::HoldMissingPath");
+assert.ok(guardInject >= 0 && guardReject > guardInject && guardClear > guardReject &&
+  guardRetry > guardClear,
+  "missing-guard injection is not limited to the first constructor attempt");
 contains(windowsTests, "BeginAtomicWrite($nativeLongDirectTarget",
   "matching-host long-path fixture does not preserve its extended path into the atomic constructor");
 contains(windowsTests, "BeginAtomicWrite($nativeUncTarget",
@@ -904,15 +1061,30 @@ const nativeLongAssignment = longFixture.indexOf("$nativeLongTarget =");
 const nativeLongUse = longFixture.indexOf("[IO.File]::ReadAllBytes($nativeLongTarget)");
 assert.ok(nativeLongAssignment >= 0 && nativeLongUse > nativeLongAssignment,
   "matching-host long-path fixture uses its extended target before assignment");
-const identityFixtureStart = windowsTests.indexOf("foreach ($identityCase in @(");
+const identityFixtureStart = windowsTests.indexOf("$identityReplacementObserved = $false");
 const identityFixtureEnd = windowsTests.indexOf("$lateCreatorRoot", identityFixtureStart);
+assert.ok(identityFixtureStart >= 0 && identityFixtureEnd > identityFixtureStart,
+  "identity replacement fixture boundaries are missing or reversed");
 const identityFixture = windowsTests.slice(identityFixtureStart, identityFixtureEnd);
-contains(identityFixture, "Attempted = $false; Denied = $false; Replaced = $false; Replacement = $null",
-  "identity switch fixture does not record a denied replacement attempt and preserved external source");
-contains(identityFixture, "or $identityRejected",
-  "identity switch fixture still expects caller rejection after a denied replacement");
+for (const contract of [
+  "$identityReplacementObserved = $false",
+  "if ($raceState.Replaced) { $identityReplacementObserved = $true }",
+  "if (-not $identityReplacementObserved)",
+]) contains(identityFixture, contract,
+  `identity replacement fixture is missing successful external coverage: ${contract}`);
+for (const field of [
+  "Attempted = $false", "Denied = $false", "Replaced = $false", "Replacement = $null",
+  "ReplacementIdentity = $null", "ReplacementBytes = $null",
+]) contains(identityFixture, field,
+  `identity switch fixture does not record replacement field ${field}`);
+contains(identityFixture, "$raceState.Replaced = $true",
+  "identity switch fixture does not record a successful external replacement");
+contains(identityFixture, "$externalPreserved",
+  "identity switch fixture does not prove a successful external replacement was preserved");
+assert.doesNotMatch(identityFixture, /-not \$raceState\.Denied -or \$raceState\.Replaced/,
+  "identity switch fixture still requires the OS to deny a namespace replacement");
 const identityCandidateCheck = identityFixture.indexOf("$temporaryExists =");
-const identityReplace = identityFixture.indexOf("[IO.File]::Replace($replacement, $raceTarget, $null)");
+const identityReplace = identityFixture.indexOf("Move-Item -LiteralPath $replacement -Destination $identityConfig -Force");
 assert.ok(identityCandidateCheck >= 0 && identityReplace > identityCandidateCheck,
   "identity switch fixture can inject before BeginAtomicWrite has prepared its candidate");
 const parentFixtureStart = windowsTests.indexOf("$nativeParentRoot");
@@ -926,13 +1098,89 @@ const parentCandidateCheck = parentFixture.indexOf("$candidateExists = $null -ne
 const parentMove = parentFixture.indexOf("Move-Item -LiteralPath $configDirectory -Destination $heldDirectory", parentCandidateCheck);
 assert.ok(parentCandidateCheck >= 0 && parentMove > parentCandidateCheck,
   "parent substitution fixture does not delay its move attempt until the final commit boundary");
+const namespaceFixtureStart = windowsTests.indexOf("$posixReplaceRoot");
+const namespaceFixtureEnd = windowsTests.indexOf("$atomicChildScript", namespaceFixtureStart);
+assert.ok(namespaceFixtureStart >= 0 && namespaceFixtureEnd > namespaceFixtureStart,
+  "namespace fixture boundaries are missing or reversed");
+const namespaceFixture = windowsTests.slice(namespaceFixtureStart, namespaceFixtureEnd);
+for (const contract of [
+  "$namespaceExternalOperationObserved = $false",
+  "$namespaceExternalOperationObserved = $true",
+  "if (-not $namespaceExternalOperationObserved)",
+]) contains(namespaceFixture, contract,
+  `namespace fixture is missing successful external coverage: ${contract}`);
+contains(namespaceFixture, "foreach ($operation in @('move', 'replace', 'delete'))",
+  "namespace race fixture does not isolate each external operation");
+contains(namespaceFixture, "$namespaceExternalSucceeded",
+  "namespace race fixture does not record an allowed external namespace operation");
+contains(namespaceFixture, "$namespaceCommitRejected",
+  "namespace race fixture does not require the prepared transaction to fail closed");
+contains(namespaceFixture, "$namespaceExternalPreserved",
+  "namespace race fixture does not prove a successful external operation was preserved");
+contains(namespaceFixture, "Move-Item -LiteralPath $namespaceAuxiliary -Destination $namespacePath -Force",
+  "namespace race fixture uses an unsupported PowerShell 5.1 File.Replace overload");
+contains(namespaceFixture, "$namespaceCommitError -notmatch 'rollback-unconfirmed'",
+  "namespace race fixture does not require rollback uncertainty after an external operation");
+assert.doesNotMatch(namespaceFixture, /\$namespaceRestored|ClearDeletePending/,
+  "namespace race fixture still expects the transaction to reverse an external move or delete");
+contains(namespaceFixture, "(candidate|tmp|lock)",
+  "namespace race fixture does not detect leaked parent namespace locks");
+contains(namespaceFixture, "Invoke-AtomicNamespaceProbe -Operation 'write'",
+  "final publication fixture no longer checks that ordinary writes remain blocked");
+contains(namespaceFixture, "foreach ($operation in @('move', 'delete'))",
+  "final publication fixture does not check namespace move/delete denial after publish");
+contains(namespaceFixture, "$atomicFinalSnapshot.Identity",
+  "final publication fixture does not pin the published canonical identity through Dispose");
+contains(namespaceFixture, "$atomicFinalArtifacts",
+  "final publication fixture does not check child artifact cleanup");
+assert.doesNotMatch(namespaceFixture, /foreach \(\$operation in @\('write', 'move', 'replace', 'delete'\)\)/,
+  "final publication fixture still assumes DELETE sharing blocks namespace operations");
+const constructorNamespaceStart = windowsTests.indexOf("foreach ($constructorRaceOperation in @('move', 'delete'))");
+const constructorNamespaceEnd = windowsTests.indexOf("$proofDeleteRoot", constructorNamespaceStart);
+assert.ok(constructorNamespaceStart >= 0 && constructorNamespaceEnd > constructorNamespaceStart,
+  "constructor namespace fixture boundaries are missing or reversed");
+const constructorNamespaceFixture = windowsTests.slice(constructorNamespaceStart, constructorNamespaceEnd);
+contains(constructorNamespaceFixture, "-not $constructorRaceExternalPreserved",
+  "constructor namespace fixture does not prove the external move or delete was preserved");
+contains(constructorNamespaceFixture, "Get-DreamSkinStableFileSnapshotCore -Path $constructorRaceTarget -AllowMissing",
+  "constructor namespace fixture cannot inspect the expected missing canonical target");
+for (const contract of [
+  "$constructorRaceMatch = [regex]::Match", "\\r?\\n",
+  "Atomic write preparation failed and original target rollback was unconfirmed",
+  "$constructorRaceChild.WaitForExit(30000)", "$constructorRaceExitCode -ne 0",
+  "Test-Path -LiteralPath $constructorRaceMarker -PathType Leaf",
+  "$constructorRaceArtifacts.Count -ne 0",
+  "$constructorRaceMoved.Identity -ceq $constructorRaceOldSnapshot.Identity",
+  "Test-DreamSkinBytesEqual -Left $constructorRaceOldBytes -Right $constructorRaceMoved.Bytes",
+  "-not $constructorRaceAfter.Exists",
+]) contains(constructorNamespaceFixture, contract,
+  `constructor namespace fixture is missing fail-closed evidence: ${contract}`);
+assert.doesNotMatch(constructorNamespaceFixture, /restore the exact original target|\$constructorRaceAfter\.Identity/,
+  "constructor namespace fixture still expects rollback to reverse an external move or delete");
 const rollbackFixtureStart = windowsTests.indexOf("$rollbackRoot");
 const rollbackFixtureEnd = windowsTests.indexOf("$constructorRoot", rollbackFixtureStart);
 const rollbackFixture = windowsTests.slice(rollbackFixtureStart, rollbackFixtureEnd);
 contains(rollbackFixture, "atomic-posix-rollback final publication marker",
   "rollback fixture does not use a local final-publication marker");
+contains(rollbackFixture, "AddSeconds(30)",
+  "rollback fixture can wait forever on a hung child process");
+contains(rollbackFixture, "Stop-Process -Id $rollbackChild.Id -Force",
+  "rollback fixture does not terminate a hung child process");
+contains(rollbackFixture, "$rollbackExitCode = 124",
+  "rollback fixture does not fail closed when its child times out");
+contains(rollbackFixture, "-not $transaction.RollbackConfirmed",
+  "rollback fixture does not require explicit rollback uncertainty after final publication");
+contains(rollbackFixture, "rollback-unconfirmed",
+  "rollback fixture does not require the production rollback-unconfirmed error");
 assert.ok(!rollbackFixture.includes("$rollbackSource.Replace($rollbackNeedle"),
   "rollback fixture replaces every AssertCommitted occurrence instead of the final publication proof");
+for (const contract of [
+  "$transaction.RollbackConfirmed",
+  "$rollbackAfter.Identity -ceq $rollbackOldSnapshot.Identity",
+  "Test-DreamSkinBytesEqual -Left $rollbackNewBytes -Right $rollbackAfter.Bytes",
+  "rollbackArtifacts",
+  "(candidate|tmp|lock)",
+]) contains(rollbackFixture, contract, `rollback fixture does not prove ${contract}`);
 const installBaseStart = config.indexOf("function Install-DreamSkinBaseTheme");
 const installBaseEnd = config.indexOf("function Restore-DreamSkinBaseTheme", installBaseStart);
 const installBase = config.slice(installBaseStart, installBaseEnd);
@@ -1248,6 +1496,20 @@ releaseSecurityContract("C2 one-open Node archive", () => {
     "Node replacement regression does not exercise both archive branches");
   contains(windowsTests, 'node-$mode-replace-after-hash',
     "Node replacement regression does not retain a deterministic post-hash scenario");
+  contains(windowsTests, "[IO.Compression.ZipArchive]::new(",
+    "Node archive fixture does not create ZIP-standard entries directly");
+  contains(windowsTests, "node-v22.23.1-win-x64/node.exe",
+    "Node archive fixture does not use forward-slash entry names");
+  assert.doesNotMatch(windowsTests, /Compress-Archive\s+-LiteralPath\s+\$archiveTop/,
+    "Node archive fixture relies on PowerShell's non-standard backslash entries");
+  contains(windowsTests, "$mutatedPayloadExit",
+    "PowerShell 5.1 expected payload failure does not capture its exit state");
+  contains(windowsTests, "$oversizedPayloadExit",
+    "PowerShell 5.1 oversized-image failure does not capture its exit state");
+  contains(injectorOneShotTest, 'from "node:os"',
+    "Windows injector one-shot test does not use the host temporary directory API");
+  contains(injectorOneShotTest, "os.tmpdir()",
+    "Windows injector one-shot test still hardcodes a Unix temporary path");
 });
 
 releaseSecurityContract("I1 aggregate release isolation", () => {
@@ -1285,8 +1547,24 @@ releaseSecurityContract("I3 immutable same-version target", () => {
 });
 
 releaseSecurityContract("I4 Windows floor", () => {
-  assert.match(inno, /^MinVersion=10\.0\.17763$/m,
-    "Inno does not enforce the WPF Windows 10 build 17763 floor");
+  const studioProject = read("windows/studio/CodexDreamSkinStudio.csproj");
+  const targetFramework = studioProject.match(
+    /<TargetFramework>net\d+\.\d+-windows(\d+\.\d+\.\d+)\.0<\/TargetFramework>/,
+  );
+  assert.ok(targetFramework,
+    "Studio target framework does not declare an exact Windows build floor");
+  const setupStart = inno.indexOf("[Setup]");
+  const setupEnd = inno.indexOf("\n[Files]", setupStart);
+  assert.ok(setupStart >= 0 && setupEnd > setupStart,
+    "Inno Setup section is not delimited");
+  const setupSection = inno.slice(setupStart, setupEnd);
+  const minimumVersions = [...setupSection.matchAll(/^MinVersion=(\d+\.\d+\.\d+)$/gm)];
+  assert.equal(minimumVersions.length, 1,
+    "Inno must declare one Setup/uninstaller Windows build floor");
+  assert.equal(minimumVersions[0][1], targetFramework[1],
+    "Inno Setup/uninstaller Windows floor differs from the WPF target framework");
+  assert.equal(minimumVersions[0][1], "10.0.17763",
+    "Inno does not enforce the verified Windows 10 build 17763 floor");
 });
 
 releaseSecurityContract("I5 exact asset stage", () => {

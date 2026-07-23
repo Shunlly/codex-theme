@@ -134,19 +134,19 @@ try {
       throw 'The retained managed CDP recovery identity no longer matches a registered Codex package.'
     }
     $managedRecoveryProcesses = @(Get-DreamSkinCodexProcessesStrict -Codex $savedCodex)
-    $managedCurrentProcesses = if ($null -eq $currentCodex -or
+    $managedCurrentProcesses = @(if ($null -eq $currentCodex -or
       (Test-DreamSkinPathEqual -Left $currentCodex.Executable -Right $savedCodex.Executable)) {
       $managedRecoveryProcesses
     } else {
-      @(Get-DreamSkinCodexProcessesStrict -Codex $currentCodex)
-    }
+      Get-DreamSkinCodexProcessesStrict -Codex $currentCodex
+    })
     $managedRecoveryListeners = @(Get-DreamSkinPortListenersStrict -Port $Port)
   }
   $candidateMatchesCurrent = [bool]($null -ne $savedPathCandidate -and $null -ne $currentCodex -and
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.PackageRoot -Right $currentCodex.PackageRoot) -and
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.Executable -Right $currentCodex.Executable))
   if ($null -ne $savedPathCandidate -and $null -eq $savedCodex -and -not $candidateMatchesCurrent) {
-    $unverifiedSavedRunning = (Get-DreamSkinCodexProcesses -Codex $savedPathCandidate).Count -gt 0
+    $unverifiedSavedRunning = @(Get-DreamSkinCodexProcesses -Codex $savedPathCandidate).Count -gt 0
     $unverifiedSavedOwnsPort = Test-DreamSkinCodexPortOwner -Port $Port -Codex $savedPathCandidate
     if ($unverifiedSavedRunning -or $unverifiedSavedOwnsPort) {
       throw 'The saved Codex path is still active but no longer matches a registered OpenAI.Codex package. Close it manually; state and configuration were preserved.'
@@ -157,18 +157,18 @@ try {
   $currentRunning = if ($managedCdpRecovery) {
     $managedCurrentProcesses.Count -gt 0
   } else {
-    $null -ne $currentCodex -and (Get-DreamSkinCodexProcesses -Codex $currentCodex).Count -gt 0
+    $null -ne $currentCodex -and @(Get-DreamSkinCodexProcesses -Codex $currentCodex).Count -gt 0
   }
   $damagedRunningCodexInstalls = @()
   if ($RecoverDamagedState) {
     $damagedRunningCodexInstalls = @($registeredCodexInstalls | Where-Object {
-      (Get-DreamSkinCodexProcesses -Codex $_).Count -gt 0
+      @(Get-DreamSkinCodexProcesses -Codex $_).Count -gt 0
     })
   }
   $savedRunning = if ($managedCdpRecovery) {
     $managedRecoveryProcesses.Count -gt 0
   } else {
-    $null -ne $savedCodex -and (Get-DreamSkinCodexProcesses -Codex $savedCodex).Count -gt 0
+    $null -ne $savedCodex -and @(Get-DreamSkinCodexProcesses -Codex $savedCodex).Count -gt 0
   }
   $savedOwnsPort = if ($managedCdpRecovery) {
     $managedRecoveryListeners.Count -gt 0
@@ -197,7 +197,7 @@ try {
       $managedRecoveryProcesses.Count -gt 0
     }
   } else {
-    $null -ne $codex -and (Get-DreamSkinCodexProcesses -Codex $codex).Count -gt 0
+    $null -ne $codex -and @(Get-DreamSkinCodexProcesses -Codex $codex).Count -gt 0
   }
   $portOwnedByCodex = if ($managedCdpRecovery) {
     $managedRecoveryListeners.Count -gt 0
@@ -305,15 +305,15 @@ try {
     }
     if ($null -ne $statePathGuard) { $statePathGuard.AssertUnchanged() }
     if ($managedCdpRecovery) {
-      if ((Get-DreamSkinCodexProcessesStrict -Codex $savedCodex).Count -ne 0) {
+      if (@(Get-DreamSkinCodexProcessesStrict -Codex $savedCodex).Count -ne 0) {
         throw 'The saved Codex process appeared or remained before retained startup recovery mutation.'
       }
       if ($null -ne $currentCodex -and
         -not (Test-DreamSkinPathEqual -Left $currentCodex.Executable -Right $savedCodex.Executable) -and
-        (Get-DreamSkinCodexProcessesStrict -Codex $currentCodex).Count -ne 0) {
+        @(Get-DreamSkinCodexProcessesStrict -Codex $currentCodex).Count -ne 0) {
         throw 'The current Codex process appeared or remained before retained startup recovery mutation.'
       }
-      if ((Get-DreamSkinPortListenersStrict -Port $Port).Count -ne 0) {
+      if (@(Get-DreamSkinPortListenersStrict -Port $Port).Count -ne 0) {
         throw "Port $Port appeared or remained before retained startup recovery mutation."
       }
     }

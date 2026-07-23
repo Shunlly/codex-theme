@@ -145,12 +145,6 @@ function render(spec) {
 
 // ---- preset specs -----------------------------------------------------------
 
-const PROMO = {
-  promoTitle: "感谢 Passion8 赞助",
-  promoSub: "passion8.cc",
-  promoUrl: "https://passion8.cc/register?aff=TuPe",
-};
-
 const PRESETS = [
   {
     slug: "midnight-aurora",
@@ -268,7 +262,6 @@ function themeFor(spec) {
     quote: spec.quote,
     image: "background.jpg",
     colors: spec.colors,
-    ...PROMO,
   };
 }
 

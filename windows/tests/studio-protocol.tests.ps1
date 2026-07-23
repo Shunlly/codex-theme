@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +11,7 @@ $adapterPath = Join-Path $scriptsRoot 'studio-adapter.ps1'
 $nodePath = Join-Path $engineRoot 'runtime\node.exe'
 $injectorPath = Join-Path $scriptsRoot 'injector.mjs'
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
+. (Join-Path $Root 'scripts\config-utf8.ps1')
 
 function Get-StateSnapshot {
   param([Parameter(Mandatory = $true)][string]$Root)
@@ -23,9 +24,10 @@ function Get-StateSnapshot {
 
 function Assert-Equal {
   param([object]$Actual, [object]$Expected, [string]$Message)
-  if ((ConvertTo-Json -InputObject @($Actual) -Compress -Depth 8) -cne
-    (ConvertTo-Json -InputObject @($Expected) -Compress -Depth 8)) {
-    throw $Message
+  $actualJson = ConvertTo-Json -InputObject @($Actual) -Compress -Depth 8
+  $expectedJson = ConvertTo-Json -InputObject @($Expected) -Compress -Depth 8
+  if ($actualJson -cne $expectedJson) {
+    throw "$Message Expected: $expectedJson. Actual: $actualJson."
   }
 }
 
@@ -145,6 +147,7 @@ function Start-StudioProcess {
   $savedScenario = $env:DREAM_SKIN_TEST_SCENARIO
   $savedInjector = $env:DREAM_SKIN_TEST_INJECTOR
   $savedSignal = $env:DREAM_SKIN_TEST_SIGNAL
+  $savedRelease = $env:DREAM_SKIN_TEST_RELEASE
   $savedArgv = $env:DREAM_SKIN_TEST_ARGV
   $savedStateTemplate = $env:DREAM_SKIN_TEST_STATE_TEMPLATE
   $savedRendererTrace = $env:DREAM_SKIN_TEST_RENDERER_TRACE
@@ -155,6 +158,7 @@ function Start-StudioProcess {
     $env:DREAM_SKIN_TEST_SCENARIO = $Scenario
     $env:DREAM_SKIN_TEST_INJECTOR = $injectorPath
     $env:DREAM_SKIN_TEST_SIGNAL = Join-Path $Case.Root 'probe-entered'
+    $env:DREAM_SKIN_TEST_RELEASE = Join-Path $Case.Root 'probe-release'
     $env:DREAM_SKIN_TEST_ARGV = $Case.ArgvPath
     $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $Case.StateTemplate
     $env:DREAM_SKIN_TEST_RENDERER_TRACE = Join-Path $Case.Root 'renderer-trace.txt'
@@ -164,12 +168,15 @@ function Start-StudioProcess {
     if ($ExtraArguments.Count -gt 0) { $argumentLine += ' ' + ($ExtraArguments -join ' ') }
     $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentLine -PassThru `
       -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    # Windows PowerShell 5.1 needs an open handle to retain a fast child's exit code.
+    $null = $process.Handle
   } finally {
     $env:LOCALAPPDATA = $savedLocalAppData
     $env:USERPROFILE = $savedUserProfile
     $env:DREAM_SKIN_TEST_SCENARIO = $savedScenario
     $env:DREAM_SKIN_TEST_INJECTOR = $savedInjector
     $env:DREAM_SKIN_TEST_SIGNAL = $savedSignal
+    $env:DREAM_SKIN_TEST_RELEASE = $savedRelease
     $env:DREAM_SKIN_TEST_ARGV = $savedArgv
     $env:DREAM_SKIN_TEST_STATE_TEMPLATE = $savedStateTemplate
     $env:DREAM_SKIN_TEST_RENDERER_TRACE = $savedRendererTrace
@@ -235,11 +242,11 @@ function Assert-StudioResult {
     [string]$Codex,
     [string]$Session,
     [string]$OperationState = 'idle',
-    [AllowNull()][string]$ThemeName,
+    [AllowNull()][object]$ThemeName,
     [bool]$RequiresRestart,
     [AllowNull()][Nullable[bool]]$Verified,
     [string[]]$AvailableActions,
-    [AllowNull()][string]$ErrorCode,
+    [AllowNull()][object]$ErrorCode,
     [string[]]$RecoveryActions = @()
   )
   $envelope = $Result.Envelope
@@ -250,13 +257,14 @@ function Assert-StudioResult {
     $envelope.state.codex -cne $Codex -or $envelope.state.session -cne $Session -or
     $envelope.state.operation -cne $OperationState -or $envelope.state.themeName -cne $ThemeName -or
     $envelope.state.requiresRestart -ne $RequiresRestart -or $envelope.state.verified -ne $Verified) {
-    throw "Unexpected Studio state for $Operation/$Session."
+    throw "Unexpected Studio state for $Operation/$Session. Expected exit=$ExitCode, ok=$Ok, install=$Install, codex=$Codex, operationState=$OperationState, themeName=$ThemeName, requiresRestart=$RequiresRestart, verified=$Verified. Actual exit=$($Result.ExitCode): $($Result.Raw)"
   }
   Assert-Equal @($envelope.state.availableActions) @($AvailableActions) 'Unexpected available actions.'
   if ($null -eq $ErrorCode) {
     if ($null -ne $envelope.error) { throw 'Successful Studio envelope contains an error.' }
   } else {
-    Assert-Equal @($envelope.error.PSObject.Properties.Name | Sort-Object) @('code', 'message', 'recoveryActions') 'Unexpected error keys.'
+    Assert-Equal @($envelope.error.PSObject.Properties.Name | Sort-Object) @('code', 'message', 'recoveryActions') `
+      "Unexpected error keys for $Operation/$Session. Raw: $($Result.Raw)"
     if ($envelope.error.code -cne $ErrorCode) { throw "Unexpected error code: $($envelope.error.code)" }
     Assert-Equal @($envelope.error.recoveryActions) @($RecoveryActions) 'Unexpected recovery actions.'
   }
@@ -467,7 +475,14 @@ Write-Output "child stdout $name"
 $scenario = $env:DREAM_SKIN_TEST_SCENARIO
 if ($scenario -eq 'lifecycle-lock-hold') {
   [IO.File]::WriteAllText($env:DREAM_SKIN_TEST_SIGNAL, 'child-entered')
-  Start-Sleep -Milliseconds 1500
+  $releaseDeadline = [DateTime]::UtcNow.AddSeconds(30)
+  while ([DateTime]::UtcNow -lt $releaseDeadline -and
+    -not (Test-Path -LiteralPath $env:DREAM_SKIN_TEST_RELEASE -PathType Leaf)) {
+    Start-Sleep -Milliseconds 25
+  }
+  if (-not (Test-Path -LiteralPath $env:DREAM_SKIN_TEST_RELEASE -PathType Leaf)) {
+    throw 'Lifecycle lock fixture was not released by its parent.'
+  }
 }
 if ($scenario -like '*-timeout') {
   throw 'Codex did not close within 15 seconds. Close it manually or explicitly authorize a forced restart.'
@@ -580,6 +595,7 @@ function Enter-DreamSkinOperationLock {
   return $mutex
 }
 function Exit-DreamSkinOperationLock { param([Threading.Mutex]$Mutex) try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() } }
+function Remove-DreamSkinManagedLegacyShortcuts {}
 function New-TestCodexInstall {
   param([string]$Name, [string]$Version)
   $root = "C:\Program Files\WindowsApps\$Name"
@@ -1075,14 +1091,14 @@ function Read-DreamSkinState {
   if ($env:DREAM_SKIN_TEST_SCENARIO -like 'real-pause*' -or
     $env:DREAM_SKIN_TEST_SCENARIO -like 'resume-rollback-*' -or
     $env:DREAM_SKIN_TEST_SCENARIO -like '*-prior-state-fail') {
+    $codex = New-RealLifecycleCodex
     return [pscustomobject]@{
       schemaVersion = 3; platform = 'windows'; port = 9335; injectorPid = 4242
       injectorStartedAt = '2026-01-01T00:00:00.0000000Z'
       injectorPath = (Join-Path $PSScriptRoot 'injector.mjs'); nodePath = $env:DREAM_SKIN_REAL_NODE
-      codexExe = 'C:\Program Files\WindowsApps\OpenAI.Codex.Test\app\ChatGPT.exe'
-      codexPackageRoot = 'C:\Program Files\WindowsApps\OpenAI.Codex.Test'
-      codexPackageFullName = 'OpenAI.Codex_2.0.0.0_x64__test'
-      codexPackageFamilyName = 'OpenAI.Codex_test'; browserId = 'browser-123'
+      codexExe = $codex.Executable; codexPackageRoot = $codex.PackageRoot
+      codexPackageFullName = $codex.PackageFullName
+      codexPackageFamilyName = $codex.PackageFamilyName; browserId = 'browser-123'
     }
   }
   return $null
@@ -1350,7 +1366,7 @@ function Get-CimInstance {
     if ($scenario -eq 'damaged-recovery-mismatched-watcher') {
       return [pscustomobject]@{
         ProcessId = 8102
-        ExecutablePath = $env:DREAM_SKIN_REAL_NODE
+        ExecutablePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime\node.exe'
         CommandLine = '"C:\Other\node.exe" "C:\Other\foreign.mjs" --watch'
       }
     }
@@ -1779,6 +1795,7 @@ function Invoke-RealLifecycle {
       $argumentLine = (@($tokens | ForEach-Object { '"' + "$_" + '"' })) -join ' '
       $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentLine -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+      $null = $process.Handle
     } finally {
       foreach ($name in $savedEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name])
@@ -1802,9 +1819,21 @@ function Assert-TraceOrder {
   param([string[]]$Trace, [string[]]$Expected, [string]$Message)
   $previous = -1
   foreach ($token in $Expected) {
-    $index = [Array]::IndexOf($Trace, $token)
-    if ($index -le $previous) { throw "$Message Missing or out of order: $token" }
+    $index = [Array]::IndexOf($Trace, $token, $previous + 1)
+    if ($index -lt 0) {
+      throw "$Message Missing or out of order: $token. Trace=$($Trace -join '|')"
+    }
     $previous = $index
+  }
+}
+
+function Test-StudioFixturePathEqual {
+  param([string]$Left, [string]$Right)
+  try {
+    return [IO.Path]::GetFullPath($Left).Equals(
+      [IO.Path]::GetFullPath($Right), [StringComparison]::OrdinalIgnoreCase)
+  } catch {
+    return $false
   }
 }
 
@@ -1828,16 +1857,16 @@ function Assert-RealStartRollbackState {
   $expectedPause = Join-Path $Case.StateRoot 'paused'
   if ($state.schemaVersion -ne 3 -or "$($state.platform)" -cne 'windows' -or $state.port -ne 9335 -or
     $state.injectorPid -ne 7000 -or "$($state.injectorStartedAt)" -cne '2026-01-01T00:00:00.0000000Z' -or
-    -not (Test-DreamSkinPathEqual -Left "$($state.injectorPath)" -Right $expectedInjector) -or
-    -not (Test-DreamSkinPathEqual -Left "$($state.nodePath)" -Right $nodePath) -or
+    -not (Test-StudioFixturePathEqual -Left "$($state.injectorPath)" -Right $expectedInjector) -or
+    -not (Test-StudioFixturePathEqual -Left "$($state.nodePath)" -Right $nodePath) -or
     "$($state.nodeVersion)" -cne '22.23.1' -or
-    -not (Test-DreamSkinPathEqual -Left "$($state.codexExe)" -Right $Case.CodexExecutable) -or
-    -not (Test-DreamSkinPathEqual -Left "$($state.codexPackageRoot)" -Right (Split-Path -Parent $Case.CodexExecutable)) -or
+    -not (Test-StudioFixturePathEqual -Left "$($state.codexExe)" -Right $Case.CodexExecutable) -or
+    -not (Test-StudioFixturePathEqual -Left "$($state.codexPackageRoot)" -Right (Split-Path -Parent $Case.CodexExecutable)) -or
     "$($state.codexPackageFullName)" -cne 'OpenAI.Codex_2.0.0.0_x64__test' -or
     "$($state.codexPackageFamilyName)" -cne 'OpenAI.Codex_test' -or "$($state.codexVersion)" -cne '2.0.0.0' -or
     "$($state.browserId)" -cne 'browser-123' -or
-    -not (Test-DreamSkinPathEqual -Left "$($state.themeDir)" -Right $expectedTheme) -or
-    -not (Test-DreamSkinPathEqual -Left "$($state.pauseFile)" -Right $expectedPause)) {
+    -not (Test-StudioFixturePathEqual -Left "$($state.themeDir)" -Right $expectedTheme) -or
+    -not (Test-StudioFixturePathEqual -Left "$($state.pauseFile)" -Right $expectedPause)) {
     throw "$Message Retained state lost its exact cleanup identity."
   }
   if ($Paused -and -not (Test-Path -LiteralPath $expectedPause -PathType Leaf)) {
@@ -1935,7 +1964,7 @@ try {
     $malformed = New-CaseRoot -Name $malformedDefinition.Name -NoState
     $malformedBackup = Join-Path $malformed.StateRoot 'config.before-dream-skin.toml'
     if ($malformedDefinition.Marker) {
-      [IO.File]::WriteAllText((Get-DreamSkinAppearanceMarkerPath -BackupPath $malformedBackup), '{}', $utf8NoBom)
+      [IO.File]::WriteAllText("$malformedBackup.appearance.json", '{}', $utf8NoBom)
     } else {
       [IO.File]::WriteAllBytes($malformedBackup, [byte[]](0x66, 0x6f, 0x80))
     }
@@ -2219,18 +2248,26 @@ try {
   $lockContender = New-CaseRoot -Name 'lifecycle-lock-contender' -NoState
   $lockInvocation = Start-StudioProcess -Case $lockOwner -Scenario 'lifecycle-lock-hold' -Operation 'install'
   $lockSignal = Join-Path $lockOwner.Root 'probe-entered'
-  $deadline = (Get-Date).AddSeconds(4)
+  $deadline = (Get-Date).AddSeconds(15)
   while ((Get-Date) -lt $deadline -and -not (Test-Path -LiteralPath $lockSignal -PathType Leaf)) {
     Start-Sleep -Milliseconds 25
   }
-  if (-not (Test-Path -LiteralPath $lockSignal -PathType Leaf)) { throw 'Lifecycle child did not enter while the adapter held the operation lock.' }
-  $contenderResult = Invoke-Studio -Case $lockContender -Scenario 'stopped' -Operation 'install'
-  Assert-StudioResult -Result $contenderResult -Operation 'install' -ExitCode 1 -Ok $false `
-    -Install 'not-installed' -Codex 'not-installed' -Session 'official' -OperationState 'busy' `
-    -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @() `
-    -ErrorCode 'OPERATION_BUSY' -RecoveryActions @('retry', 'cancel')
-  Assert-NoChildOrLog -Case $lockContender
-  $lockOwnerResult = Complete-StudioProcess -Invocation $lockInvocation
+  if (-not (Test-Path -LiteralPath $lockSignal -PathType Leaf)) {
+    $timedOutLockOwner = Complete-StudioProcess -Invocation $lockInvocation
+    throw "Lifecycle child did not enter while the adapter held the operation lock. Exit=$($timedOutLockOwner.ExitCode); Raw=$($timedOutLockOwner.Raw)"
+  }
+  $lockRelease = Join-Path $lockOwner.Root 'probe-release'
+  try {
+    $contenderResult = Invoke-Studio -Case $lockContender -Scenario 'stopped' -Operation 'install'
+    Assert-StudioResult -Result $contenderResult -Operation 'install' -ExitCode 1 -Ok $false `
+      -Install 'not-installed' -Codex 'not-installed' -Session 'official' -OperationState 'busy' `
+      -ThemeName $null -RequiresRestart $false -Verified $null -AvailableActions @() `
+      -ErrorCode 'OPERATION_BUSY' -RecoveryActions @('retry', 'cancel')
+    Assert-NoChildOrLog -Case $lockContender
+  } finally {
+    [IO.File]::WriteAllText($lockRelease, 'release', $utf8NoBom)
+    $lockOwnerResult = Complete-StudioProcess -Invocation $lockInvocation
+  }
   if ($lockOwnerResult.ExitCode -ne 0) { throw 'Lifecycle lock owner failed after its child completed.' }
 
   $installForce = New-CaseRoot -Name 'install-force' -NoState
@@ -2854,7 +2891,7 @@ try {
     -Scenario 'real-install-unauthorized' -Arguments @('-NoShortcuts', '-NodePath', $nodePath)
   if ($realResult.ExitCode -eq 0 -or $realResult.Trace -contains 'stop:False' -or
     $realResult.Trace -contains 'ensure' -or $realResult.Trace -contains 'install-config') {
-    throw 'Production install mutated or stopped Codex without close authorization.'
+    throw "Production install mutated or stopped Codex without close authorization. Exit=$($realResult.ExitCode); Trace=$($realResult.Trace -join '|'); Stderr=$($realResult.Stderr)"
   }
 
   $realInstallTimeout = New-RealLifecycleCase -Name 'install-timeout'
@@ -3018,7 +3055,7 @@ try {
           $realResult.Trace -contains 'strict-listener:19473' -or
           ($expectRelaunch -and $realResult.Trace -notcontains 'start-official:current') -or
           (-not $expectRelaunch -and $realResult.Trace -contains 'start-official')) {
-          throw "$scenario mishandled prior watcher or pre-launch closed-session authority."
+          throw "$scenario mishandled prior watcher or pre-launch closed-session authority. Exit=$($realResult.ExitCode); Trace=$($realResult.Trace -join '|'); Stdout=$($realResult.Stdout); Stderr=$($realResult.Stderr)"
         }
         Assert-Equal $strictIdentities $expectedStrictIdentities `
           "$scenario did not scan the exact closed identity and distinct current identity in order."
@@ -3487,13 +3524,14 @@ try {
         if ($initialState -ceq 'missing') {
           Microsoft.PowerShell.Management\Remove-Item -LiteralPath $statePath -Force
         } else {
-          $codex = New-RealLifecycleCodex
           $initial = [ordered]@{
             schemaVersion = 3; platform = 'windows'; port = 9335; injectorPid = 4242
             injectorStartedAt = '2026-01-01T00:00:00.0000000Z'
             injectorPath = (Join-Path $realScripts 'injector.mjs'); nodePath = $nodePath
-            codexExe = $codex.Executable; codexPackageRoot = $codex.PackageRoot
-            codexPackageFullName = $codex.PackageFullName; codexPackageFamilyName = $codex.PackageFamilyName
+            codexExe = $transition.CodexExecutable
+            codexPackageRoot = Split-Path -Parent $transition.CodexExecutable
+            codexPackageFullName = 'OpenAI.Codex_2.0.0.0_x64__test'
+            codexPackageFamilyName = 'OpenAI.Codex_test'
             browserId = 'browser-123'
           }
           [IO.File]::WriteAllText($statePath, ($initial | ConvertTo-Json -Compress), $utf8NoBom)
@@ -3597,7 +3635,9 @@ try {
   $realPause = New-RealLifecycleCase -Name 'pause-order'
   $realResult = Invoke-RealLifecycle -Case $realPause -ScriptName 'pause-dream-skin.ps1' `
     -Scenario 'real-pause' -Arguments @('-NodePath', $nodePath)
-  if ($realResult.ExitCode -ne 0) { throw 'Production pause fixture failed.' }
+  if ($realResult.ExitCode -ne 0) {
+    throw "Production pause fixture failed. Exit=$($realResult.ExitCode); Trace=$($realResult.Trace -join '|'); Stdout=$($realResult.Stdout); Stderr=$($realResult.Stderr)"
+  }
   Assert-TraceOrder -Trace $realResult.Trace `
     -Expected @('codex-process', 'cdp', 'injector-identity', 'watcher-stop', 'remove', 'marker') `
     -Message 'Production pause did not validate, stop, remove, then mark.'
@@ -3621,15 +3661,23 @@ try {
     $realResult = Invoke-RealLifecycle -Case $damagedRecovery -ScriptName 'restore-dream-skin.ps1' `
       -Scenario $definition.Name -Arguments $definition.Arguments
     $quarantines = @(Get-ChildItem -LiteralPath $damagedRecovery.StateRoot -Filter 'state.stale-*.json' -File)
-    if ($realResult.ExitCode -ne 0 -or [IO.File]::ReadAllText($configPath) -cne 'restored' -or
-      (Test-Path -LiteralPath $statePath) -or $quarantines.Count -ne 1 -or
-      [Convert]::ToBase64String([IO.File]::ReadAllBytes($quarantines[0].FullName)) -cne
-        [Convert]::ToBase64String($stateBytes) -or
-      (Test-Path -LiteralPath (Join-Path $damagedRecovery.StateRoot 'config.before-dream-skin.toml')) -or
-      @($realResult.Trace | Where-Object { $_ -ceq 'watcher-scan' }).Count -ne 2 -or
+    $configContent = if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+      [IO.File]::ReadAllText($configPath)
+    } else { '<missing>' }
+    $stateExists = Test-Path -LiteralPath $statePath
+    $backupExists = Test-Path -LiteralPath (Join-Path $damagedRecovery.StateRoot 'config.before-dream-skin.toml')
+    $watcherScans = @($realResult.Trace | Where-Object { $_ -ceq 'watcher-scan' }).Count
+    $quarantineMatches = $false
+    if ($quarantines.Count -eq 1) {
+      $quarantineMatches = [Convert]::ToBase64String([IO.File]::ReadAllBytes($quarantines[0].FullName)) -ceq
+        [Convert]::ToBase64String($stateBytes)
+    }
+    if ($realResult.ExitCode -ne 0 -or $configContent -cne 'restored' -or
+      $stateExists -or $quarantines.Count -ne 1 -or -not $quarantineMatches -or $backupExists -or
+      $watcherScans -ne 2 -or
       $realResult.Trace -notcontains 'state-archive' -or $realResult.Trace -contains 'watcher-stop' -or
       $realResult.Trace -contains 'stop-process') {
-      throw "$($definition.Name) did not prove watcher absence and quarantine exact malformed state."
+      throw "$($definition.Name) did not prove watcher absence and quarantine exact malformed state. Exit=$($realResult.ExitCode); Config=$configContent; StateExists=$stateExists; Quarantines=$($quarantines.Count); QuarantineMatches=$quarantineMatches; BackupExists=$backupExists; WatcherScans=$watcherScans; Trace=$($realResult.Trace -join '|'); Stdout=$($realResult.Stdout); Stderr=$($realResult.Stderr)"
     }
   }
 
